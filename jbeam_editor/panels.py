@@ -134,9 +134,15 @@ class JBEAM_EDITOR_PT_jbeam_panel(bpy.types.Panel):
 
             # Scroll to Definition Button
             # Only enable if exactly one node or one beam is selected
+            # <<< MODIFIED: Separate rail search condition from beam selection >>>
             row = col.row()
-            row.enabled = len_selected_verts == 1 or len_selected_beams == 1
+            is_rail_search_enabled = len_selected_verts == 2 and ui_props.find_jump_to_rail_on_2_nodes
+            # Enable if one node is selected, or one beam is selected (and not doing a rail search), or if rail search is active.
+            row.enabled = len_selected_verts == 1 or (len_selected_beams == 1 and not is_rail_search_enabled) or is_rail_search_enabled
+            # <<< END MODIFIED >>>
             row.operator(JBEAM_EDITOR_OT_scroll_to_definition.bl_idname, text=" Find and Jump to (Text Editor)", icon='FOLDER_REDIRECT')
+            # Add the new toggle for rail finding
+            col.row().prop(ui_props, 'find_jump_to_rail_on_2_nodes')
             col.separator() # Add separator after the button
 
             if len_selected_verts == 1:
@@ -628,57 +634,59 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
                     beam_vis_col.prop(ui_props, 'toggle_beams_vis')
                     row = beam_vis_col.row(); row.enabled = not is_dynamic
                     row.prop(ui_props, 'beam_color')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # <<< ADDED: Enable/disable width based on dynamic coloring
+                    row = beam_vis_col.row()
                     row.prop(ui_props, 'beam_width')
                     beam_vis_col.separator()
                     # Anisotropic Beams
                     beam_vis_col.prop(ui_props, 'toggle_anisotropic_beams_vis')
                     row = beam_vis_col.row(); row.enabled = not is_dynamic
                     row.prop(ui_props, 'anisotropic_beam_color')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row = beam_vis_col.row()
                     row.prop(ui_props, 'anisotropic_beam_width')
                     beam_vis_col.separator()
                     # Support Beams
                     beam_vis_col.prop(ui_props, 'toggle_support_beams_vis')
                     row = beam_vis_col.row(); row.enabled = not is_dynamic
                     row.prop(ui_props, 'support_beam_color')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row = beam_vis_col.row()
                     row.prop(ui_props, 'support_beam_width')
                     beam_vis_col.separator()
                     # Hydro Beams
                     beam_vis_col.prop(ui_props, 'toggle_hydro_beams_vis')
                     row = beam_vis_col.row(); row.enabled = not is_dynamic
                     row.prop(ui_props, 'hydro_beam_color')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row = beam_vis_col.row()
                     row.prop(ui_props, 'hydro_beam_width')
                     beam_vis_col.separator()
                     # Bounded Beams
                     beam_vis_col.prop(ui_props, 'toggle_bounded_beams_vis')
                     row = beam_vis_col.row(); row.enabled = not is_dynamic
                     row.prop(ui_props, 'bounded_beam_color')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row = beam_vis_col.row()
                     row.prop(ui_props, 'bounded_beam_width')
                     beam_vis_col.separator()
                     # LBeams
                     beam_vis_col.prop(ui_props, 'toggle_lbeam_beams_vis')
                     row = beam_vis_col.row(); row.enabled = not is_dynamic
                     row.prop(ui_props, 'lbeam_beam_color')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row = beam_vis_col.row()
                     row.prop(ui_props, 'lbeam_beam_width')
                     beam_vis_col.separator()
                     # Pressured Beams
                     beam_vis_col.prop(ui_props, 'toggle_pressured_beams_vis')
                     row = beam_vis_col.row(); row.enabled = not is_dynamic
                     row.prop(ui_props, 'pressured_beam_color')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row = beam_vis_col.row()
                     row.prop(ui_props, 'pressured_beam_width')
                     beam_vis_col.separator()
                     # Cross-Part Beams
                     beam_vis_col.prop(ui_props, 'toggle_cross_part_beams_vis')
                     row = beam_vis_col.row(); row.enabled = not is_dynamic
                     row.prop(ui_props, 'cross_part_beam_color')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row = beam_vis_col.row()
                     row.prop(ui_props, 'cross_part_beam_width')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'use_generic_cross_part_beam_color')
                     # --- End Beam Type Settings ---
 
                 # --- Torsionbar, Rail Visualization (Remain outside Beam Vis sub-section) ---

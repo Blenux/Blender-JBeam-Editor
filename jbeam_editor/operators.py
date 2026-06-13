@@ -31,7 +31,7 @@ from . import text_editor
 from . import globals as jb_globals # Import globals
 # Import drawing module and specific elements needed
 from . import drawing, properties # <<< ADDED: Import drawing and properties modules
-from .drawing import refresh_curr_vdata, find_node_line_number, find_beam_line_number, _scroll_editor_to_line, _tag_redraw_3d_views # Import drawing functions
+from .drawing import refresh_curr_vdata, find_node_line_number, find_beam_line_number, find_rail_line_number, _scroll_editor_to_line, _tag_redraw_3d_views # Import drawing functions
 from .text_editor import _to_short_filename # <<< ADDED: Import helper
 # <<< MODIFIED: Import utils and text_editor >>>
 from . import utils
@@ -489,12 +489,17 @@ class JBEAM_EDITOR_OT_scroll_to_definition(bpy.types.Operator):
                 obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None and
                 obj.data.get(constants.MESH_EDITING_ENABLED, False)):
             return False
+
+        ui_props = context.scene.ui_properties
+        len_selected_nodes = len(jb_globals.selected_nodes)
+
         # Check if exactly one node OR one beam is selected
-        return len(jb_globals.selected_nodes) == 1 or len(jb_globals.selected_beams) == 1
+        return len_selected_nodes == 1 or len(jb_globals.selected_beams) == 1 or (len_selected_nodes == 2 and ui_props.find_jump_to_rail_on_2_nodes)
 
     def execute(self, context):
         obj = context.active_object
         obj_data = obj.data
+        ui_props = context.scene.ui_properties
         jbeam_filepath = obj_data.get(constants.MESH_JBEAM_FILE_PATH)
 
         if not jbeam_filepath:
@@ -512,8 +517,29 @@ class JBEAM_EDITOR_OT_scroll_to_definition(bpy.types.Operator):
         line_num = None
         target_element_type = None
 
-        # Check Node Selection
-        if len(jb_globals.selected_nodes) == 1:
+        # Check Rail Selection (2 nodes) first to give it priority
+        if len(jb_globals.selected_nodes) == 2 and ui_props.find_jump_to_rail_on_2_nodes:
+            target_element_type = "Rail"
+            node_id1 = jb_globals.selected_nodes[0][1]
+            node_id2 = jb_globals.selected_nodes[1][1]
+
+            # Since rails are defined by name, we need to find which rail uses these two nodes.
+            # This requires iterating through the rail definitions in the current JBeam data.
+            if jb_globals.curr_vdata and 'rails' in jb_globals.curr_vdata:
+                rails_data = jb_globals.curr_vdata['rails']
+                if isinstance(rails_data, dict):
+                    for rail_name, rail_info in rails_data.items():
+                        rail_nodes = rail_info if isinstance(rail_info, list) else rail_info.get('links:')
+                        # Check for adjacent nodes in any rail list (simple or complex format)
+                        if isinstance(rail_nodes, list) and len(rail_nodes) >= 2:
+                            for i in range(len(rail_nodes) - 1):
+                                if (rail_nodes[i] == node_id1 and rail_nodes[i+1] == node_id2) or \
+                                   (rail_nodes[i] == node_id2 and rail_nodes[i+1] == node_id1):
+                                    # Found the rail. Now find its line number.
+                                    line_num = find_rail_line_number(jbeam_filepath, obj_data[constants.MESH_JBEAM_PART], rail_name)
+                                    break # Stop searching once found
+
+        elif len(jb_globals.selected_nodes) == 1:
             target_element_type = "Node"
             vert_index, node_id = jb_globals.selected_nodes[0]
             try:
@@ -529,8 +555,7 @@ class JBEAM_EDITOR_OT_scroll_to_definition(bpy.types.Operator):
                 self.report({'ERROR'}, f"Error accessing node data: {e}")
                 return {'CANCELLED'}
 
-        # Check Beam Selection
-        elif len(jb_globals.selected_beams) == 1:
+        elif len(jb_globals.selected_beams) == 1: # Check Beam Selection
             target_element_type = "Beam"
             edge_index, beam_indices_str = jb_globals.selected_beams[0]
             try:

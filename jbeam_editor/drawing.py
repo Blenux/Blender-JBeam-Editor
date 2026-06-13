@@ -635,6 +635,82 @@ def find_rail_line_number(jbeam_filepath: str, target_part_origin: str, target_r
         # traceback.print_exc()
         return None
 
+# Helper function to find the line number of a rail definition in the AST
+def find_rail_line_number(jbeam_filepath: str, target_part_origin: str, target_rail_name: str):
+    """
+    Finds the 1-based line number of a specific rail definition (the key) in a JBeam file.
+    """
+    file_content = text_editor.read_int_file(jbeam_filepath)
+    if not file_content: return None
+
+    try:
+        ast_data = sjsonast.parse(file_content)
+        if not ast_data: return None
+        ast_nodes = ast_data['ast']['nodes']
+        sjsonast.calculate_char_positions(ast_nodes)
+
+        stack = []
+        in_dict = True
+        pos_in_arr = 0 # Not used for dict key search but part of traversal state
+        temp_dict_key = None
+        dict_key = None
+
+        i = 0
+        while i < len(ast_nodes):
+            node: sjsonast.ASTNode = ast_nodes[i]
+            node_type = node.data_type
+
+            if node_type == 'wsc':
+                i += 1
+                continue
+
+            in_target_part = len(stack) > 0 and stack[0][0] == target_part_origin
+            in_rails_dict_level = ( # True if we are at the level where rail names are keys
+                in_target_part and
+                len(stack) == 2 and
+                stack[1][0] == 'rails' and
+                in_dict
+            )
+
+            if in_dict:
+                if node_type == '{':
+                    if dict_key is not None: stack.append((dict_key, True))
+                    dict_key = None; temp_dict_key = None; in_dict = True
+                elif node_type == '[':
+                    if dict_key is not None: stack.append((dict_key, True))
+                    dict_key = None; temp_dict_key = None; in_dict = False
+                elif node_type == '}':
+                    if stack: _, in_dict = stack.pop()
+                    else: in_dict = None
+                else: # Key or value
+                    if temp_dict_key is None and node_type == '"':
+                        if in_rails_dict_level and node.value == target_rail_name:
+                            start_char_pos = node.start_pos
+                            line_number = file_content[:start_char_pos].count('\n') + 1
+                            return line_number
+                        temp_dict_key = node.value
+                    elif node_type == ':': dict_key = temp_dict_key
+                    elif dict_key is not None: # Value processed, reset
+                        dict_key = None; temp_dict_key = None
+            else: # In array
+                if node_type == '[':
+                    stack.append((pos_in_arr, False)); pos_in_arr = 0; in_dict = False
+                elif node_type == '{':
+                    stack.append((pos_in_arr, False)); pos_in_arr = 0; in_dict = True
+                elif node_type == ']':
+                    if stack:
+                        prev_idx, prev_in_dict = stack.pop()
+                        in_dict = prev_in_dict
+                        pos_in_arr = prev_idx + 1 if not prev_in_dict else 0
+                    else: in_dict = None
+                else: pos_in_arr +=1
+            i += 1
+        return None
+    except Exception: # pylint: disable=broad-except-clause
+        # print(f"Error finding rail line number: {e}", file=sys.stderr)
+        # traceback.print_exc()
+        return None
+
 # Helper function to find the line number of a slidenode in the AST
 def find_slidenode_line_number(jbeam_filepath: str, target_part_origin: str, target_node_id: str):
     """
@@ -1703,12 +1779,12 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                                          # Found the links array, parse it
                                          temp_node_ids = []
                                          l = temp_k + 1
-                                         while l < len(ast_nodes):
-                                             link_node = ast_nodes[l]
-                                             if link_node.data_type == ']': break
+                                         while l < len(ast_nodes): # noqa: E741
+                                             link_node = ast_nodes[l] # noqa: E741
+                                             if link_node.data_type == ']': break # noqa: E741
                                              if link_node.data_type == '"': temp_node_ids.append(link_node.value)
                                              l += 1
-                                         if len(temp_node_ids) == 2:
+                                         if len(temp_node_ids) >= 2: # Allow for more than 2 nodes
                                              element_type = 'rail'
                                              node_ids = temp_node_ids
                                              found_element_on_line = True
@@ -1751,7 +1827,7 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                         num_parsed_ids = len(temp_node_ids)
 
                         # Determine element type based on context and parsed content
-                        if current_section_name == 'nodes' and num_parsed_ids == 1 and temp_values_count >= 3:
+                        if current_section_name == 'nodes' and num_parsed_ids == 1 and temp_values_count >= 3: # Node definition
                             element_type = 'node'
                             node_ids = temp_node_ids
                             found_element_on_line = True
@@ -1759,8 +1835,8 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                             element_type = 'beam'
                             node_ids = temp_node_ids
                             found_element_on_line = True
-                        # <<< MODIFIED: Check rail context here >>>
-                        elif in_rail_links_array and num_parsed_ids == 2:
+                        # Check rail context here and allow for more than 2 nodes
+                        elif in_rail_links_array and num_parsed_ids >= 2: # Allow rails with 2 or more nodes
                             element_type = 'rail'
                             node_ids = temp_node_ids
                             found_element_on_line = True
@@ -1959,10 +2035,10 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                 # Find the rail definition in curr_vdata
                 if jb_globals.curr_vdata and 'rails' in jb_globals.curr_vdata:
                     rails_data = jb_globals.curr_vdata['rails']
-                    if isinstance(rails_data, dict):
+                    if isinstance(rails_data, dict): # Check if rails_data is a dictionary
                         rail_info = rails_data.get(slidenode_rail_name)
-                        if isinstance(rail_info, list) and len(rail_info) == 2:
-                            rail_node_id1, rail_node_id2 = rail_info[0], rail_info[1]
+                        if isinstance(rail_info, list) and len(rail_info) >= 2: # Allow rails with 2 or more nodes
+                            rail_node_id1, rail_node_id2 = rail_info[0], rail_info[1] # Still only need the first two for slidenode line
                         elif isinstance(rail_info, dict):
                             links = rail_info.get('links:')
                             if isinstance(links, list) and len(links) == 2:
@@ -2114,30 +2190,26 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                     highlight_torsionbar_mid_coords.extend([world_positions[1], world_positions[2]])
                     highlight_torsionbar_outer_coords.extend([world_positions[2], world_positions[3]])
                     highlight_set = True
-
+                # MODIFIED: Handle multi-node rails
                 elif element_type == 'rail':
-                     is_cross_part_candidate = False
-                     if len(node_origins) == 2:
-                         origin1 = node_origins.get(node_ids[0], '?')
-                         origin2 = node_origins.get(node_ids[1], '?')
-                         if origin1 != origin2 and '?' not in {origin1, origin2}:
-                             is_cross_part_candidate = True
+                    for i in range(len(world_positions) - 1):
+                        highlight_coords.extend([world_positions[i], world_positions[i+1]])
+                    highlight_set = True # This line is correct
+                    is_cross_part_candidate = False
+                    if len(node_origins) == 2:
+                        origin1 = node_origins.get(node_ids[0], '?')
+                        origin2 = node_origins.get(node_ids[1], '?')
+                        if origin1 != origin2 and '?' not in {origin1, origin2}:
+                            is_cross_part_candidate = True
 
-                     id1_in_active_geom = node_ids[0] in temp_node_map
-                     id2_in_active_geom = node_ids[1] in temp_node_map
+                    id1_in_active_geom = node_ids[0] in temp_node_map
+                    id2_in_active_geom = node_ids[1] in temp_node_map
 
-                     if is_cross_part_candidate and id1_in_active_geom and id2_in_active_geom:
+                    if is_cross_part_candidate and id1_in_active_geom and id2_in_active_geom:
+                        original_color = ui_props.rail_color
+                    elif is_cross_part_candidate:
+                         element_type = 'cross_part_beam'
                          original_color = ui_props.rail_color
-                         highlight_coords.extend([world_positions[0], world_positions[1]])
-                         highlight_set = True
-                     elif is_cross_part_candidate:
-                          element_type = 'cross_part_beam'
-                          original_color = ui_props.rail_color
-                          highlight_coords.extend([world_positions[0], world_positions[1]])
-                          highlight_set = True
-                     else:
-                         highlight_coords.extend([world_positions[0], world_positions[1]])
-                         highlight_set = True
 
             # --- Finalize Highlight State ---
             if highlight_set:
@@ -2467,7 +2539,11 @@ def draw_callback_px(context: bpy.types.Context):
                                         node_weight_raw = node_data_for_weight.get('nodeWeight')
                                         if node_weight_raw is not None:
                                             resolved_weight = resolve_jbeam_variable_value(node_weight_raw, jb_globals.jbeam_variables_cache, 0, context, True)
-                                            node_id_display_string += f" [{resolved_weight:.2f}kg]" # Format to 2 decimal places
+                                            try:
+                                                resolved_weight_float = float(resolved_weight)
+                                                node_id_display_string += f" [{resolved_weight_float:.2f}kg]" # Format to 2 decimal places
+                                            except (ValueError, TypeError):
+                                                node_id_display_string += f" [{resolved_weight}]" # Display as string if conversion fails
                                 draw_text_with_outline(font_id, node_id_display_string, pos_text[0], pos_text[1], text_color)
                             # <<< MODIFICATION END >>>
                 except Exception as e: print(f"Error processing part {obj_iter_local.name} for drawing: {e}", file=sys.stderr) # Use obj_iter_local
@@ -2578,7 +2654,11 @@ def draw_callback_px(context: bpy.types.Context):
                                     node_weight_raw = node_data_for_weight.get('nodeWeight')
                                     if node_weight_raw is not None:
                                         resolved_weight = resolve_jbeam_variable_value(node_weight_raw, jb_globals.jbeam_variables_cache, 0, context, True)
-                                        node_id_display_string += f" [{resolved_weight:.2f}kg]"
+                                        try:
+                                            resolved_weight_float = float(resolved_weight)
+                                            node_id_display_string += f" [{resolved_weight_float:.2f}kg]"
+                                        except (ValueError, TypeError):
+                                            node_id_display_string += f" [{resolved_weight}]" # Display as string if conversion fails
                             draw_text_with_outline(font_id, node_id_display_string, pos_text[0], pos_text[1], text_color)
                         # <<< MODIFICATION END >>>
 
@@ -3549,13 +3629,13 @@ def draw_callback_view(context: bpy.types.Context):
             if ui_props.toggle_rails_vis and jb_globals.curr_vdata and 'rails' in jb_globals.curr_vdata and isinstance(jb_globals.curr_vdata['rails'], dict):
                  for rail_name, rail_info in jb_globals.curr_vdata['rails'].items():
                     rail_nodes = None
-                    if isinstance(rail_info, list) and len(rail_info) == 2: rail_nodes = rail_info
+                    if isinstance(rail_info, list) and len(rail_info) >= 2: rail_nodes = rail_info # Allow rails with 2 or more nodes
                     elif isinstance(rail_info, dict): rail_nodes = rail_info.get('links:')
-                    if isinstance(rail_nodes, list) and len(rail_nodes) == 2:
+                    if isinstance(rail_nodes, list) and len(rail_nodes) >= 2:
                         ids = rail_nodes
                         if not all(ids): continue
                         if any(node_id_to_hide_status.get(id, False) for id in ids): continue
-                        world_pos = [None] * 2; all_nodes_found = True; missing_nodes = []
+                        world_pos = [None] * len(ids); all_nodes_found = True; missing_nodes = []
                         for i, node_id in enumerate(ids):
                             pos_data = node_id_to_pos_matrix_map.get(node_id)
                             cache_data = all_nodes_cache.get(node_id)
@@ -3564,8 +3644,10 @@ def draw_callback_view(context: bpy.types.Context):
                             elif cache_data: wp = cache_data[0]
                             if wp is None: all_nodes_found = False; missing_nodes.append(node_id)
                             world_pos[i] = wp
-                        if all_nodes_found: rail_coords.extend(world_pos)
-                        elif ui_props.toggle_rails_vis:
+                        if all_nodes_found:
+                            for i in range(len(world_pos) - 1):
+                                rail_coords.extend([world_pos[i], world_pos[i+1]])
+                        else:
                             if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes): # <<< ADDED CHECK
                                 if ui_props.show_console_warnings_missing_nodes:
                                     line_num_str = ""
@@ -3610,34 +3692,75 @@ def draw_callback_view(context: bpy.types.Context):
                     origin1 = cache1_data[2]
                     origin2 = cache2_data[2]
 
-                    # Draw if defined in current_part_name AND it's not an intra-part beam of current_part_name
-                    if not (origin1 == current_part_name and origin2 == current_part_name):
+                    # A beam is cross-part if its nodes originate from different parts.
+                    is_cross_part = origin1 != origin2 and '?' not in {origin1, origin2}
+
+                    if is_cross_part:
                         # Prioritize current bmesh positions, fallback to cache
                         wp1_from_map = node_id_to_pos_matrix_map.get(id1)
                         world_pos1 = (wp1_from_map[1] @ wp1_from_map[0]) if wp1_from_map else (cache1_data[0] if cache1_data else None)
-
                         wp2_from_map = node_id_to_pos_matrix_map.get(id2)
                         world_pos2 = (wp2_from_map[1] @ wp2_from_map[0]) if wp2_from_map else (cache2_data[0] if cache2_data else None)
 
                         if world_pos1 is None or world_pos2 is None:
                             # Error handling for missing positions was done when checking cache1_data/cache2_data
                             # If we reach here and a position is None, it means it wasn't in node_id_to_pos_matrix_map either.
+                            # This case should be rare if all_nodes_cache is up-to-date.
+                            continue
+
+                        # Determine beam_type for visibility checks and color selection
+                        beam_type_current = beam_data.get('beamType', '|NORMAL')
+                        type_is_generally_visible = False
+                        if beam_type_current == '|NORMAL': type_is_generally_visible = ui_props.toggle_beams_vis
+                        elif beam_type_current == '|ANISOTROPIC': type_is_generally_visible = ui_props.toggle_anisotropic_beams_vis
+                        elif beam_type_current == '|SUPPORT': type_is_generally_visible = ui_props.toggle_support_beams_vis
+                        elif beam_type_current == '|HYDRO': type_is_generally_visible = ui_props.toggle_hydro_beams_vis
+                        elif beam_type_current == '|BOUNDED': type_is_generally_visible = ui_props.toggle_bounded_beams_vis
+                        elif beam_type_current == '|LBEAM': type_is_generally_visible = ui_props.toggle_lbeam_beams_vis
+                        elif beam_type_current == '|PRESSURED': type_is_generally_visible = ui_props.toggle_pressured_beams_vis
+
+                        if world_pos1 is None or world_pos2 is None:
+                            # Error handling for missing positions was done when checking cache1_data/cache2_data
+                            # If we reach here and a position is None, it means it wasn't in node_id_to_pos_matrix_map either.
+                            # This case should be rare if all_nodes_cache is up-to-date.
                             continue
 
                         if ui_props.use_dynamic_beam_coloring:
-                            color_to_use = None
-                            if beam_data:
-                                param_name = ui_props.dynamic_coloring_parameter
-                                param_value_raw = beam_data.get(param_name)
-                                if param_value_raw is not None:
-                                    # Use FINALIZED auto thresholds
-                                    low_thresh = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
-                                    high_thresh = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
-                                    color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh, 'beam')
-                            if color_to_use is not None:
-                                dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use))
+                            # Visibility is already checked by the main toggle.
+                            should_add_to_dynamic_list_vehicle = True
+
+                            if should_add_to_dynamic_list_vehicle:
+                                color_to_use_dyn_veh = None
+                                if is_cross_part and ui_props.use_generic_cross_part_beam_color:
+                                    color_to_use_dyn_veh = ui_props.cross_part_beam_color
+                                else:
+                                    param_name_dyn_veh = ui_props.dynamic_coloring_parameter
+                                    param_value_raw_dyn_veh = beam_data.get(param_name_dyn_veh)
+                                    if param_value_raw_dyn_veh is not None:
+                                        low_thresh_dyn_veh = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
+                                        high_thresh_dyn_veh = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
+                                        color_to_use_dyn_veh = _calculate_dynamic_color(param_value_raw_dyn_veh, low_thresh_dyn_veh, high_thresh_dyn_veh, 'beam')
+                                if color_to_use_dyn_veh:
+                                    dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use_dyn_veh))
                         else:
-                            cross_part_beam_coords.extend([world_pos1, world_pos2])
+                            # Static coloring for cross-part beams
+                            # Visibility is controlled by the main cross-part toggle.
+                            if ui_props.use_generic_cross_part_beam_color:
+                                cross_part_beam_coords.extend([world_pos1, world_pos2])
+                            else:
+                                # Non-generic cross-part: use its specific static color (or default), add to dynamic list for drawing
+                                color_to_use_for_static_cross_part = None
+                                if beam_type_current == '|NORMAL': color_to_use_for_static_cross_part = ui_props.beam_color
+                                elif beam_type_current == '|ANISOTROPIC': color_to_use_for_static_cross_part = ui_props.anisotropic_beam_color
+                                elif beam_type_current == '|SUPPORT': color_to_use_for_static_cross_part = ui_props.support_beam_color
+                                elif beam_type_current == '|HYDRO': color_to_use_for_static_cross_part = ui_props.hydro_beam_color
+                                elif beam_type_current == '|BOUNDED': color_to_use_for_static_cross_part = ui_props.bounded_beam_color
+                                elif beam_type_current == '|LBEAM': color_to_use_for_static_cross_part = ui_props.lbeam_beam_color
+                                elif beam_type_current == '|PRESSURED': color_to_use_for_static_cross_part = ui_props.pressured_beam_color
+                                else: # Default for unknown beam types when not using generic cross-part color
+                                    color_to_use_for_static_cross_part = ui_props.beam_color
+                                dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use_for_static_cross_part))
+
         else: # Single Part
             if active_obj.visible_get():
                 part_name = active_obj_data.get(constants.MESH_JBEAM_PART)
@@ -3742,13 +3865,13 @@ def draw_callback_view(context: bpy.types.Context):
                     if ui_props.toggle_rails_vis and jb_globals.curr_vdata and 'rails' in jb_globals.curr_vdata and isinstance(jb_globals.curr_vdata['rails'], dict):
                         for rail_name, rail_info in jb_globals.curr_vdata['rails'].items():
                             rail_nodes = None
-                            if isinstance(rail_info, list) and len(rail_info) == 2: rail_nodes = rail_info
+                            if isinstance(rail_info, list) and len(rail_info) >= 2: rail_nodes = rail_info # Allow rails with 2 or more nodes
                             elif isinstance(rail_info, dict): rail_nodes = rail_info.get('links:')
-                            if isinstance(rail_nodes, list) and len(rail_nodes) == 2:
+                            if isinstance(rail_nodes, list) and len(rail_nodes) >= 2:
                                 ids = rail_nodes
                                 if not all(ids): continue
                                 if any(node_id_to_hide_status.get(id, False) for id in ids): continue
-                                world_pos = [None] * 2; all_nodes_found = True; missing_nodes = []
+                                world_pos = [None] * len(ids); all_nodes_found = True; missing_nodes = []
                                 for i, node_id in enumerate(ids):
                                     pos_data = node_id_to_pos_matrix_map.get(node_id)
                                     cache_data = all_nodes_cache.get(node_id)
@@ -3757,8 +3880,10 @@ def draw_callback_view(context: bpy.types.Context):
                                     elif cache_data: wp = cache_data[0]
                                     if wp is None: all_nodes_found = False; missing_nodes.append(node_id)
                                     world_pos[i] = wp
-                                if all_nodes_found: rail_coords.extend(world_pos)
-                                elif ui_props.toggle_rails_vis:
+                                if all_nodes_found:
+                                    for i in range(len(world_pos) - 1):
+                                        rail_coords.extend([world_pos[i], world_pos[i+1]])
+                                else:
                                     if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes): # <<< ADDED CHECK
                                         if ui_props.show_console_warnings_missing_nodes:
                                             line_num_str = ""
@@ -3773,11 +3898,9 @@ def draw_callback_view(context: bpy.types.Context):
 
                     if ui_props.toggle_cross_part_beams_vis and jb_globals.curr_vdata and 'beams' in jb_globals.curr_vdata:
                         obj_matrix = active_obj.matrix_world
-                        for beam_data in jb_globals.curr_vdata['beams']:
-                            if not isinstance(beam_data, dict) or beam_data.get('partOrigin') != current_part_name: continue
-
+                        for beam_data in jb_globals.curr_vdata['beams']: # Iterate through all beams
                             id1, id2 = beam_data.get('id1:'), beam_data.get('id2:')
-                            if not id1 or not id2: continue
+                            if not isinstance(beam_data, dict) or not id1 or not id2: continue
 
                             if node_id_to_hide_status.get(id1, False) or node_id_to_hide_status.get(id2, False): continue
 
@@ -3801,8 +3924,10 @@ def draw_callback_view(context: bpy.types.Context):
                             origin1 = cache1_data[2]
                             origin2 = cache2_data[2]
 
-                            # Draw if defined in current_part_name AND it's not an intra-part beam of current_part_name
-                            if not (origin1 == current_part_name and origin2 == current_part_name):
+                            # A beam is cross-part if its nodes originate from different parts.
+                            is_cross_part_single = origin1 != origin2 and '?' not in {origin1, origin2}
+
+                            if is_cross_part_single:
                                 # Prioritize current bmesh positions, fallback to cache
                                 wp1_from_map = node_id_to_pos_matrix_map.get(id1)
                                 world_pos1 = (wp1_from_map[1] @ wp1_from_map[0]) if wp1_from_map else (cache1_data[0] if cache1_data else None)
@@ -3813,22 +3938,54 @@ def draw_callback_view(context: bpy.types.Context):
                                 if world_pos1 is None or world_pos2 is None:
                                     # Error handling for missing positions was done when checking cache1_data/cache2_data
                                     # If we reach here and a position is None, it means it wasn't in node_id_to_pos_matrix_map either.
+                                    # This case should be rare if all_nodes_cache is up-to-date.
                                     continue
 
+                                # Determine beam_type for visibility checks and color selection
+                                beam_type_current_single = beam_data.get('beamType', '|NORMAL')
+                                type_is_generally_visible_single = False
+                                if beam_type_current_single == '|NORMAL': type_is_generally_visible_single = ui_props.toggle_beams_vis
+                                elif beam_type_current_single == '|ANISOTROPIC': type_is_generally_visible_single = ui_props.toggle_anisotropic_beams_vis
+                                elif beam_type_current_single == '|SUPPORT': type_is_generally_visible_single = ui_props.toggle_support_beams_vis
+                                elif beam_type_current_single == '|HYDRO': type_is_generally_visible_single = ui_props.toggle_hydro_beams_vis
+                                elif beam_type_current_single == '|BOUNDED': type_is_generally_visible_single = ui_props.toggle_bounded_beams_vis
+                                elif beam_type_current_single == '|LBEAM': type_is_generally_visible_single = ui_props.toggle_lbeam_beams_vis
+                                elif beam_type_current_single == '|PRESSURED': type_is_generally_visible_single = ui_props.toggle_pressured_beams_vis
+
                                 if ui_props.use_dynamic_beam_coloring:
-                                    color_to_use = None
-                                    if beam_data:
-                                        param_name = ui_props.dynamic_coloring_parameter
-                                        param_value_raw = beam_data.get(param_name)
-                                        if param_value_raw is not None:
-                                            # Use FINALIZED auto thresholds
-                                            low_thresh = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
-                                            high_thresh = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
-                                            color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh, 'beam')
-                                    if color_to_use is not None:
-                                        dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use))
+                                    # Visibility is already checked by the main toggle.
+                                    should_add_to_dynamic_list_single = True
+
+                                    if should_add_to_dynamic_list_single:
+                                        color_to_use_dyn_single = None
+                                        if ui_props.use_generic_cross_part_beam_color:
+                                            color_to_use_dyn_single = ui_props.cross_part_beam_color
+                                        else:
+                                            param_name_dyn_single = ui_props.dynamic_coloring_parameter
+                                            param_value_raw_dyn_single = beam_data.get(param_name_dyn_single)
+                                            if param_value_raw_dyn_single is not None:
+                                                low_thresh_dyn_single = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
+                                                high_thresh_dyn_single = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
+                                                color_to_use_dyn_single = _calculate_dynamic_color(param_value_raw_dyn_single, low_thresh_dyn_single, high_thresh_dyn_single, 'beam')
+                                        if color_to_use_dyn_single:
+                                            dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use_dyn_single))
                                 else:
-                                    cross_part_beam_coords.extend([world_pos1, world_pos2])
+                                    # Static coloring for cross-part beams
+                                    if ui_props.use_generic_cross_part_beam_color:
+                                        cross_part_beam_coords.extend([world_pos1, world_pos2])
+                                    else:
+                                        color_to_use_for_static_cross_part_single = None
+                                        if beam_type_current_single == '|NORMAL': color_to_use_for_static_cross_part_single = ui_props.beam_color
+                                        elif beam_type_current_single == '|ANISOTROPIC': color_to_use_for_static_cross_part_single = ui_props.anisotropic_beam_color
+                                        elif beam_type_current_single == '|SUPPORT': color_to_use_for_static_cross_part_single = ui_props.support_beam_color
+                                        elif beam_type_current_single == '|HYDRO': color_to_use_for_static_cross_part_single = ui_props.hydro_beam_color
+                                        elif beam_type_current_single == '|BOUNDED': color_to_use_for_static_cross_part_single = ui_props.bounded_beam_color
+                                        elif beam_type_current_single == '|LBEAM': color_to_use_for_static_cross_part_single = ui_props.lbeam_beam_color
+                                        elif beam_type_current_single == '|PRESSURED': color_to_use_for_static_cross_part_single = ui_props.pressured_beam_color
+                                        else: # Default for unknown beam types
+                                            color_to_use_for_static_cross_part_single = ui_props.beam_color
+                                        dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use_for_static_cross_part_single))
+
                 except Exception as e: print(f"Error getting beam geometry data from {active_obj.name}: {e}", file=sys.stderr)
                 finally:
                     if bm and not (active_obj.mode == 'EDIT'): bm.free()
@@ -3860,7 +4017,9 @@ def draw_callback_view(context: bpy.types.Context):
             else:
                 element_type = jb_globals.highlighted_element_type
                 if element_type in ('beam', 'rail', 'cross_part_beam', 'slidenode'):
-                    if len(highlight_world_positions) >= 2: highlight_coords.extend([highlight_world_positions[0], highlight_world_positions[1]])
+                    # MODIFIED: Iterate through all points for multi-node rails
+                    for i in range(len(highlight_world_positions) - 1):
+                        highlight_coords.extend([highlight_world_positions[i], highlight_world_positions[i+1]])
                 elif element_type == 'torsionbar':
                     if len(highlight_world_positions) >= 4:
                         highlight_torsionbar_outer_coords.extend([highlight_world_positions[0], highlight_world_positions[1]])
@@ -3960,54 +4119,29 @@ def draw_callback_view(context: bpy.types.Context):
             try: highlight_torsionbar_mid_batch = batch_for_shader(render_shader, 'LINES', {"pos": highlight_torsionbar_mid_coords, "color": colors})
             except Exception as e: print(f"Error creating highlight torsionbar mid batch (full rebuild): {e}", file=sys.stderr)
 
+        # --- Create dynamic_beam_batch if its coordinate list has content.
+        # This batch handles:
+        # 1. All beams if dynamic coloring is ON.
+        # 2. Non-generic static cross-part beams if dynamic coloring is OFF.
+        if dynamic_beam_coords_colors:
+            dyn_positions = []
+            dyn_colors_list = [] # Renamed to avoid conflict
+            for pos1, pos2, color_val_batch in dynamic_beam_coords_colors:
+                dyn_positions.extend([pos1, pos2])
+                dyn_colors_list.extend([color_val_batch, color_val_batch])
+            try:
+                dynamic_beam_batch = batch_for_shader(render_shader, 'LINES', {"pos": dyn_positions, "color": dyn_colors_list})
+            except Exception as e:
+                print(f"Error creating dynamic/mixed beam batch: {e}", file=sys.stderr)
+                dynamic_beam_batch = None # Ensure it's None on error
+        else:
+            dynamic_beam_batch = None # Ensure it's None if no coords
+
         # --- 9. Reset dirty flags ---
         veh_render_dirty = False
         # _highlight_dirty was already reset if it was true.
 
-        # --- Calculate and Update Summed Visible Node Weight ---
-        current_sum_node_weight = 0.0
-        valid_weights_found_for_sum = False
-
-        filter_by_group_active_sum = ui_props.toggle_node_group_filter
-        selected_group_for_filter_sum = ui_props.node_group_to_show if filter_by_group_active_sum else None
-
-        # Iterate through nodes that are considered for drawing (respecting object visibility and hide status)
-        for node_id, (local_pos, matrix) in node_id_to_pos_matrix_map.items():
-            if node_id_to_hide_status.get(node_id, False): # Skip if hidden in bmesh
-                continue
-
-            # Apply Node Group Filter for the sum
-            if filter_by_group_active_sum:
-                node_data_for_filter_sum = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
-                node_actual_groups_sum = set()
-                if node_data_for_filter_sum and isinstance(node_data_for_filter_sum, dict):
-                    group_attr_sum = node_data_for_filter_sum.get('group')
-                    if isinstance(group_attr_sum, str):
-                        node_actual_groups_sum.add(group_attr_sum.lower())
-                    elif isinstance(group_attr_sum, list):
-                        node_actual_groups_sum.update(g.lower() for g in group_attr_sum if isinstance(g, str))
-
-                if selected_group_for_filter_sum == "__NODES_WITHOUT_GROUPS__":
-                    if node_actual_groups_sum:
-                        continue # Skip this node
-                elif selected_group_for_filter_sum and selected_group_for_filter_sum not in ["__ALL_WITH_GROUPS__", "_SEPARATOR_", "_NO_SPECIFIC_GROUPS_"]:
-                    if selected_group_for_filter_sum.lower() not in node_actual_groups_sum:
-                        continue # Skip if node doesn't have the filtered group
-
-            node_data = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
-            if node_data and isinstance(node_data, dict):
-                node_weight_raw = node_data.get('nodeWeight')
-                if node_weight_raw is not None: # <<< MODIFIED: Pass context and is_node_weight_context=True >>>
-                    resolved_weight = resolve_jbeam_variable_value(node_weight_raw, jb_globals.jbeam_variables_cache, 0, context, True)
-                    try:
-                        numeric_weight = float(resolved_weight)
-                        if math.isfinite(numeric_weight):
-                            current_sum_node_weight += numeric_weight
-                            valid_weights_found_for_sum = True
-                    except (ValueError, TypeError): pass # Ignore if not a number
-        # If it wasn't true, it should remain false.
-
-        # --- 10. Update UI Properties for Display --- <<< MODIFIED >>>
+        # --- Update UI Properties for Display (Auto Thresholds) ---
         # For Beams
         ui_props.auto_beam_threshold_min_display = _format_number_for_display(auto_min_val, auto_thresholds_valid)
         ui_props.auto_beam_threshold_max_display = _format_number_for_display(auto_max_val, auto_thresholds_valid)
@@ -4015,8 +4149,43 @@ def draw_callback_view(context: bpy.types.Context):
         ui_props.auto_node_threshold_min_display = _format_number_for_display(auto_node_weight_min, auto_node_thresholds_valid)
         ui_props.auto_node_threshold_max_display = _format_number_for_display(auto_node_weight_max, auto_node_thresholds_valid)
 
-        if valid_weights_found_for_sum:
-            ui_props.summed_visible_node_weight_display = utils.to_float_str(current_sum_node_weight) # Format using utils
+        # --- Calculate and Update Summed Visible Node Weight ---
+        current_sum_node_weight = 0.0
+        valid_weights_found_for_sum_display = False # Use a different flag for display
+
+        filter_by_group_active_sum_display = ui_props.toggle_node_group_filter
+        selected_group_for_filter_sum_display = ui_props.node_group_to_show if filter_by_group_active_sum_display else None
+
+        for node_id_sum_disp, (local_pos_sum_disp, matrix_sum_disp) in node_id_to_pos_matrix_map.items():
+            if node_id_to_hide_status.get(node_id_sum_disp, False): continue
+
+            if filter_by_group_active_sum_display:
+                node_data_filter_sum_disp = jb_globals.curr_vdata['nodes'].get(node_id_sum_disp) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
+                node_actual_groups_sum_disp = set()
+                if node_data_filter_sum_disp and isinstance(node_data_filter_sum_disp, dict):
+                    group_attr_sum_disp = node_data_filter_sum_disp.get('group')
+                    if isinstance(group_attr_sum_disp, str): node_actual_groups_sum_disp.add(group_attr_sum_disp.lower())
+                    elif isinstance(group_attr_sum_disp, list): node_actual_groups_sum_disp.update(g.lower() for g in group_attr_sum_disp if isinstance(g, str))
+
+                if selected_group_for_filter_sum_display == "__NODES_WITHOUT_GROUPS__":
+                    if node_actual_groups_sum_disp: continue
+                elif selected_group_for_filter_sum_display and selected_group_for_filter_sum_display not in ["__ALL_WITH_GROUPS__", "_SEPARATOR_", "_NO_SPECIFIC_GROUPS_"]:
+                    if selected_group_for_filter_sum_display.lower() not in node_actual_groups_sum_disp: continue
+
+            node_data_sum_disp = jb_globals.curr_vdata['nodes'].get(node_id_sum_disp) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
+            if node_data_sum_disp and isinstance(node_data_sum_disp, dict):
+                node_weight_raw_sum_disp = node_data_sum_disp.get('nodeWeight')
+                if node_weight_raw_sum_disp is not None:
+                    resolved_weight_sum_disp = resolve_jbeam_variable_value(node_weight_raw_sum_disp, jb_globals.jbeam_variables_cache, 0, context, True)
+                    try:
+                        numeric_weight_sum_disp = float(resolved_weight_sum_disp)
+                        if math.isfinite(numeric_weight_sum_disp):
+                            current_sum_node_weight += numeric_weight_sum_disp
+                            valid_weights_found_for_sum_display = True
+                    except (ValueError, TypeError): pass
+
+        if valid_weights_found_for_sum_display:
+            ui_props.summed_visible_node_weight_display = utils.to_float_str(current_sum_node_weight)
         else:
             ui_props.summed_visible_node_weight_display = "N/A"
 
@@ -4028,13 +4197,23 @@ def draw_callback_view(context: bpy.types.Context):
 
     # --- Drawing ---
     gpu.state.depth_test_set('LESS_EQUAL')
+    gpu.state.depth_test_set('NONE')
     gpu.state.blend_set('ALPHA')
 
-    if ui_props.use_dynamic_beam_coloring:
-        if dynamic_beam_batch:
-            gpu.state.line_width_set(ui_props.beam_width)
-            gpu.state.depth_mask_set(True); dynamic_beam_batch.draw(render_shader); gpu.state.depth_mask_set(False)
-    else:
+    # Draw dynamic_beam_batch if it exists.
+    # This batch contains:
+    # - All beams if dynamic coloring is ON.
+    # - Non-generic static cross-part beams if dynamic coloring is OFF.
+    if dynamic_beam_batch:
+        width_for_dynamic_batch = ui_props.beam_width
+        if not ui_props.use_dynamic_beam_coloring: # Static coloring is on, dynamic_beam_batch has non-generic cross-part
+            width_for_dynamic_batch = ui_props.cross_part_beam_width # Compromise width
+        gpu.state.line_width_set(width_for_dynamic_batch)
+        gpu.state.depth_mask_set(True); dynamic_beam_batch.draw(render_shader); gpu.state.depth_mask_set(False)
+
+    # Draw other static batches ONLY if dynamic coloring is OFF.
+    # These batches will not contain non-generic static cross-part beams, as those are in dynamic_beam_batch.
+    if not ui_props.use_dynamic_beam_coloring:
         if beam_render_batch is not None and ui_props.toggle_beams_vis:
             gpu.state.line_width_set(ui_props.beam_width)
             gpu.state.depth_mask_set(True); beam_render_batch.draw(render_shader); gpu.state.depth_mask_set(False)
@@ -4056,7 +4235,8 @@ def draw_callback_view(context: bpy.types.Context):
         if pressured_beam_render_batch is not None and ui_props.toggle_pressured_beams_vis:
             gpu.state.line_width_set(ui_props.pressured_beam_width)
             gpu.state.depth_mask_set(True); pressured_beam_render_batch.draw(render_shader); gpu.state.depth_mask_set(False)
-        if cross_part_beam_render_batch is not None and ui_props.toggle_cross_part_beams_vis:
+        # This is for GENERIC static cross-part beams.
+        if cross_part_beam_render_batch is not None and ui_props.toggle_cross_part_beams_vis and ui_props.use_generic_cross_part_beam_color:
             gpu.state.line_width_set(ui_props.cross_part_beam_width)
             gpu.state.depth_mask_set(True); cross_part_beam_render_batch.draw(render_shader); gpu.state.depth_mask_set(False)
 
@@ -4129,4 +4309,5 @@ def draw_callback_view(context: bpy.types.Context):
     gpu.state.depth_mask_set(False)
     gpu.state.line_width_set(1.0)
     gpu.state.blend_set('NONE')
+    gpu.state.depth_test_set('LESS_EQUAL') # Restore depth test
     # --- End Drawing ---

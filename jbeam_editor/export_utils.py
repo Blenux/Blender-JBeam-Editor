@@ -714,7 +714,7 @@ def get_symmetrical_node_id(node_id: str, ui_props: 'UIProperties'):
 
 
 # <<< START REPLACED FUNCTION >>>
-def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jbeam_part: str, init_nodes_data: dict, affect_node_references: bool):
+def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jbeam_part: str, init_nodes_data: dict, affect_node_references: bool): # pylint: disable=too-many-statements,too-many-branches,too-many-locals
     context = bpy.context
     ui_props = context.scene.ui_properties # Already getting ui_props
 
@@ -767,18 +767,27 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
             mirrored_node_found = False
             base_name_from_mirror = None
             mirrored_node_id = None # <<< ADDED: Store the ID of the mirrored node
+            # <<< ADDED: Map of init_node_id to its corresponding bmesh vertex >>>
+            init_id_to_bmesh_vert_map = {
+                v_map[init_node_id_layer].decode('utf-8'): v_map for v_map in bm.verts
+            }
             # <<< MODIFIED: Only perform mirror check if prefixes are enabled >>>
             if use_prefixes:
-                for other_node_id, other_node_data in init_nodes_data.items():
+                for other_node_id in init_nodes_data.keys():
                     # Skip if the other node is marked for deletion in this cycle (check all part actions)
                     is_marked_for_delete = False
                     for actions in parts_actions.values():
                         if other_node_id in actions.nodes_to_delete:
                             is_marked_for_delete = True; break
                     if is_marked_for_delete: continue
-
-                    other_init_pos = other_node_data.get('pos')
-                    if other_init_pos and isinstance(other_init_pos, (list, tuple)) and len(other_init_pos) == 3:
+                    
+                    # <<< MODIFIED: Use current bmesh position for mirror check >>>
+                    other_node_bmesh_vert = init_id_to_bmesh_vert_map.get(other_node_id)
+                    if other_node_bmesh_vert:
+                        # Use the current position from the bmesh vertex, transformed to world space
+                        other_current_pos = obj.matrix_world @ other_node_bmesh_vert.co
+                        other_init_pos = other_current_pos.to_tuple()
+                        # The mirror check logic remains the same, but now uses up-to-date positions
                         if (abs(pos.y - other_init_pos[1]) < MIRROR_CHECK_TOLERANCE and
                             abs(pos.z - other_init_pos[2]) < MIRROR_CHECK_TOLERANCE and
                             abs(pos.x + other_init_pos[0]) < MIRROR_CHECK_TOLERANCE):
@@ -1012,7 +1021,7 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
                 is_moved = True # significant_move_from_original is true to enter this block
                 is_renamed = bmesh_init_node_id != bmesh_current_node_id
                 current_part_actions_std: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
-
+                
                 current_part_actions_std.nodes_to_move[bmesh_current_node_id] = current_pos_tuple
                 if is_renamed: # This rename would have been set by properties.py or other logic
                     affected_part_key_rename = True if affect_node_references else node_part_origin
@@ -1039,7 +1048,7 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
                 affected_part_key_rename = True if affect_node_references else node_part_origin
                 rename_part_actions_std: PartNodesActions = parts_actions.setdefault(affected_part_key_rename, PartNodesActions())
                 rename_part_actions_std.nodes_to_rename[bmesh_init_node_id] = bmesh_current_node_id
-            
+
             pos_for_sjson = undo_node_move_offset_and_apply_translation_to_expr(original_node_data_for_this_init_id, pos)
             blender_nodes[bmesh_init_node_id] = { # Key is the original init_id
                 'curr_node_id': bmesh_current_node_id, # Current ID in bmesh
@@ -1097,13 +1106,13 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
     #             for pa_check in parts_actions.values():
     #                 if pa_check.nodes_to_rename.get(original_counterpart_id) == new_counterpart_id:
     #                     already_registered_in_actions = True; break
-                
+
     #             if not already_registered_in_actions:
     #                 found_bm_counterpart_for_export = None
     #                 for v_lookup in bm.verts: # Find the BMVert of the original counterpart
     #                     if v_lookup[init_node_id_layer].decode('utf-8') == original_counterpart_id:
     #                         found_bm_counterpart_for_export = v_lookup; break
-                        
+
     #                 if found_bm_counterpart_for_export:
     #                     counterpart_origin_export = found_bm_counterpart_for_export[part_origin_layer].decode('utf-8')
     #                     affected_part_key_export = True if affect_node_references else counterpart_origin_export
@@ -1132,7 +1141,7 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
     # This is a more robust location for this logic.
     # We need to iterate over a copy of items if parts_actions is modified.
     # A better approach is to collect primary renames and then process them.
-    
+
     # Collect primary renames first
     primary_renames_collected = [] # list of (original_id, new_id, part_origin_of_primary)
     for v_check_rename in bm.verts:
@@ -1159,13 +1168,13 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
                     for v_lookup in bm.verts:
                         if v_lookup[init_node_id_layer].decode('utf-8') == original_counterpart_id:
                             found_bm_counterpart_for_export = v_lookup; break
-                    
+
                     if found_bm_counterpart_for_export:
                         counterpart_origin_export = found_bm_counterpart_for_export[part_origin_layer].decode('utf-8')
                         affected_part_key_export = True if affect_node_references else counterpart_origin_export
                         counterpart_actions_export: PartNodesActions = parts_actions.setdefault(affected_part_key_export, PartNodesActions())
                         counterpart_actions_export.nodes_to_rename[original_counterpart_id] = new_counterpart_id
-                        
+
                         counterpart_pos_vec_export = obj.matrix_world @ found_bm_counterpart_for_export.co
                         counterpart_init_data_export = init_nodes_data.get(original_counterpart_id)
                         counterpart_pos_sjson_export = undo_node_move_offset_and_apply_translation_to_expr(counterpart_init_data_export, counterpart_pos_vec_export) if counterpart_init_data_export else counterpart_pos_vec_export.to_tuple()
@@ -2185,14 +2194,16 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
 
                 # Delete jbeam entries if referenced node is deleted
                 if not jbeam_def_deleted and affect_node_references:
-                    if len(jbeam_section_def) > 0:
-                        len_row_header = len(jbeam_section_header)
-                        for col_idx, col in enumerate(jbeam_section_def):
-                            if col_idx < len_row_header and jbeam_section_header[col_idx].find(':') != -1:
-                                if col in nodes_to_delete:
-                                    i = delete_jbeam_entry(ast_nodes, jbeam_section_start_node_idx, jbeam_entry_start_node_idx, jbeam_entry_end_node_idx)
-                                    jbeam_def_deleted = True
-                                    break
+                    # Do not delete slidenodes entries when a referenced node is deleted
+                    if stack_head[0] != 'slidenodes':
+                        if len(jbeam_section_def) > 0:
+                            len_row_header = len(jbeam_section_header)
+                            for col_idx, col in enumerate(jbeam_section_def):
+                                if col_idx < len_row_header and jbeam_section_header[col_idx].find(':') != -1:
+                                    if col in nodes_to_delete:
+                                        i = delete_jbeam_entry(ast_nodes, jbeam_section_start_node_idx, jbeam_entry_start_node_idx, jbeam_entry_end_node_idx)
+                                        jbeam_def_deleted = True
+                                        break
 
                 jbeam_entry_start_node_idx = None
                 jbeam_entry_end_node_idx = None

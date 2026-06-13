@@ -563,6 +563,12 @@ class UIProperties(bpy.types.PropertyGroup):
         default=False,
         # No update function needed here, its value is read during the primary rename's update function
     )
+    find_jump_to_rail_on_2_nodes: bpy.props.BoolProperty(
+        name="Find Rail on 2 Nodes",
+        description="When 'Find and Jump to' is used with 2 selected nodes, search for a rail definition instead of a beam",
+        default=False,
+        # No update function needed here, its value is read by the operator
+    )
 
 
     # Node Search Property
@@ -1184,6 +1190,13 @@ class UIProperties(bpy.types.PropertyGroup):
         min=0.1, max=10.0,
         update=_update_width_property # <<< MODIFIED
     )
+    use_generic_cross_part_beam_color: bpy.props.BoolProperty(
+        name="Use Generic Cross-Part Color",
+        description="If enabled, all cross-part beams will use the 'Cross-Part Beam Color'. If disabled, they will use their respective beam type's color (e.g., Normal, Support). Dynamic coloring still applies if enabled.",
+        default=True, # Default to current behavior (using the specific cross-part color)
+        update=lambda self, context: setattr(context.scene, 'jbeam_editor_veh_render_dirty', True)
+    )
+
 
     # Highlight on Click Property
     highlight_element_on_click: bpy.props.BoolProperty(
