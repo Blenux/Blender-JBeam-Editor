@@ -2,6 +2,7 @@
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
+# of this software and associated documentation files (the "Software"), to deal
 # in the Software without restriction, including without limitation the rights
 # to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 # copies of the Software, and to permit persons to whom the Software is
@@ -17,6 +18,7 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
+from pathlib import Path
 
 import bpy
 import bmesh
@@ -34,6 +36,12 @@ from .operators import ( # Import operators used in panels
     JBEAM_EDITOR_OT_batch_node_renaming,
     JBEAM_EDITOR_OT_open_text_editor_split,
     JBEAM_EDITOR_OT_reload_jbeam_from_disk, # <<< ADDED: Import new operator
+    JBEAM_EDITOR_OT_delete_all_unused_texts, # <<< ADDED: Import new operator
+    JBEAM_EDITOR_OT_toggle_pc_filter, # <<< ADDED: Import filter operators
+    JBEAM_EDITOR_OT_open_file_in_editor, # <<< ADDED: Import new operator
+    JBEAM_EDITOR_OT_reload_pc_file, # <<< ADDED: Import PC reload operator
+    JBEAM_EDITOR_OT_save_pc_file_to_disk, # <<< ADDED: Import PC save operator
+    JBEAM_EDITOR_OT_clear_pc_filters, # <<< ADDED: Import filter operators
 )
 from .drawing import resolve_jbeam_variable_value
 
@@ -46,13 +54,18 @@ class JBEAM_EDITOR_PT_transform_panel_ext(bpy.types.Panel):
     # Poll method checks if editing is enabled
     @classmethod
     def poll(cls, context):
-        obj = context.active_object
-        return obj and obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None and obj.data.get(constants.MESH_EDITING_ENABLED, False)
+        # Always show the panel in the Item tab.
+        # Buttons inside will handle their own context sensitivity via their poll methods.
+        return True
+        # obj = context.active_object
+        # return obj and obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None and obj.data.get(constants.MESH_EDITING_ENABLED, False)
 
     def draw(self, context):
         layout = self.layout
         # <<< MOVED: Reload button moved here >>>
         layout.operator(JBEAM_EDITOR_OT_reload_jbeam_from_disk.bl_idname, text=" Reload JBeam from Disk", icon='FILE_REFRESH')
+        # <<< ADDED: Delete Unused Texts button >>>
+        layout.operator(JBEAM_EDITOR_OT_delete_all_unused_texts.bl_idname, text=" Delete Unused Texts", icon='TRASH')
         layout.operator(JBEAM_EDITOR_OT_force_jbeam_sync.bl_idname, text='Force JBeam Sync')
         layout.separator() # Add separator after buttons
 
@@ -389,16 +402,19 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
                 node_naming_col.prop(ui_props, 'use_node_naming_prefixes')
                 node_naming_col.separator()
                 prefix_row = node_naming_col.row(align=True)
-                prefix_row.enabled = ui_props.use_node_naming_prefixes
-                prefix_row.label(text="Prefix/Suffix:")
-                row = node_naming_col.row(align=True); row.enabled = ui_props.use_node_naming_prefixes
-                split = row.split(factor=0.5); split.label(text="Left Side:"); split.prop(ui_props, 'new_node_prefix_left', text="")
+                prefix_row.enabled = ui_props.use_node_naming_prefixes # Enable/disable based on toggle
+                # <<< MODIFIED: Show JSON pairs property >>>
+                prefix_row.prop(ui_props, 'new_node_symmetrical_pairs', text="Pairs")
+                # row = node_naming_col.row(align=True); row.enabled = ui_props.use_node_naming_prefixes
+                # split = row.split(factor=0.5); split.label(text="Left Side:"); split.prop(ui_props, 'new_node_prefix_left', text="")
+                # <<< END MODIFIED >>>
                 row = node_naming_col.row(align=True); row.enabled = ui_props.use_node_naming_prefixes
                 split = row.split(factor=0.5); split.label(text="Center:"); split.prop(ui_props, 'new_node_prefix_middle', text="")
-                row = node_naming_col.row(align=True); row.enabled = ui_props.use_node_naming_prefixes
-                split = row.split(factor=0.5); split.label(text="Right Side:"); split.prop(ui_props, 'new_node_prefix_right', text="")
+                # row = node_naming_col.row(align=True); row.enabled = ui_props.use_node_naming_prefixes
+                # split = row.split(factor=0.5); split.label(text="Right Side:"); split.prop(ui_props, 'new_node_prefix_right', text="")
                 row = node_naming_col.row(); row.enabled = ui_props.use_node_naming_prefixes; row.alignment = 'CENTER'; row.label(text="Position:")
                 row = node_naming_col.row(align=True); row.enabled = ui_props.use_node_naming_prefixes; row.prop(ui_props, 'new_node_prefix_position', expand=True)
+
 
             # --- Node Visualization Box (New Structure) ---
             node_vis_box = layout.box()
@@ -578,3 +594,56 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
             col.prop(ui_props, 'show_selected_beam_outline', text="Show Selected Beam Outline")
             row = col.row(); row.enabled = ui_props.show_selected_beam_outline
             row.prop(ui_props, 'selected_beam_thickness_multiplier', text="Selected Beam Multiplier")
+
+# <<< ADDED: Panel for PC Filtering >>>
+class JBEAM_EDITOR_PT_pc_filter(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'JBeam'
+    bl_label = 'Part-Config Filter'
+    bl_icon = 'FILTER'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        # Show if there are any imported PC files
+        return hasattr(context.scene, 'jbeam_editor_imported_pc_files') and context.scene.jbeam_editor_imported_pc_files
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        imported_pcs = scene.jbeam_editor_imported_pc_files
+        active_filters = {item.path for item in scene.jbeam_editor_active_pc_filters}
+
+        box = layout.box()
+        if not imported_pcs:
+            # This should not happen due to poll(), but check anyway
+            box.label(text="No .pc files found during folder import.")
+            return
+
+        row = box.row()
+        row.label(text="Active PC Filters:")
+        row.operator(JBEAM_EDITOR_OT_clear_pc_filters.bl_idname, text="", icon='X')
+
+        col = box.column(align=True)
+        for i, pc_item in enumerate(imported_pcs):
+            # Row for toggle button and reload button
+            row = col.row(align=True) # Keep align=True
+            # <<< MODIFIED: Determine if this item is active >>>
+            is_active = pc_item.path in active_filters
+            # Toggle button (takes most space)
+            op = row.operator(JBEAM_EDITOR_OT_toggle_pc_filter.bl_idname, text=Path(pc_item.path).name, emboss=is_active, icon='CHECKBOX_HLT' if is_active else 'CHECKBOX_DEHLT') # <<< MODIFIED: Set emboss based on is_active
+            op.pc_file_path = pc_item.path
+            op.index = i
+            # <<< ADDED: Edit button >>>
+            op_edit = row.operator(JBEAM_EDITOR_OT_open_file_in_editor.bl_idname, text="", icon='TEXT', emboss=is_active) # <<< MODIFIED: Set emboss
+            op_edit.filepath = pc_item.path
+            # <<< ADDED: Save button >>>
+            op_save = row.operator(JBEAM_EDITOR_OT_save_pc_file_to_disk.bl_idname, text="", icon='FILE_TICK', emboss=is_active) # <<< MODIFIED: Set emboss
+            op_save.filepath = pc_item.path
+            # <<< END ADDED >>>
+            # <<< END ADDED >>>
+            # Reload button (small icon button)
+            op_reload = row.operator(JBEAM_EDITOR_OT_reload_pc_file.bl_idname, text="", icon='FILE_REFRESH', emboss=is_active) # <<< MODIFIED: Set emboss
+            op_reload.pc_file_path = pc_item.path
+# <<< END ADDED >>>

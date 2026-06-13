@@ -22,26 +22,38 @@ import bpy
 import bmesh
 import sys
 import traceback # <<< ADDED: Import traceback
-import json # <<< ADDED: Import json
+import json
+from pathlib import Path # <<< ADDED: Import Path
 
 # Import from local modules
 from . import constants
 from . import text_editor
 from . import globals as jb_globals # Import globals
 # Import drawing module and specific elements needed
-from . import drawing # <<< ADDED: Import drawing module
-from .drawing import refresh_curr_vdata, find_node_line_number, find_beam_line_number, _scroll_editor_to_line # Import drawing functions
+from . import drawing, properties # <<< ADDED: Import drawing and properties modules
+from .drawing import refresh_curr_vdata, find_node_line_number, find_beam_line_number, _scroll_editor_to_line, _tag_redraw_3d_views # Import drawing functions
 from .text_editor import _to_short_filename # <<< ADDED: Import helper
-# <<< ADDED: Import utils for show_message_box if needed, or use self.report >>>
+# <<< MODIFIED: Import utils and text_editor >>>
 from . import utils
-# <<< ADDED: Import reimport functions >>>
+# <<< ADDED: Import import functions >>>
 from . import import_jbeam, import_vehicle
+
+from .jbeam import io as jbeam_io
 
 # Force JBeam Sync
 class JBEAM_EDITOR_OT_force_jbeam_sync(bpy.types.Operator):
     bl_idname = "jbeam_editor.force_jbeam_sync"
     bl_label = "Force JBeam Sync"
     bl_description = "Manually syncs JBeam file with the mesh. Use it when the JBeam file doesn't get updated after a JBeam mesh operation (e.g. transforming a vertex with the input boxes above)"
+
+    @classmethod
+    def poll(cls, context):
+        # Only allow if editing an active, enabled JBeam object
+        obj = context.active_object
+        return (obj and obj.mode == 'EDIT' and
+                obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None and
+                obj.data.get(constants.MESH_EDITING_ENABLED, False))
+
 
     def invoke(self, context, event):
         print('Force JBeam Sync!')
@@ -537,22 +549,22 @@ class JBEAM_EDITOR_OT_open_text_editor_split(bpy.types.Operator):
             self.report({'ERROR'}, "Active object has no JBeam file path.")
             return {'CANCELLED'}
 
-        short_filename = _to_short_filename(jbeam_filepath)
-        target_text_obj = bpy.data.texts.get(short_filename)
+        internal_name = text_editor._get_internal_filename(jbeam_filepath) # <<< Use new helper
+        target_text_obj = bpy.data.texts.get(internal_name)
 
         if not target_text_obj:
-            self.report({'WARNING'}, f"Could not find internal text '{short_filename}' for JBeam file. Cannot open editor.")
+            self.report({'WARNING'}, f"Could not find internal text '{internal_name}' for JBeam file. Cannot open editor.")
             return {'CANCELLED'}
 
         # --- Check for existing Text Editor showing the file ---
         existing_editor_area = None
         for area in context.screen.areas:
             if area.type == 'TEXT_EDITOR' and area.spaces.active and area.spaces.active.text == target_text_obj:
-                existing_editor_area = area
+                existing_editor_area = area # <<< Use internal_name here
                 break
 
         if existing_editor_area:
-            self.report({'INFO'}, f"Text Editor with '{short_filename}' is already open.")
+            self.report({'INFO'}, f"Text Editor with '{internal_name}' is already open.")
             # Optional: You could try to make this area active, but it's complex.
             # For now, just reporting is sufficient.
             return {'FINISHED'}
@@ -600,6 +612,101 @@ class JBEAM_EDITOR_OT_open_text_editor_split(bpy.types.Operator):
             return {'CANCELLED'}
 
         return {'FINISHED'}
+
+# <<< ADDED: Operator to save a specific PC file from Text Editor to disk >>>
+class JBEAM_EDITOR_OT_save_pc_file_to_disk(bpy.types.Operator):
+    """Saves the internal text buffer corresponding to the PC file back to disk."""
+    bl_idname = "jbeam_editor.save_pc_file_to_disk"
+    bl_label = "Save PC File to Disk"
+    bl_description = "Saves changes made in the Text Editor back to the original .pc file and reloads filters" # <<< MODIFIED
+    bl_options = {'REGISTER'}
+
+    filepath: bpy.props.StringProperty(
+        name="PC File Path",
+        description="The full path to the .pc file to save",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        # Always enabled if filepath is provided by the button
+        return True
+
+    def execute(self, context):
+        if not self.filepath:
+            self.report({'ERROR'}, "No PC file path specified.")
+            return {'CANCELLED'}
+
+        success = text_editor.write_from_int_to_ext_file(self.filepath)
+
+        if success:
+            # <<< MODIFIED: Trigger filter update after successful save >>>
+            self.report({'INFO'}, f"Saved & Reloaded: {Path(self.filepath).name}")
+            # properties.update_pc_filters(context.scene, context)
+            properties.update_pc_filters(context.scene, context) # Call the update function
+        else:
+            self.report({'ERROR'}, f"Failed to save file: {self.filepath}")
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+# <<< END ADDED >>>
+
+# <<< ADDED: Operator to open any file path in Text Editor >>>
+class JBEAM_EDITOR_OT_open_file_in_editor(bpy.types.Operator):
+    """Opens the specified file in a Text Editor area, splitting if necessary."""
+    bl_idname = "jbeam_editor.open_file_in_editor"
+    bl_label = "Open File in Text Editor"
+    bl_description = "Opens the specified file in a Text Editor, splitting the current area if it's a 3D View"
+    bl_options = {'REGISTER'}
+
+    filepath: bpy.props.StringProperty(
+        name="File Path",
+        description="The full path to the file to open",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        # The operator's ability to run depends on the filepath provided by the button,
+        # so the button itself should always be enabled.
+        return True
+
+    def execute(self, context):
+        if not self.filepath:
+            self.report({'ERROR'}, "No file path specified.")
+            return {'CANCELLED'}
+
+        internal_name = text_editor._get_internal_filename(self.filepath)
+        target_text_obj = bpy.data.texts.get(internal_name)
+
+        if not target_text_obj:
+            # Try to load from disk if not internal yet (shouldn't happen often for PC files after folder import)
+            file_content = utils.read_file(self.filepath)
+            if file_content is not None:
+                text_editor.write_int_file(self.filepath, file_content)
+                target_text_obj = bpy.data.texts.get(internal_name)
+            else:
+                self.report({'ERROR'}, f"Could not find or load file: {self.filepath}")
+                return {'CANCELLED'}
+
+        # Find an existing Text Editor or split the current view
+        text_area = None
+        for area in context.screen.areas:
+            if area.type == 'TEXT_EDITOR':
+                text_area = area
+                break
+
+        if text_area:
+            text_area.spaces.active.text = target_text_obj
+        else:
+            # If no text editor exists, try splitting the current area (like the other operator)
+            # We can reuse the logic by calling the other operator if needed, or replicate it.
+            # For simplicity, let's just report if no editor is open.
+            self.report({'INFO'}, "No Text Editor area open. Please open one manually.")
+            # Alternatively, call the split operator:
+            # bpy.ops.jbeam_editor.open_text_editor_split('INVOKE_DEFAULT') # This uses active object path, not ideal
+            # Best to just focus/change existing editor or ask user to open one.
+
+        return {'FINISHED'}
+# <<< END ADDED >>>
 
 # <<< Operator for Node Deletion Confirmation >>>
 class JBEAM_EDITOR_OT_confirm_node_deletion(bpy.types.Operator):
@@ -1028,3 +1135,365 @@ class JBEAM_EDITOR_OT_reload_jbeam_from_disk(bpy.types.Operator):
 
         return {'FINISHED'}
 # <<< END: Added Reload JBeam from Disk Operator >>>
+
+# <<< ADDED: Operator for Text Deletion Confirmation >>>
+class JBEAM_EDITOR_OT_confirm_text_deletion(bpy.types.Operator):
+    """Confirms deletion of an unused internal JBeam text document."""
+    bl_idname = "jbeam_editor.confirm_text_deletion"
+    bl_label = "Confirm Unused Text Deletion"
+    bl_options = {'REGISTER', 'INTERNAL'} # INTERNAL prevents it showing in search
+
+    short_filename: bpy.props.StringProperty(options={'HIDDEN'})
+    filepath: bpy.props.StringProperty(options={'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        # Operator is invoked internally, no UI poll needed
+        return True
+
+    def invoke(self, context, event):
+        # Check if text still exists before showing dialog
+        if not bpy.data.texts.get(self.short_filename):
+            self.report({'INFO'}, f"Text document '{Path(self.filepath).name}' already removed.")
+            return {'CANCELLED'}
+        return context.window_manager.invoke_props_dialog(self, width=450)
+
+    def draw(self, context):
+        layout = self.layout
+        row = layout.row()
+        row.alignment = 'CENTER'
+        row.label(text=f"Text document for '{Path(self.filepath).name}'") # Show filename only
+        row = layout.row()
+        row.alignment = 'CENTER'
+        row.label(text="is no longer used by any JBeam object.")
+        row = layout.row()
+        row.alignment = 'CENTER'
+        row.label(text="Delete this internal text document?")
+
+    def execute(self, context):
+        scene = context.scene
+        text_to_delete = bpy.data.texts.get(self.short_filename)
+
+        if text_to_delete:
+            try:
+                # Clean up scene properties related to this file
+                if text_editor.SCENE_PREV_TEXTS in scene and self.short_filename in scene[text_editor.SCENE_PREV_TEXTS]: # Key is internal_name (passed as short_filename prop)
+                    del scene[text_editor.SCENE_PREV_TEXTS][self.short_filename] # <<< Use internal_name
+
+                if text_editor.SCENE_SHORT_TO_FULL_FILENAME in scene and self.short_filename in scene[text_editor.SCENE_SHORT_TO_FULL_FILENAME]: # <<< Use internal_name
+                    del scene[text_editor.SCENE_SHORT_TO_FULL_FILENAME][self.short_filename]
+
+                # Remove the text document
+                bpy.data.texts.remove(text_to_delete, do_unlink=True)
+                self.report({'INFO'}, f"Deleted unused text document: {Path(self.filepath).name}")
+
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed to delete text document: {e}")
+                traceback.print_exc()
+                return {'CANCELLED'}
+        else:
+            # Report as INFO instead of WARNING if text was already removed by another instance
+            self.report({'INFO'}, f"Text document '{Path(self.filepath).name}' was already removed.")
+
+        return {'FINISHED'}
+
+# <<< ADDED: Operator for Deleting All Unused Texts >>>
+class JBEAM_EDITOR_OT_delete_all_unused_texts(bpy.types.Operator):
+    """Finds and deletes all internal JBeam text documents not currently used by any JBeam object."""
+    bl_idname = "jbeam_editor.delete_all_unused_texts"
+    bl_label = "Delete All Unused JBeam Texts"
+    bl_description = "Deletes internal JBeam text documents (.jbeam) that are not linked to any current JBeam object in the scene" # <<< MODIFIED description
+    bl_options = {'REGISTER'} # Keep REGISTER if invoked by button
+
+    # Store list of internal names to delete
+    unused_texts_to_delete: list = []
+
+    @classmethod
+    def poll(cls, context):
+        # Always enabled, but checks for texts internally
+        return True
+
+    def invoke(self, context, event):
+        scene = context.scene
+        self.unused_texts_to_delete.clear() # Clear previous list
+
+        internal_name_to_full_map = scene.get(text_editor.SCENE_SHORT_TO_FULL_FILENAME, {}) # Map is internal_name -> full_path
+        if not internal_name_to_full_map:
+            self.report({'INFO'}, "No internal JBeam text documents found to check.")
+            return {'CANCELLED'}
+
+        # Build set of filepaths currently used by JBeam objects
+        used_filepaths = set()
+        for obj in scene.objects:
+            if obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None:
+                fp = obj.data.get(constants.MESH_JBEAM_FILE_PATH)
+                if fp:
+                    used_filepaths.add(fp)
+
+        # Find unused texts
+        for internal_name, full_filepath in internal_name_to_full_map.items(): # Iterate using internal_name
+            # <<< ADDED: Skip .pc files >>>
+            if full_filepath.lower().endswith('.pc'):
+                continue
+            # <<< END ADDED >>>
+            if full_filepath not in used_filepaths:
+                # Check if the text object actually exists
+                if bpy.data.texts.get(internal_name):
+                    self.unused_texts_to_delete.append(internal_name) # Store internal_name
+
+        if not self.unused_texts_to_delete:
+            self.report({'INFO'}, "No unused internal JBeam text documents found.")
+            return {'CANCELLED'}
+
+        # Show confirmation dialog
+        return context.window_manager.invoke_props_dialog(self, width=450)
+
+    def draw(self, context):
+        layout = self.layout
+        # <<< MODIFIED: Center align the count label >>>
+        row = layout.row()
+        row.alignment = 'CENTER' # <<< MODIFIED: Clarify only JBeam texts >>>
+        row.label(text=f"Found {len(self.unused_texts_to_delete)} unused internal JBeam text documents.")
+        layout.separator()
+        row = layout.row()
+        row.alignment = 'CENTER'
+        row.label(text="Are you sure you want to delete them?")
+        row = layout.row()
+        row.alignment = 'CENTER'
+        row.label(text="(This cannot be undone.)")
+
+    def execute(self, context):
+        scene = context.scene
+        deleted_count = 0
+        for internal_name in self.unused_texts_to_delete: # Iterate using internal_name
+            # Use the single text deletion operator's logic for cleanup
+            # We pass the properties directly to its execute method
+            # Pass internal_name as the 'short_filename' property
+            bpy.ops.jbeam_editor.confirm_text_deletion('EXEC_DEFAULT', short_filename=internal_name, filepath="<unknown>") # Filepath isn't strictly needed here
+            deleted_count += 1
+
+        self.report({'INFO'}, f"Deleted {deleted_count} unused JBeam text documents.")
+        return {'FINISHED'}
+# <<< END ADDED >>>
+
+# <<< ADDED: Operator for Importing Folder >>>
+class JBEAM_EDITOR_OT_import_folder(bpy.types.Operator, import_jbeam.ImportHelper):
+    """Imports all .jbeam and .pc files from a selected folder"""
+    bl_idname = "jbeam_editor.import_vehicle_folder" # Renamed idname for clarity
+    bl_label = "Import BeamNG Vehicle Folder" # Renamed label
+    bl_description = "Recursively imports .jbeam (all parts), .pc, and optionally .dae files from the selected folder" # Updated description
+
+    # Use directory property
+    directory: bpy.props.StringProperty(
+        name="Directory",
+        description="Select the folder containing JBeam and DAE files",
+        subtype='DIR_PATH',
+    )
+
+    # filter_glob is not used for directory selection but required by ImportHelper
+    filter_glob: bpy.props.StringProperty(default="", options={'HIDDEN'})
+
+    # <<< ADDED: Toggle for DAE import >>>
+    import_dae_files: bpy.props.BoolProperty(
+        name="Import DAE Files",
+        description="Import Collada (.dae) mesh files found in the folder",
+        default=True,
+    )
+
+    def execute(self, context):
+        folder_path = Path(self.directory)
+        if not folder_path.is_dir():
+            self.report({'ERROR'}, f"Selected path is not a valid directory: {self.directory}")
+            return {'CANCELLED'}
+
+        jbeam_files_found = list(folder_path.rglob('*.jbeam'))
+        pc_files_found = list(folder_path.rglob('*.pc'))
+        dae_files_found = list(folder_path.rglob('*.dae')) # <<< ADDED: Find DAE files
+
+        if not jbeam_files_found and not pc_files_found and (not self.import_dae_files or not dae_files_found):
+            self.report({'WARNING'}, f"No .jbeam, .pc, or requested .dae files found in {folder_path} or its subdirectories.")
+            return {'CANCELLED'}
+
+        dae_imported_count = 0
+        dae_skipped_count = 0
+
+        # <<< ADDED: Import DAE files first if requested >>>
+        if self.import_dae_files:
+            print(f"Importing {len(dae_files_found)} DAE files...")
+            for dae_file in dae_files_found:
+                dae_filepath_str = dae_file.as_posix()
+                try:
+                    # Use Blender's built-in Collada importer
+                    bpy.ops.wm.collada_import(filepath=dae_filepath_str)
+                    dae_imported_count += 1
+                except RuntimeError as e:
+                    print(f"Error importing DAE file {dae_filepath_str}: {e}", file=sys.stderr)
+                    dae_skipped_count += 1
+                except Exception as e: # Catch other potential exceptions
+                    print(f"Unexpected error importing DAE file {dae_filepath_str}: {e}", file=sys.stderr)
+                    dae_skipped_count += 1
+            print("DAE import finished.")
+        # <<< END ADDED >>>
+
+        jbeam_imported_count = 0
+        jbeam_skipped_count = 0
+        pc_imported_count = 0 # <<< ADDED: Count for PC files
+
+        # <<< ADDED: Get JBeam collection to check for existing objects >>>
+        jbeam_collection: bpy.types.Collection | None = bpy.data.collections.get('JBeam Objects')
+
+        # Import JBeam files (all parts)
+        for jbeam_file in jbeam_files_found:
+            jbeam_filepath_str = jbeam_file.as_posix()
+            try:
+                # <<< ADDED: Invalidate cache for the specific file being processed >>>
+                # This ensures we get fresh data if the file changed since last import
+                import_jbeam.jbeam_io.invalidate_cache_for_file(jbeam_filepath_str)
+                jbeam_file_data, _ = import_jbeam.jbeam_io.get_jbeam(jbeam_filepath_str, False, True)
+                if jbeam_file_data:
+                    for part_name in jbeam_file_data.keys():
+                        # <<< ADDED: Check if part object already exists >>>
+                        if jbeam_collection and jbeam_collection.objects.get(part_name):
+                            # print(f"Skipping import: Part '{part_name}' already exists in scene.") # Optional debug print
+                            jbeam_skipped_count += 1
+                            continue # Skip to the next part
+                        # <<< END ADDED >>>
+
+                        # Reuse import_jbeam_part logic, handle existing parts
+                        res = import_jbeam.import_jbeam_part(context, jbeam_filepath_str, jbeam_file_data, part_name)
+                        if res:
+                            jbeam_imported_count += 1
+                        else:
+                            # import_jbeam_part handles reporting errors, but we count skips
+                            jbeam_skipped_count += 1
+            except Exception as e:
+                print(f"Error processing JBeam file {jbeam_filepath_str}: {e}", file=sys.stderr)
+                jbeam_skipped_count += 1 # Count as skipped on error
+
+        # <<< MODIFIED: Moved PC file finding earlier >>>
+        scene = context.scene
+        # Ensure the collection property exists
+        if not hasattr(scene, 'jbeam_editor_imported_pc_files'):
+             # This might happen if the addon was just enabled or properties weren't registered yet.
+             # <<< MODIFIED: Check scene dictionary as fallback >>>
+             # For robustness, try accessing via scene dictionary if direct attribute fails.
+             if 'jbeam_editor_imported_pc_files' not in scene:
+                 self.report({'ERROR'}, "PC file storage property not found on scene.")
+                 return {'CANCELLED'} # Cannot store PC files
+
+        imported_pc_collection = scene.jbeam_editor_imported_pc_files
+        existing_pc_paths = {item.path for item in imported_pc_collection}
+
+        for pc_file in pc_files_found:
+            pc_path_str = pc_file.as_posix()
+            if pc_path_str not in existing_pc_paths:
+                # --- ADDED: Read content and write internal text ---
+                pc_content = utils.read_file(pc_path_str)
+                if pc_content is not None:
+                    text_editor.write_int_file(pc_path_str, pc_content) # This will use the base name now
+                # --- END ADDED ---
+                item = imported_pc_collection.add()
+                item.path = pc_path_str
+                pc_imported_count += 1
+        # <<< END MODIFIED >>>
+
+        # <<< ADDED: Final Summary Report >>>
+        summary_message = (
+            f"Folder Import Summary:\n"
+            f"- JBeam Parts Imported: {jbeam_imported_count} (Skipped/Errors: {jbeam_skipped_count})\n"
+            f"- PC Files Added: {pc_imported_count}\n"
+        )
+        if self.import_dae_files:
+            summary_message += f"- DAE Files Imported: {dae_imported_count} (Skipped/Errors: {dae_skipped_count})"
+
+        self.report({'INFO'}, summary_message)
+        print(summary_message) # Also print to console
+        # <<< END ADDED >>>
+
+        return {'FINISHED'}
+# <<< END ADDED >>>
+
+# <<< ADDED: Operator to toggle a PC filter >>>
+class JBEAM_EDITOR_OT_toggle_pc_filter(bpy.types.Operator):
+    """Adds or removes a PC file path from the active filters."""
+    bl_idname = "jbeam_editor.toggle_pc_filter"
+    bl_label = "Toggle PC Filter"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    pc_file_path: bpy.props.StringProperty()
+    index: bpy.props.IntProperty() # Optional index, might not be needed
+
+    def execute(self, context):
+        scene = context.scene
+        active_filters = scene.jbeam_editor_active_pc_filters
+        found_idx = -1
+        for i, item in enumerate(active_filters):
+            if item.path == self.pc_file_path:
+                found_idx = i
+                break
+
+        if found_idx != -1:
+            # Remove existing filter
+            active_filters.remove(found_idx)
+        else:
+            # Add new filter
+            item = active_filters.add()
+            item.path = self.pc_file_path
+
+        # Manually call the update function since CollectionProperty doesn't have 'update'
+        properties.update_pc_filters(scene, context) # Pass scene as 'self' for the update function context
+        return {'FINISHED'}
+# <<< END ADDED >>>
+
+# <<< ADDED: Operator to clear all PC filters >>>
+class JBEAM_EDITOR_OT_clear_pc_filters(bpy.types.Operator):
+    """Clears all active PC file filters."""
+    bl_idname = "jbeam_editor.clear_pc_filters"
+    bl_label = "Clear All PC Filters"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        scene = context.scene
+        active_filters = scene.jbeam_editor_active_pc_filters
+        if active_filters:
+            active_filters.clear()
+            # Manually call the update function
+            properties.update_pc_filters(scene, context) # Pass scene as 'self' for the update function context
+            self.report({'INFO'}, "Cleared all PC filters.")
+        else:
+            self.report({'INFO'}, "No active PC filters to clear.")
+        return {'FINISHED'}
+# <<< END ADDED >>>
+
+# <<< ADDED: Operator to reload a specific PC file >>>
+class JBEAM_EDITOR_OT_reload_pc_file(bpy.types.Operator):
+    """Reloads a specific Part Config (.pc) file from disk."""
+    bl_idname = "jbeam_editor.reload_pc_file"
+    bl_label = "Reload PC File"
+    bl_description = "Reloads the selected .pc file from disk, updating the internal text and potentially filters"
+    bl_options = {'REGISTER'} # Keep REGISTER if invoked by button
+
+    pc_file_path: bpy.props.StringProperty(
+        name="PC File Path",
+        description="The full path to the .pc file to reload",
+    )
+
+    def execute(self, context):
+        if not self.pc_file_path:
+            self.report({'ERROR'}, "No PC file path specified.")
+            return {'CANCELLED'}
+
+        # 1. Read from disk
+        file_content = utils.read_file(self.pc_file_path)
+        if file_content is None:
+            self.report({'ERROR'}, f"Could not read file from disk: {self.pc_file_path}")
+            return {'CANCELLED'}
+
+        # 2. Update internal text
+        text_editor.write_int_file(self.pc_file_path, file_content)
+
+        # 3. Trigger filter update
+        properties.update_pc_filters(context.scene, context)
+        self.report({'INFO'}, f"Reloaded PC file: {Path(self.pc_file_path).name}")
+        return {'FINISHED'}
+# <<< END ADDED >>>

@@ -443,6 +443,7 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
     # Store hidden states for ALL parts first ---
     all_hidden_edges_state = {}
     all_hidden_verts_state = {} # <<< ADDED: Dictionary to store vertex hidden states
+    all_hidden_faces_state = {} # <<< ADDED: Dictionary to store face hidden states
     for part in parts:
         if part == '' or part not in objs: # Skip empty parts or parts not in the collection
             continue
@@ -489,6 +490,23 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
                         # Use part_origin from vertex layer for key >>>
                         part_origin = vert[node_origin_layer].decode('utf-8')
                         all_hidden_verts_state[(part_origin, node_id)] = vert.hide
+
+            # Store Face Hidden State --- <<< ADDED >>>
+            face_idx_layer = temp_bm.faces.layers.int.get(constants.FL_FACE_IDX)
+            face_origin_layer = temp_bm.faces.layers.string.get(constants.FL_FACE_PART_ORIGIN)
+            if face_idx_layer and face_origin_layer:
+                temp_bm.faces.ensure_lookup_table()
+                for face in temp_bm.faces:
+                    face_idx_in_part = face[face_idx_layer]
+                    # Only store for existing JBeam faces
+                    if face_idx_in_part > 0:
+                        try:
+                            part_origin = face[face_origin_layer].decode('utf-8')
+                            # Use part_origin and face index within part as the key
+                            all_hidden_faces_state[(part_origin, face_idx_in_part)] = face.hide
+                        except Exception as face_state_err:
+                            print(f"Warning: Could not store hidden state for face index {face_idx_in_part} in part '{part}': {face_state_err}", file=sys.stderr)
+            # --- End Store Face Hidden State --- <<< END ADDED >>>
 
         except Exception as e:
             print(f"Error storing hidden state for {part}: {e}", file=sys.stderr)
@@ -563,6 +581,23 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
                     part_origin = vert[node_origin_layer].decode('utf-8')
                     if (part_origin, node_id) in all_hidden_verts_state:
                         vert.hide = all_hidden_verts_state[(part_origin, node_id)]
+
+        # Apply hidden face states --- <<< ADDED >>>
+        face_idx_layer = bm.faces.layers.int.get(constants.FL_FACE_IDX)
+        face_origin_layer = bm.faces.layers.string.get(constants.FL_FACE_PART_ORIGIN)
+        if face_idx_layer and face_origin_layer and all_hidden_faces_state:
+            bm.faces.ensure_lookup_table()
+            for face in bm.faces:
+                face_idx_in_part = face[face_idx_layer]
+                if face_idx_in_part > 0: # Only apply to faces that existed in JBeam
+                    try:
+                        part_origin = face[face_origin_layer].decode('utf-8')
+                        if (part_origin, face_idx_in_part) in all_hidden_faces_state:
+                            face.hide = all_hidden_faces_state[(part_origin, face_idx_in_part)]
+                    except Exception as apply_face_state_err:
+                        # Should not happen often if storing worked, but good practice
+                        print(f"Warning: Could not apply hidden state for face index {face_idx_in_part} in part '{part}': {apply_face_state_err}", file=sys.stderr)
+        # --- End Apply Face Hidden State --- <<< END ADDED >>>
 
         bm.normal_update()
 

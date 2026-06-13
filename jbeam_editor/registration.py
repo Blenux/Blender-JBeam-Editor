@@ -24,7 +24,8 @@ import sys
 # Import from local modules
 from . import constants
 # Import classes and functions from other modules
-from .properties import UIProperties
+# <<< MODIFIED: Import update function >>>
+from .properties import UIProperties, ImportedPCFileItem, ActivePCFilterItem, update_pc_filters
 from .operators import (
     JBEAM_EDITOR_OT_force_jbeam_sync,
     JBEAM_EDITOR_OT_undo,
@@ -37,8 +38,16 @@ from .operators import (
     JBEAM_EDITOR_OT_open_text_editor_split,
     JBEAM_EDITOR_OT_confirm_node_deletion,
     JBEAM_EDITOR_OT_warn_native_undo,
+    JBEAM_EDITOR_OT_open_file_in_editor, # <<< ADDED: Import new operator
     JBEAM_EDITOR_OT_warn_native_redo,
+    JBEAM_EDITOR_OT_save_pc_file_to_disk, # <<< ADDED: Import new operator
     JBEAM_EDITOR_OT_reload_jbeam_from_disk, # <<< ADDED: Import new operator
+    JBEAM_EDITOR_OT_confirm_text_deletion, # <<< ADDED: Import new operator
+    JBEAM_EDITOR_OT_delete_all_unused_texts, # <<< ADDED: Import new operator
+    JBEAM_EDITOR_OT_toggle_pc_filter, # <<< ADDED: Import filter operators
+    JBEAM_EDITOR_OT_clear_pc_filters, # <<< ADDED: Import filter operators
+    JBEAM_EDITOR_OT_import_folder, # <<< ADDED: Import new folder import operator
+    JBEAM_EDITOR_OT_reload_pc_file, # <<< ADDED: Import new PC reload operator
 )
 from .panels import (
     JBEAM_EDITOR_PT_transform_panel_ext,
@@ -50,9 +59,11 @@ from .panels import (
     # <<< REMOVE PANEL IMPORTS >>>
     # JBEAM_EDITOR_PT_node_visualization,
     # JBEAM_EDITOR_PT_line_visualization,
+    JBEAM_EDITOR_PT_pc_filter, # <<< ADDED: Import new panel
     # <<< END REMOVE >>>
 )
 from .handlers import (
+    previous_known_jbeam_objects, texts_pending_deletion_check, # <<< ADDED: Import globals for cleanup
     depsgraph_update_post_handler,
     check_files_for_changes_timer,
     poll_active_operators_timer,
@@ -70,6 +81,8 @@ from . import import_vehicle
 
 # List of classes to register
 classes = (
+    ImportedPCFileItem, # <<< ADDED
+    ActivePCFilterItem, # <<< ADDED
     UIProperties,
     JBEAM_EDITOR_OT_force_jbeam_sync,
     JBEAM_EDITOR_OT_undo,
@@ -82,8 +95,16 @@ classes = (
     JBEAM_EDITOR_OT_open_text_editor_split,
     JBEAM_EDITOR_OT_confirm_node_deletion,
     JBEAM_EDITOR_OT_warn_native_undo,
+    JBEAM_EDITOR_OT_open_file_in_editor, # <<< ADDED: Add new operator to registration list
     JBEAM_EDITOR_OT_warn_native_redo,
+    JBEAM_EDITOR_OT_save_pc_file_to_disk, # <<< ADDED: Add new operator to registration list
     JBEAM_EDITOR_OT_reload_jbeam_from_disk, # <<< ADDED: Add new operator to registration list
+    JBEAM_EDITOR_OT_confirm_text_deletion, # <<< ADDED: Add new operator to registration list
+    JBEAM_EDITOR_OT_delete_all_unused_texts, # <<< ADDED: Add new operator to registration list
+    JBEAM_EDITOR_OT_toggle_pc_filter, # <<< ADDED
+    JBEAM_EDITOR_OT_clear_pc_filters, # <<< ADDED
+    JBEAM_EDITOR_OT_import_folder, # <<< ADDED: Add new folder import operator
+    JBEAM_EDITOR_OT_reload_pc_file, # <<< ADDED: Add new PC reload operator
     JBEAM_EDITOR_PT_transform_panel_ext,
     JBEAM_EDITOR_PT_jbeam_panel,
     JBEAM_EDITOR_PT_find_node,
@@ -93,6 +114,7 @@ classes = (
     # <<< REMOVE PANELS FROM LIST >>>
     # JBEAM_EDITOR_PT_node_visualization,
     # JBEAM_EDITOR_PT_line_visualization,
+    JBEAM_EDITOR_PT_pc_filter, # <<< ADDED
     # <<< END REMOVE >>>
     import_jbeam.JBEAM_EDITOR_OT_import_jbeam,
     import_jbeam.JBEAM_EDITOR_OT_choose_jbeam,
@@ -118,6 +140,9 @@ def menu_func_export(self, context):
 
 def menu_func_import_vehicle(self, context):
     self.layout.operator(import_vehicle.JBEAM_EDITOR_OT_import_vehicle.bl_idname, text="Part Config File (.pc)")
+
+def menu_func_import_folder(self, context):
+    self.layout.operator(JBEAM_EDITOR_OT_import_folder.bl_idname, text="BeamNG Vehicle Folder")
 
 # Helper for keymaps
 def init_keymaps():
@@ -165,10 +190,14 @@ def register():
     bpy.types.Scene.jbeam_editor_text_editor_short_to_full_filename = bpy.props.CollectionProperty(type=bpy.types.PropertyGroup) # Use CollectionProperty or similar if needed, or just rely on scene dictionary
     # Add scene property for tracking previous text states
     bpy.types.Scene.jbeam_editor_text_editor_files_text = bpy.props.CollectionProperty(type=bpy.types.PropertyGroup) # Use CollectionProperty or similar if needed, or just rely on scene dictionary
+    # <<< ADDED: PC Filter Properties >>>
+    bpy.types.Scene.jbeam_editor_imported_pc_files = bpy.props.CollectionProperty(type=ImportedPCFileItem)
+    bpy.types.Scene.jbeam_editor_active_pc_filters = bpy.props.CollectionProperty(type=ActivePCFilterItem) # <<< MODIFIED: Removed update function
 
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
-    bpy.types.TOPBAR_MT_file_import.append(menu_func_import_vehicle)
+    # bpy.types.TOPBAR_MT_file_import.append(menu_func_import_vehicle)
+    bpy.types.TOPBAR_MT_file_import.append(menu_func_import_folder) # <<< ADDED: Add folder import menu item
 
     # Clear existing handlers before appending (safety measure)
     while depsgraph_update_post_handler in bpy.app.handlers.depsgraph_update_post:
@@ -223,7 +252,8 @@ def unregister():
     try:
         bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
         bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
-        bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_vehicle)
+        # bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_vehicle)
+        bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_folder) # <<< ADDED: Remove folder import menu item
     except Exception as e: print(f"Error removing menu functions: {e}", file=sys.stderr)
 
     for c in reversed(classes):
@@ -245,4 +275,7 @@ def unregister():
         # Clean up scene properties used for text editor tracking
         if hasattr(bpy.types.Scene, 'jbeam_editor_text_editor_short_to_full_filename'): del bpy.types.Scene.jbeam_editor_text_editor_short_to_full_filename
         if hasattr(bpy.types.Scene, 'jbeam_editor_text_editor_files_text'): del bpy.types.Scene.jbeam_editor_text_editor_files_text
+        # <<< ADDED: PC Filter Properties Cleanup >>>
+        if hasattr(bpy.types.Scene, 'jbeam_editor_imported_pc_files'): del bpy.types.Scene.jbeam_editor_imported_pc_files
+        if hasattr(bpy.types.Scene, 'jbeam_editor_active_pc_filters'): del bpy.types.Scene.jbeam_editor_active_pc_filters
     except Exception as e: print(f"Error deleting scene properties: {e}", file=sys.stderr)

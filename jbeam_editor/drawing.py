@@ -2487,6 +2487,11 @@ def draw_callback_view(context: bpy.types.Context):
                                         if ui_props.use_dynamic_node_coloring and ui_props.use_auto_node_thresholds:
                                             node_data = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
                                             if node_data and isinstance(node_data, dict):
+                                                # <<< ADDED: Check if node exists in cache before calculating threshold >>>
+                                                if node_id not in all_nodes_cache:
+                                                    # print(f"Debug: Skipping node {node_id} for auto-threshold (not in cache).") # Optional debug
+                                                    continue
+                                                # <<< END ADDED >>>
                                                 node_weight_raw = node_data.get('nodeWeight')
                                                 if node_weight_raw is not None:
                                                     resolved_value = resolve_jbeam_variable_value(node_weight_raw, jb_globals.jbeam_variables_cache)
@@ -2524,6 +2529,11 @@ def draw_callback_view(context: bpy.types.Context):
                                     if ui_props.use_dynamic_node_coloring and ui_props.use_auto_node_thresholds:
                                         node_data = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
                                         if node_data and isinstance(node_data, dict):
+                                            # <<< ADDED: Check if node exists in cache before calculating threshold >>>
+                                            if node_id not in all_nodes_cache:
+                                                # print(f"Debug: Skipping node {node_id} for auto-threshold (not in cache).") # Optional debug
+                                                continue
+                                            # <<< END ADDED >>>
                                             node_weight_raw = node_data.get('nodeWeight')
                                             if node_weight_raw is not None:
                                                 resolved_value = resolve_jbeam_variable_value(node_weight_raw, jb_globals.jbeam_variables_cache)
@@ -2559,6 +2569,12 @@ def draw_callback_view(context: bpy.types.Context):
                         id1 = beam_data.get('id1:')
                         id2 = beam_data.get('id2:')
                         if not id1 or not id2: continue
+
+                        # <<< ADDED: Check if nodes exist in cache before calculating threshold >>>
+                        if id1 not in all_nodes_cache or id2 not in all_nodes_cache:
+                            # print(f"Debug: Skipping beam {id1}-{id2} for auto-threshold (nodes not in cache).") # Optional debug
+                            continue
+                        # <<< END ADDED >>>
 
                         # Check node visibility
                         node1_hidden = node_id_to_hide_status.get(id1, False)

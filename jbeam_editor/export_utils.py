@@ -199,8 +199,8 @@ def add_jbeam_nodes(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
     i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx)
 
     # <<< START ADDED COMMENT LOGIC >>>
-    # Check if "//ADDED NODES BY EDITOR" comment exists within the current node section
-    comment_text = '//ADDED NODES BY EDITOR'
+    # Check if "//ADDED NODES BY EDITOR//" comment exists within the current node section
+    comment_text = '//ADDED NODES BY EDITOR//'
     comment_already_exists_in_section = False
     # Iterate only within the bounds of the current node section
     for k in range(jbeam_section_start_node_idx, jbeam_section_end_node_idx):
@@ -209,7 +209,7 @@ def add_jbeam_nodes(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
             comment_already_exists_in_section = True
             break # Found it within the section, no need to check further
 
-    # Add "//ADDED NODES BY EDITOR" comment only if nodes are being added and comment doesn't already exist in this section
+    # Add "//ADDED NODES BY EDITOR//" comment only if nodes are being added and comment doesn't already exist in this section
     if nodes_to_add and not comment_already_exists_in_section:
         # Add an extra newline before the standard indent and comment text
         comment_wsc_value = '\n' + NL_TWO_INDENT + comment_text
@@ -263,24 +263,27 @@ def add_jbeam_nodes(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 
 # Add jbeam beams to end of JBeam section from list of beams to add (this is called on beam section list end character)
 def add_jbeam_beams(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, beams_to_add: list):
+    # <<< REVERTED: Use hardcoded comment >>>
+    comment_text = '//ADDED BEAMS BY EDITOR//'
+
     # <<< ADDED: Early exit if nothing to add >>>
     if not beams_to_add:
         return jbeam_section_end_node_idx
-
     i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx)
 
-    # Check if "//ADDED BEAMS BY EDITOR" comment exists within the current beam section
-    comment_text = '//ADDED BEAMS BY EDITOR'
+    # <<< MODIFIED: Use the custom comment_text for the existence check >>>
+    # Check if the custom comment exists within the current beam section
     comment_already_exists_in_section = False
     # Iterate only within the bounds of the current beam section
     for k in range(jbeam_section_start_node_idx, jbeam_section_end_node_idx):
         node = ast_nodes[k]
-        if node.data_type == 'wsc' and comment_text in node.value:
+        if node.data_type == 'wsc' and comment_text and comment_text in node.value: # Check if comment_text is not empty before checking 'in'
             comment_already_exists_in_section = True
             break # Found it within the section, no need to check further
 
-    # Add "//ADDED BEAMS BY EDITOR" comment only if beams are being added and comment doesn't already exist in this section
-    if beams_to_add and not comment_already_exists_in_section:
+    # <<< MODIFIED: Use custom comment_text and check if it's not empty >>>
+    # Add comment only if beams are being added, comment text is provided, and comment doesn't already exist in this section
+    if beams_to_add and comment_text and not comment_already_exists_in_section:
         # Add an extra newline before the standard indent and comment text
         comment_wsc_value = '\n' + NL_TWO_INDENT + comment_text
         if node_after_entry:
@@ -542,29 +545,56 @@ def set_node_renames_positions(jbeam_file_data_modified: dict, jbeam_part: str, 
             rec_node_ref_rename(section_data, node_renames)
 
 
-# <<< MODIFIED HELPER FUNCTION >>>
+# <<< MODIFIED HELPER FUNCTION: get_base_node_name >>>
 def get_base_node_name(node_id: str, ui_props: 'UIProperties'): # Keep hint as string literal
-    """Removes L_, R_, or M_ prefix/suffix if present, based on settings."""
-    # <<< ADDED: Check if prefixing is enabled >>>
+    """
+    Removes the longest matching symmetrical or middle identifier (prefix/suffix)
+    from the node ID based on settings. Returns the base name, the type of
+    identifier found ('left', 'right', 'middle', 'none'), and the actual
+    identifier string that was removed.
+    """
     if not ui_props.use_node_naming_prefixes:
-        return node_id # Return original ID if feature is disabled
-    # <<< END ADDED >>>
+        return node_id, 'none', None # Return original ID if feature is disabled
 
     prefix_pos = ui_props.new_node_prefix_position
-    prefixes = (ui_props.new_node_prefix_left,
-                ui_props.new_node_prefix_middle,
-                ui_props.new_node_prefix_right)
+    middle_id = ui_props.new_node_prefix_middle
+    pairs_json = ui_props.new_node_symmetrical_pairs
+    symmetrical_pairs = []
+    try:
+        parsed_pairs = json.loads(pairs_json)
+        if isinstance(parsed_pairs, list):
+            # Ensure pairs are valid lists/tuples of two strings
+            symmetrical_pairs = [(p[0], p[1]) for p in parsed_pairs if isinstance(p, (list, tuple)) and len(p) == 2 and isinstance(p[0], str) and isinstance(p[1], str)]
+    except (json.JSONDecodeError, TypeError, IndexError):
+        print(f"Warning: Could not parse symmetrical pairs JSON: {pairs_json}. Using default [['l', 'r']].", file=sys.stderr)
+        symmetrical_pairs = [("l", "r")] # Fallback
 
-    if prefix_pos == 'FRONT':
-        for prefix in prefixes:
-            if prefix and node_id.startswith(prefix): # Check if prefix is not empty
-                return node_id[len(prefix):] # Return everything after the prefix
+    # Sort pairs by the length of identifiers (longest first) to ensure correct matching
+    symmetrical_pairs.sort(key=lambda p: max(len(p[0]), len(p[1])), reverse=True)
+
+    # Check symmetrical pairs first (longest to shortest)
+    for left_id, right_id in symmetrical_pairs:
+        if prefix_pos == 'FRONT':
+            if left_id and node_id.startswith(left_id):
+                return node_id[len(left_id):], 'left', left_id
+            elif right_id and node_id.startswith(right_id):
+                return node_id[len(right_id):], 'right', right_id
+        elif prefix_pos == 'BACK':
+            if left_id and node_id.endswith(left_id):
+                return node_id[:-len(left_id)], 'left', left_id
+            elif right_id and node_id.endswith(right_id):
+                return node_id[:-len(right_id)], 'right', right_id
+
+    # If no symmetrical pair matched, check the middle identifier
+    if middle_id:
+        if prefix_pos == 'FRONT' and node_id.startswith(middle_id):
+             return node_id[len(middle_id):], 'middle', middle_id
     elif prefix_pos == 'BACK':
-        for suffix in prefixes:
-             if suffix and node_id.endswith(suffix): # Check if suffix is not empty
-                return node_id[:-len(suffix)] # Return everything before the suffix
+         if node_id.endswith(middle_id):
+             return node_id[:-len(middle_id)], 'middle', middle_id
 
-    return node_id # Return original if no prefix/suffix found or applicable
+    # No identifier found
+    return node_id, 'none', None
 # <<< END MODIFIED HELPER FUNCTION >>>
 
 # <<< START ADDED HELPER FUNCTION >>>
@@ -576,21 +606,38 @@ def get_symmetrical_node_id(node_id: str, ui_props: 'UIProperties'):
     if not ui_props.use_node_naming_prefixes:
         return None # Symmetry disabled
 
-    prefix_pos = ui_props.new_node_prefix_position
-    left_id = ui_props.new_node_prefix_left
-    right_id = ui_props.new_node_prefix_right
-    middle_id = ui_props.new_node_prefix_middle
+    base_name, identifier_type, matched_identifier = get_base_node_name(node_id, ui_props)
 
-    base_name = get_base_node_name(node_id, ui_props)
-    if base_name == node_id: # No prefix/suffix was removed, likely middle or no identifier
+    if identifier_type not in ('left', 'right') or matched_identifier is None:
         return None
 
+    prefix_pos = ui_props.new_node_prefix_position
+    pairs_json = ui_props.new_node_symmetrical_pairs
+    symmetrical_pairs = []
+    try:
+        parsed_pairs = json.loads(pairs_json)
+        if isinstance(parsed_pairs, list):
+            symmetrical_pairs = [(p[0], p[1]) for p in parsed_pairs if isinstance(p, (list, tuple)) and len(p) == 2 and isinstance(p[0], str) and isinstance(p[1], str)]
+    except (json.JSONDecodeError, TypeError, IndexError):
+        symmetrical_pairs = [("l", "r")] # Fallback
+
+    counterpart_id = None
     if prefix_pos == 'FRONT':
-        if node_id.startswith(left_id): return f"{right_id}{base_name}"
-        if node_id.startswith(right_id): return f"{left_id}{base_name}"
+        for left_id, right_id in symmetrical_pairs:
+            if identifier_type == 'left' and matched_identifier == left_id:
+                counterpart_id = right_id; break
+            elif identifier_type == 'right' and matched_identifier == right_id:
+                counterpart_id = left_id; break
     elif prefix_pos == 'BACK':
-        if node_id.endswith(left_id): return f"{base_name}{right_id}"
-        if node_id.endswith(right_id): return f"{base_name}{left_id}"
+        for left_id, right_id in symmetrical_pairs:
+            if identifier_type == 'left' and matched_identifier == left_id:
+                counterpart_id = right_id; break
+            elif identifier_type == 'right' and matched_identifier == right_id:
+                counterpart_id = left_id; break
+
+    if counterpart_id is not None: # Ensure counterpart exists in the pair
+        if prefix_pos == 'FRONT': return f"{counterpart_id}{base_name}"
+        elif prefix_pos == 'BACK': return f"{base_name}{counterpart_id}"
 
     return None # No symmetry found (e.g., original had middle identifier)
 # <<< END ADDED HELPER FUNCTION >>>
@@ -635,15 +682,6 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
             use_prefixes = ui_props.use_node_naming_prefixes
             # <<< END ADDED >>>
 
-            # Determine the correct identifier (prefix/suffix) based on X position
-            identifier = ""
-            # <<< MODIFIED: Only determine identifier if prefixes are enabled >>>
-            if use_prefixes:
-                if v.co.x < -MIRROR_CHECK_TOLERANCE: identifier = ui_props.new_node_prefix_right
-                elif v.co.x > MIRROR_CHECK_TOLERANCE: identifier = ui_props.new_node_prefix_left
-                else: identifier = ui_props.new_node_prefix_middle
-            # <<< END MODIFIED >>>
-
             # --- MIRROR CHECK ---
             mirrored_node_found = False
             base_name_from_mirror = None
@@ -663,27 +701,63 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
                         if (abs(pos.y - other_init_pos[1]) < MIRROR_CHECK_TOLERANCE and
                             abs(pos.z - other_init_pos[2]) < MIRROR_CHECK_TOLERANCE and
                             abs(pos.x + other_init_pos[0]) < MIRROR_CHECK_TOLERANCE):
-                            mirrored_node_found = True
-                            mirrored_node_id = other_node_id # <<< STORE mirrored node ID
+                            mirrored_node_found = True; mirrored_node_id = other_node_id
                             # <<< MODIFIED: Pass ui_props to helper >>>
-                            base_name_from_mirror = get_base_node_name(other_node_id, ui_props)
+                            # base_name_from_mirror = get_base_node_name(other_node_id, ui_props) # Old way
                             break
             # <<< END MODIFIED >>>
 
             # --- Determine Potential Final IDs ---
             uuid_base = str(uuid.uuid4())
-            # <<< MODIFIED: Construct names based on prefix_position AND use_prefixes >>>
+            mirrored_name = None
+            uuid_name = None # Initialize uuid_name
+
+            if mirrored_node_found:
+                # Use the NEW function to get the symmetrical name
+                mirrored_name = get_symmetrical_node_id(mirrored_node_id, ui_props)
+
+            # Determine identifier for UUID name (only if needed or no mirror)
+            identifier = ""
             if use_prefixes:
+                 # Find the appropriate identifier based on position using the new logic
+                 # This requires parsing pairs again, maybe refactor get_base_node_name slightly?
+                 # Or create a helper: find_identifier_for_position(pos_x, ui_props)
+                 pairs_json = ui_props.new_node_symmetrical_pairs
+                 symmetrical_pairs = []
+                 try:
+                     parsed_pairs = json.loads(pairs_json)
+                     if isinstance(parsed_pairs, list):
+                         symmetrical_pairs = [(p[0], p[1]) for p in parsed_pairs if isinstance(p, (list, tuple)) and len(p) == 2 and isinstance(p[0], str) and isinstance(p[1], str)]
+                 except (json.JSONDecodeError, TypeError, IndexError):
+                     symmetrical_pairs = [("l", "r")] # Fallback
+                 symmetrical_pairs.sort(key=lambda p: max(len(p[0]), len(p[1])), reverse=True)
+                 middle_id = ui_props.new_node_prefix_middle
+
+                 if v.co.x < -MIRROR_CHECK_TOLERANCE:
+                     # Find longest matching right identifier
+                     for l_id, r_id in symmetrical_pairs:
+                         if r_id: identifier = r_id; break # Found longest right
+                 elif v.co.x > MIRROR_CHECK_TOLERANCE:
+                     # Find longest matching left identifier
+                     for l_id, r_id in symmetrical_pairs:
+                         if l_id: identifier = l_id; break # Found longest left
+                 else: # Middle
+                     identifier = middle_id
+
+            # Construct UUID name
+            if use_prefixes and identifier:
                 if ui_props.new_node_prefix_position == 'FRONT':
-                    mirrored_name = f"{identifier}{base_name_from_mirror}" if mirrored_node_found and base_name_from_mirror else None
                     uuid_name = f"{identifier}{uuid_base}"
                 else: # BACK
-                    mirrored_name = f"{base_name_from_mirror}{identifier}" if mirrored_node_found and base_name_from_mirror else None
                     uuid_name = f"{uuid_base}{identifier}"
             else: # Prefixes disabled, just use UUID
                 mirrored_name = None # No mirrored name if prefixes are off
                 uuid_name = uuid_base
-            # <<< END MODIFICATION >>>
+
+            # If mirrored_name couldn't be generated (e.g., mirrored node was middle), fall back to UUID name
+            if mirrored_name is None:
+                 # This ensures mirrored_name is always set, preferring symmetry if possible
+                 mirrored_name = uuid_name # Use UUID name if symmetry fails
 
             # --- Collision Check ---
             collision_found = False
@@ -711,13 +785,10 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
 
             # --- Handle Collision or No Collision ---
             if collision_found:
-                # <<< MODIFIED: Use potentially modified mirrored_name/uuid_name >>>
-                display_name_for_dialog = mirrored_name if mirrored_name else uuid_name
+                final_node_id_collision = uuid_name # Always use UUID for collision tracking internally
+                display_name_for_dialog = mirrored_name # Use the potentially nicer mirrored name for the dialog
                 print(f"Overlap detected: New node '{display_name_for_dialog}' at {pos.to_tuple()} overlaps with '{collided_with_id}'. Queued for deletion confirmation.", file=sys.stderr)
-                # <<< MODIFIED: Always use UUID name for internal tracking if collision >>>
-                final_node_id_collision = uuid_name # This is the UUID-based name used for the vertex
                 final_node_id_bytes = bytes(final_node_id_collision, 'utf-8')
-                # <<< END MODIFICATION >>>
                 v[node_id_layer] = final_node_id_bytes
                 v[init_node_id_layer] = final_node_id_bytes # Update init ID as well
                 # <<< MODIFIED: Store existing_collided_id >>>
@@ -740,10 +811,8 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
 
                 continue # Go to next vertex
             else: # No collision
-                # <<< MODIFIED: Use potentially modified mirrored_name/uuid_name >>>
-                final_node_id_no_collision = mirrored_name if mirrored_name else uuid_name
+                final_node_id_no_collision = mirrored_name # Use mirrored name if available, else UUID name
                 final_node_id_bytes = bytes(final_node_id_no_collision, 'utf-8')
-                # <<< END MODIFICATION >>>
                 v[node_id_layer] = final_node_id_bytes
                 v[init_node_id_layer] = final_node_id_bytes # Update init ID as well
                 init_node_id = final_node_id_no_collision
@@ -1710,11 +1779,20 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
                             sym_id2 = get_symmetrical_node_id(current_beam_id2, ui_props)
 
                             beam_to_insert = None
-                            if sym_id1 and sym_id2:
-                                # Check if the symmetrical beam exists in the set of beams to add
+                            # <<< MODIFIED: Handle cases with one center node >>>
+                            if sym_id1 and sym_id2: # Case 1: Both nodes have distinct mirrors
                                 potential_sym_beam = tuple(sorted((sym_id1, sym_id2)))
                                 if potential_sym_beam in beams_to_add_copy:
                                     beam_to_insert = potential_sym_beam
+                            elif sym_id1 is None and sym_id2 is not None: # Case 2: Node 1 is center, Node 2 has mirror
+                                potential_sym_beam = tuple(sorted((current_beam_id1, sym_id2))) # Use original center node ID
+                                if potential_sym_beam in beams_to_add_copy:
+                                    beam_to_insert = potential_sym_beam
+                            elif sym_id1 is not None and sym_id2 is None: # Case 3: Node 1 has mirror, Node 2 is center
+                                potential_sym_beam = tuple(sorted((sym_id1, current_beam_id2))) # Use original center node ID
+                                if potential_sym_beam in beams_to_add_copy:
+                                    beam_to_insert = potential_sym_beam
+                            # <<< END MODIFICATION >>>
 
                             if beam_to_insert:
                                 # Found the symmetrical counterpart in the add list! Insert it here.

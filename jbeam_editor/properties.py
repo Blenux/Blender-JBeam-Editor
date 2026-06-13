@@ -18,6 +18,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+from pathlib import Path
+import sys # Added import
+import json # <<< ADDED: Import json
+
 import bpy
 import bmesh
 import traceback
@@ -29,19 +33,24 @@ from . import globals as jb_globals # Import globals
 # <<< ADDED: Import drawing module directly for setting dirty flag >>>
 from . import drawing
 # Import the update function from drawing.py after it's defined there
+# <<< ADDED: Import utils, text_editor, bng_sjson >>>
+from . import utils, import_vehicle
 # This avoids circular import if drawing needs properties
 # <<< MODIFIED: Removed _update_dynamic_beam_coloring from this import >>>
 # <<< MODIFIED: Added _tag_redraw_3d_views >>>
 from .drawing import (
     _update_toggle_cross_part_beams_vis,
     veh_render_dirty,
-    _tag_redraw_3d_views, # <<< ADDED
+    _tag_redraw_3d_views,
+    resolve_jbeam_variable_value # <<< ADDED: Import resolve function
 )
 
 # <<< ADDED: Import the helper function >>>
 # <<< MODIFIED: Import renamed helper >>>
 from .operators import _find_and_frame_element_logic
 # <<< ADDED: Import globals >>>
+# <<< MODIFIED: Import text_editor and bng_sjson >>>
+from . import globals as jb_globals, text_editor, bng_sjson
 from . import globals as jb_globals
 
 # Refresh property input field UI
@@ -190,6 +199,120 @@ def _update_width_property(self, context):
 def _update_cross_part_node_ids_vis(self, context):
     """Tags 3D views for redraw when cross-part node ID visibility changes."""
     drawing._tag_redraw_3d_views(context)
+# <<< END ADDED >>>
+
+# <<< ADDED: Update function for PC Filters >>>
+def update_pc_filters(self, context):
+    """Applies visibility filters based on selected .pc files."""
+    scene = context.scene
+    active_filter_paths = {item.path for item in scene.jbeam_editor_active_pc_filters}
+    allowed_parts = set()
+    allowed_flexbody_meshes = set() # <<< ADDED: Set to store allowed flexbody mesh names
+    show_all = not active_filter_paths
+
+    # --- Build Part -> Filepath Map ---
+    part_to_filepath_map = {}
+    for obj in bpy.data.objects:
+        if obj.data and obj.data.get(constants.MESH_JBEAM_PART):
+            part_name = obj.data.get(constants.MESH_JBEAM_PART)
+            filepath = obj.data.get(constants.MESH_JBEAM_FILE_PATH)
+            if part_name and filepath and part_name not in part_to_filepath_map:
+                part_to_filepath_map[part_name] = filepath
+
+    # --- Process Active Filters ---
+    if not show_all: # Only parse if filters are active
+        for pc_path in active_filter_paths:
+            try:
+                # --- Get Allowed Parts (Existing Logic) ---
+                # Use build_config which reads from disk if not internal
+                # Note: build_config might write to internal text editor if importing first time.
+                # For filtering, we might want a read-only version later.
+                pc_config = import_vehicle.build_config(pc_path)
+                parts_in_config = pc_config.get('parts', {})
+                if isinstance(parts_in_config, dict):
+                    for part_name in parts_in_config.values():
+                        if isinstance(part_name, str) and part_name:
+                            allowed_parts.add(part_name)
+                # Add mainPartName if specified in format 2
+                main_part = pc_config.get('mainPartName')
+                if main_part:
+                    allowed_parts.add(main_part)
+
+                # --- Get Allowed Flexbodies (New Logic) ---
+                # Iterate through the parts allowed by *this specific* PC file
+                current_pc_parts = set(parts_in_config.values()) if isinstance(parts_in_config, dict) else set()
+                if main_part: current_pc_parts.add(main_part)
+
+                for part_name in current_pc_parts:
+                    if not isinstance(part_name, str) or not part_name: continue # Skip invalid part names
+
+                    jbeam_filepath = part_to_filepath_map.get(part_name)
+                    if not jbeam_filepath: continue # Skip if we don't know the file for this part
+
+                    # Read JBeam content from internal text editor
+                    file_content = text_editor.read_int_file(jbeam_filepath)
+                    if not file_content: continue
+
+                    # Parse JBeam content
+                    try:
+                        # Use bng_sjson for parsing robustness
+                        padded_content = file_content + chr(127) * 2
+                        c, i = bng_sjson._skip_white_space(padded_content, 0, jbeam_filepath)
+                        parsed_data = None
+                        if c == 123:
+                            parsed_data, _ = bng_sjson._read_object(padded_content, i, jbeam_filepath)
+                        if not parsed_data: continue
+
+                        part_jbeam_data = parsed_data.get(part_name)
+                        if isinstance(part_jbeam_data, dict):
+                            flexbodies_section = part_jbeam_data.get("flexbodies", [])
+                            if isinstance(flexbodies_section, list):
+                                for flex_entry in flexbodies_section:
+                                    # Standard format: ["meshName", ["group1", ...], {}]
+                                    if isinstance(flex_entry, list) and len(flex_entry) > 0 and isinstance(flex_entry[0], str):
+                                        mesh_name = flex_entry[0]
+                                        allowed_flexbody_meshes.add(mesh_name)
+                    except SyntaxError as se:
+                        print(f"Syntax error parsing {jbeam_filepath} for flexbodies: {se}", file=sys.stderr)
+                    except Exception as parse_err:
+                        print(f"Error parsing {jbeam_filepath} for flexbodies: {parse_err}", file=sys.stderr)
+
+            except Exception as e:
+                print(f"Error parsing PC filter file {pc_path}: {e}", file=sys.stderr)
+                # Optionally report to user if parsing fails?
+                # utils.show_message_box('ERROR', f"Filter Error", f"Could not parse {Path(pc_path).name}: {e}")
+
+    # --- Apply Filter to Scene Objects ---
+    for obj in bpy.data.objects:
+        is_jbeam_part_obj = obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None
+        is_potential_flexbody_obj = not is_jbeam_part_obj # Assume non-JBeam objects could be flexbodies
+
+        is_visible = True # Default to visible
+        if not show_all: # Only apply filtering logic if filters are active
+            if is_jbeam_part_obj:
+                part_name = obj.data.get(constants.MESH_JBEAM_PART)
+                is_visible = part_name in allowed_parts
+            elif is_potential_flexbody_obj:
+                # Check if the object's name matches an allowed flexbody mesh
+                # Use obj.name directly for matching
+                is_visible = obj.name in allowed_flexbody_meshes
+            # Else: Object is neither JBeam nor potential flexbody (lights, cameras, etc.) - keep visible
+
+        # Apply visibility change if needed
+        if obj.hide_viewport == is_visible:
+            obj.hide_viewport = not is_visible
+        # obj.hide_render = not is_visible # Optional: Apply to render visibility too
+
+    _tag_redraw_3d_views(context) # Trigger redraw after processing all objects
+# <<< END ADDED >>>
+
+# <<< ADDED: Property Group for storing imported PC file paths >>>
+class ImportedPCFileItem(bpy.types.PropertyGroup):
+    path: bpy.props.StringProperty(name="PC File Path")
+
+# <<< ADDED: Property Group for storing active PC filter paths >>>
+class ActivePCFilterItem(bpy.types.PropertyGroup):
+    path: bpy.props.StringProperty(name="Active PC Filter Path")
 # <<< END ADDED >>>
 
 
@@ -753,21 +876,30 @@ class UIProperties(bpy.types.PropertyGroup):
     )
     # <<< END ADDED >>>
 
-    new_node_prefix_left: bpy.props.StringProperty(
-        name="Left Prefix/Suffix",
-        description="Prefix/Suffix for newly created nodes with positive X coordinate + reference for automatic symmetry target",
-        default="l",
+    # <<< MODIFIED: Replace left/right with JSON pairs >>>
+    new_node_symmetrical_pairs: bpy.props.StringProperty(
+        name="Symmetrical Pairs (JSON)",
+        description='Define symmetrical identifier pairs as a JSON list of lists, e.g., [["l", "r"], ["ll", "rr"]]. The first item in each pair is treated as "left" (positive X), the second as "right" (negative X). Longer pairs are checked first.',
+        default='[["l", "r"], ["ll", "rr"]]',
+        # Add validation later if needed
     )
+    # new_node_prefix_left: bpy.props.StringProperty(
+    #     name="Left Prefix/Suffix",
+    #     description="Prefix/Suffix for newly created nodes with positive X coordinate + reference for automatic symmetry target",
+    #     default="l",
+    # )
     new_node_prefix_middle: bpy.props.StringProperty(
         name="Middle Prefix/Suffix",
         description="Prefix/Suffix for newly created nodes with near-zero X coordinate",
         default="",
     )
-    new_node_prefix_right: bpy.props.StringProperty(
-        name="Right Prefix/Suffix",
-        description="Prefix/Suffix for newly created nodes with negative X coordinate + reference for automatic symmetry target",
-        default="r",
-    )
+    # new_node_prefix_right: bpy.props.StringProperty(
+    #     name="Right Prefix/Suffix",
+    #     description="Prefix/Suffix for newly created nodes with negative X coordinate + reference for automatic symmetry target",
+    #     default="r",
+    # )
+    # <<< END MODIFIED >>>
+
     new_node_prefix_position: bpy.props.EnumProperty(
         name="Position",
         description="Place the identifier at the front or back of the node name",

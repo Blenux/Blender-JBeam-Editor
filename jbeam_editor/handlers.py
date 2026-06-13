@@ -25,6 +25,7 @@ import sys
 import traceback
 import time # Keep for potential future debugging
 import json # <<< ADDED: Import json
+from pathlib import Path # <<< ADDED: Import Path
 
 from bpy.app.handlers import persistent
 from mathutils import Vector
@@ -47,7 +48,7 @@ from .drawing import (
     # <<< Import the moved highlight function >>>
     find_and_highlight_element_for_line, _tag_redraw_3d_views,
     # Import coordinate lists and batch variables for load_post_handler
-    beam_coords, anisotropic_beam_coords, support_beam_coords, hydro_beam_coords,
+    beam_coords, anisotropic_beam_coords, support_beam_coords, hydro_beam_coords, # <<< Keep existing imports
     bounded_beam_coords, lbeam_coords, pressured_beam_coords, torsionbar_coords,
     torsionbar_red_coords, rail_coords, cross_part_beam_coords,
     # <<< MODIFIED: Import single dynamic list >>>
@@ -64,7 +65,8 @@ from .drawing import (
     # <<< ADDED: Import highlight dirty flag >>>
     _highlight_dirty,
 )
-from .operators import JBEAM_EDITOR_OT_batch_node_renaming # Import operator for bl_idname
+# <<< MODIFIED: Remove JBEAM_EDITOR_OT_confirm_text_deletion import >>>
+from .operators import JBEAM_EDITOR_OT_batch_node_renaming # Import operators
 from .text_editor import SCENE_SHORT_TO_FULL_FILENAME
 # from .sjsonast import parse as sjsonast_parse, calculate_char_positions as sjsonast_calculate_char_positions, ASTNode # <<< Remove ASTNode import here
 from . import utils # <<< ADDED: Import utils for show_message_box
@@ -106,6 +108,10 @@ op_no_export = {
 }
 
 _last_op = None # Used in poll_active_operators
+
+# <<< ADDED: Globals for deletion tracking >>>
+previous_known_jbeam_objects = set() # Store {(name, filepath)}
+texts_pending_deletion_check = set() # Store {(short_filename, filepath)}
 
 # --- Highlight on Click Logic ---
 
@@ -187,6 +193,8 @@ def draw_callback_text_editor(context: bpy.types.Context):
 
 # Depsgraph Update Handler
 def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, depsgraph: bpy.types.Depsgraph):
+    # <<< ADDED: Access globals >>>
+    global previous_known_jbeam_objects, texts_pending_deletion_check
     # (Keep existing _depsgraph_callback content)
     # ... (rest of the function remains the same) ...
     reimporting_jbeam = False
@@ -451,6 +459,78 @@ def depsgraph_update_post_handler(scene: bpy.types.Scene, depsgraph: bpy.types.D
         print(f"Error in depsgraph callback: {e}", file=sys.stderr)
         traceback.print_exc()
 
+    # --- Detect Deleted JBeam Objects ---
+    try:
+        # <<< ADDED: Explicitly declare globals within this scope >>>
+        global previous_known_jbeam_objects, texts_pending_deletion_check
+        current_jbeam_objects_info = set()
+        # Use scene.objects which is generally available here
+        for obj in scene.objects:
+             obj_data = obj.data
+             if obj_data and obj_data.get(constants.MESH_JBEAM_PART) is not None:
+                 filepath = obj_data.get(constants.MESH_JBEAM_FILE_PATH)
+                 if filepath:
+                     current_jbeam_objects_info.add((obj.name, filepath))
+
+        deleted_objects_info = previous_known_jbeam_objects - current_jbeam_objects_info
+
+        if deleted_objects_info:
+            # Map filepath to remaining users
+            filepath_users = {}
+            for _, fp in current_jbeam_objects_info:
+                filepath_users[fp] = filepath_users.get(fp, 0) + 1
+
+            for deleted_name, deleted_filepath in deleted_objects_info:
+                # Check if the filepath of the deleted object has any remaining users
+                if filepath_users.get(deleted_filepath, 0) == 0:
+                    short_filename = text_editor._to_short_filename(deleted_filepath)
+                    # Check if text exists and add to pending check set
+                    if bpy.data.texts.get(short_filename):
+                        texts_pending_deletion_check.add((short_filename, deleted_filepath))
+
+        # Update known objects for the next cycle
+        previous_known_jbeam_objects = current_jbeam_objects_info
+
+        # --- Process Pending Deletion Checks ---
+        # Process immediately after the loop.
+        if texts_pending_deletion_check:
+            # Use list() to avoid modifying set during iteration
+            for short_filename, filepath in list(texts_pending_deletion_check):
+                # Double-check usage *now*
+                is_still_unused = True
+                for obj in scene.objects: # Check current objects again
+                    obj_data = obj.data
+                    if obj_data and obj_data.get(constants.MESH_JBEAM_PART) is not None:
+                        fp = obj_data.get(constants.MESH_JBEAM_FILE_PATH)
+                        if fp == filepath:
+                            is_still_unused = False
+                            break
+
+                if is_still_unused:
+                    # <<< MODIFICATION: Remove item BEFORE invoking operator >>>
+                    # Use discard() instead of remove() to prevent KeyError if already removed by another handler instance
+                    texts_pending_deletion_check.discard((short_filename, filepath))
+
+                    # Check if text still exists before invoking
+                    if bpy.data.texts.get(short_filename):
+                        try:
+                            # Pass properties to the operator
+                            # <<< MODIFIED: Use string literal for bl_idname >>>
+                            bpy.ops.jbeam_editor.confirm_text_deletion('INVOKE_DEFAULT', # Use string literal
+                                                                        short_filename=short_filename,
+                                                                        filepath=filepath)
+                        except Exception as e:
+                             print(f"Error invoking text deletion operator: {e}", file=sys.stderr)
+
+                else: # <<< ADDED: Else block for the is_still_unused check >>>
+                    # If it's not unused anymore, just remove it from the pending set
+                    texts_pending_deletion_check.discard((short_filename, filepath)) # Use discard for safety
+
+    except Exception as e:
+        print(f"Error in JBeam object deletion detection: {e}", file=sys.stderr)
+        traceback.print_exc()
+        texts_pending_deletion_check.clear() # Clear pending checks on error
+
 # Timer to check for text editor changes
 @persistent
 def check_files_for_changes_timer():
@@ -586,6 +666,13 @@ def load_post_handler(dummy):
     # <<< ADDED: Reset variable cache state >>>
     jb_globals.jbeam_variables_cache.clear()
     jb_globals.jbeam_variables_cache_dirty = True
+    # <<< ADDED: Reset deletion tracking state >>>
+    global previous_known_jbeam_objects, texts_pending_deletion_check
+    previous_known_jbeam_objects.clear()
+    texts_pending_deletion_check.clear()
+    # <<< ADDED: Reset PC filter state >>>
+    if hasattr(bpy.context.scene, 'jbeam_editor_imported_pc_files'): bpy.context.scene.jbeam_editor_imported_pc_files.clear()
+    if hasattr(bpy.context.scene, 'jbeam_editor_active_pc_filters'): bpy.context.scene.jbeam_editor_active_pc_filters.clear()
     # <<< END ADDED >>>
 
     # Clear coordinate lists

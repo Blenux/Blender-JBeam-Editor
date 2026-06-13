@@ -22,6 +22,7 @@ import bpy
 
 import hashlib
 import re
+from pathlib import Path # <<< ADDED: Import Path
 import traceback # Ensure traceback is imported
 import sys # <<< Import sys
 
@@ -51,13 +52,26 @@ def _get_short_jbeam_path(path: str):
     return None
 
 
-def _to_short_filename(filename: str):
-    return hashlib.md5(filename.encode('UTF-8')).hexdigest()
+def _to_short_filename(filepath: str):
+    """Generates an MD5 hash for the given filepath."""
+    return hashlib.md5(filepath.encode('UTF-8')).hexdigest()
 
     # new_filename = _get_short_jbeam_path(filename)
     # if new_filename is None:
     #     new_filename = filename
     # return new_filename[max(0, len(new_filename) - 60):] # roughly 60 character limit
+
+# <<< ADDED: New helper function for internal naming >>>
+def _get_internal_filename(filepath: str) -> str:
+    """
+    Determines the internal Blender text document name for a given file path.
+    Uses the base name for .pc files and an MD5 hash for others.
+    """
+    path_obj = Path(filepath)
+    if path_obj.suffix.lower() == '.pc':
+        return path_obj.stem # Use base name without extension
+    else:
+        return _to_short_filename(filepath) # Use MD5 hash for other types
 
 
 def write_from_ext_to_int_file(filepath: str):
@@ -69,8 +83,8 @@ def write_from_ext_to_int_file(filepath: str):
 
 
 def write_from_int_to_ext_file(filepath: str):
-    short_filename = _to_short_filename(filepath)
-    text: bpy.types.Text | None = bpy.data.texts.get(short_filename)
+    internal_name = _get_internal_filename(filepath) # <<< Use new helper
+    text: bpy.types.Text | None = bpy.data.texts.get(internal_name)
     if text is None:
         return False
 
@@ -78,21 +92,21 @@ def write_from_int_to_ext_file(filepath: str):
     return res
 
 
-def write_int_file(filename: str, text: str):
+def write_int_file(filepath: str, text: str):
     context = bpy.context
     scene = context.scene
 
     # this full to short filename BS because of 63 character key limit...
 
-    short_filename = _to_short_filename(filename)
+    internal_name = _get_internal_filename(filepath) # <<< Use new helper
     if SCENE_SHORT_TO_FULL_FILENAME not in scene:
         scene[SCENE_SHORT_TO_FULL_FILENAME] = {}
 
-    scene[SCENE_SHORT_TO_FULL_FILENAME][short_filename] = filename
+    scene[SCENE_SHORT_TO_FULL_FILENAME][internal_name] = filepath # Map internal_name -> full_filepath
 
-    if short_filename not in bpy.data.texts:
-        bpy.data.texts.new(short_filename)
-    file = bpy.data.texts[short_filename]
+    if internal_name not in bpy.data.texts:
+        bpy.data.texts.new(internal_name)
+    file = bpy.data.texts[internal_name]
     curr_line, curr_char = file.current_line_index, file.current_character
     file.clear()
     file.write(text)
@@ -100,31 +114,31 @@ def write_int_file(filename: str, text: str):
 
     if SCENE_PREV_TEXTS not in scene:
         scene[SCENE_PREV_TEXTS] = {}
-    if short_filename not in scene[SCENE_PREV_TEXTS]:
-        scene[SCENE_PREV_TEXTS][short_filename] = None
+    if internal_name not in scene[SCENE_PREV_TEXTS]:
+        scene[SCENE_PREV_TEXTS][internal_name] = None
 
     #check_files_for_changes(context)
 
 
 def read_int_file(filename: str) -> str | None:
-    short_filename = _to_short_filename(filename)
-    text: bpy.types.Text | None = bpy.data.texts.get(short_filename)
+    internal_name = _get_internal_filename(filename) # <<< Use new helper
+    text: bpy.types.Text | None = bpy.data.texts.get(internal_name)
     if text is None:
         return None
     return text.as_string()
 
 
 def delete_int_file(filename: str):
-    short_filename = _to_short_filename(filename)
-    text: bpy.types.Text | None = bpy.data.texts.get(short_filename)
+    internal_name = _get_internal_filename(filename) # <<< Use new helper
+    text: bpy.types.Text | None = bpy.data.texts.get(internal_name)
     if text is None:
         return
     bpy.data.texts.remove(text)
 
 
 def show_int_file(filename: str):
-    short_filename = _to_short_filename(filename)
-    text: bpy.types.Text | None = bpy.data.texts.get(short_filename)
+    internal_name = _get_internal_filename(filename) # <<< Use new helper
+    text: bpy.types.Text | None = bpy.data.texts.get(internal_name)
     if text is None:
         return
 
@@ -160,14 +174,14 @@ def check_open_int_file_for_changes(context: bpy.types.Context, undoing_redoing=
     if text is None:
         return False
 
-    short_filename, curr_file_text = text.name, text.as_string()
-    last_file_text = scene[SCENE_PREV_TEXTS].get(short_filename, False)
+    internal_name, curr_file_text = text.name, text.as_string() # text.name is the internal_name
+    last_file_text = scene[SCENE_PREV_TEXTS].get(internal_name, False)
     if last_file_text == False:
         # This might be the first time checking after load, store initial state
-        scene[SCENE_PREV_TEXTS][short_filename] = curr_file_text
+        scene[SCENE_PREV_TEXTS][internal_name] = curr_file_text
         last_file_text = curr_file_text # Treat current as last for comparison below
 
-    filename_full = scene[SCENE_SHORT_TO_FULL_FILENAME].get(short_filename)
+    filename_full = scene[SCENE_SHORT_TO_FULL_FILENAME].get(internal_name) # Use internal_name as key
     if filename_full is None:
         return False
 
@@ -180,7 +194,7 @@ def check_open_int_file_for_changes(context: bpy.types.Context, undoing_redoing=
 
         # Store the state *before* the change for potential initial history push
 
-        scene[SCENE_PREV_TEXTS][short_filename] = curr_file_text
+        scene[SCENE_PREV_TEXTS][internal_name] = curr_file_text # Use internal_name as key
 
         # <<< MOVED: Reimport BEFORE highlighting >>>
         import_vehicle.on_files_change(context, {filename_full: curr_file_text}, True)
@@ -210,12 +224,12 @@ def check_open_int_file_for_changes(context: bpy.types.Context, undoing_redoing=
 
             # If history is empty, push the state *before* this change as the initial state.
             if not history_stack:
-                history_stack.insert(0, {short_filename: last_file_text}) # Use last_file_text
+                history_stack.insert(0, {internal_name: last_file_text}) # Use internal_name as key
                 history_stack_idx = 0
 
             # Now, push the *current* state (after the change)
             history_stack_idx += 1
-            history_stack.insert(history_stack_idx, {short_filename: curr_file_text}) # Use curr_file_text
+            history_stack.insert(history_stack_idx, {internal_name: curr_file_text}) # Use internal_name as key
             history_stack = history_stack[:history_stack_idx + 1] # Truncate if needed
 
             # Limit history stack size
@@ -268,19 +282,19 @@ def check_int_files_for_changes(context: bpy.types.Context, filenames: list, und
     active_text_to_highlight = None # Store active text if it changed
 
     for filename in filenames:
-        short_filename = _to_short_filename(filename)
-        text = bpy.data.texts.get(short_filename)
+        internal_name = _get_internal_filename(filename) # <<< Use new helper
+        text = bpy.data.texts.get(internal_name)
         if not text:
             continue
 
         curr_file_text = text.as_string()
-        last_file_text = scene[SCENE_PREV_TEXTS].get(short_filename, False)
+        last_file_text = scene[SCENE_PREV_TEXTS].get(internal_name, False) # <<< Use internal_name
         if last_file_text == False:
             # This might be the first time checking after load, store initial state
-            scene[SCENE_PREV_TEXTS][short_filename] = curr_file_text
+            scene[SCENE_PREV_TEXTS][internal_name] = curr_file_text # <<< Use internal_name
             last_file_text = curr_file_text # Treat current as last for comparison below
 
-        filename_full = scene[SCENE_SHORT_TO_FULL_FILENAME].get(short_filename)
+        filename_full = scene[SCENE_SHORT_TO_FULL_FILENAME].get(internal_name) # <<< Use internal_name
         if filename_full is None:
             continue
 
@@ -298,9 +312,9 @@ def check_int_files_for_changes(context: bpy.types.Context, filenames: list, und
                 print('file changed!', filename_full)
 
             # Store the state *before* the change for history
-            states_before_change[short_filename] = last_file_text # <<< Keep this
+            states_before_change[internal_name] = last_file_text # <<< Use internal_name
 
-            scene[SCENE_PREV_TEXTS][short_filename] = curr_file_text
+            scene[SCENE_PREV_TEXTS][internal_name] = curr_file_text # <<< Use internal_name
 
             # Check if this is the active file *before* reimporting
             active_text = None
@@ -314,7 +328,7 @@ def check_int_files_for_changes(context: bpy.types.Context, filenames: list, und
             # <<< MOVED: Reimport logic moved down, but collect changes here >>>
             # Store the current text for reimport map and history map
             # files_changed_short_names is guaranteed to be a dict here if any_file_changed is True
-            files_changed_short_names[short_filename] = curr_file_text
+            files_changed_short_names[internal_name] = curr_file_text # <<< Use internal_name
             if reimport and files_changed is not None: # Check files_changed as well
                 files_changed[filename_full] = curr_file_text
 
@@ -457,27 +471,27 @@ def on_undo_redo(context: bpy.types.Context, undoing: bool):
         files_changed_for_reimport = {} # Collect changes for reimport call
         active_text_restored = None # Track if the active text editor file was restored
 
-        for short_filename, text_content in entry.items():
-            if short_filename not in bpy.data.texts:
-                print(f"Warning: Text object {short_filename} not found during undo/redo.")
+        for internal_name, text_content in entry.items(): # Key is internal_name
+            if internal_name not in bpy.data.texts:
+                print(f"Warning: Text object {internal_name} not found during undo/redo.")
                 continue
 
-            file = bpy.data.texts[short_filename]
+            file = bpy.data.texts[internal_name]
 
             # Check if the content actually needs changing to avoid unnecessary updates
             if file.as_string() != text_content:
                 curr_line, curr_char = file.current_line_index, file.current_character
                 file.clear()
                 file.write(text_content)
-                file.cursor_set(curr_line, character=curr_char)
+                file.cursor_set(curr_line, character=curr_char) # Restore cursor
 
             # Update the 'previous' text state to match the state we just restored
             # This prevents the next check_..._for_changes from thinking a change occurred
-            scene[SCENE_PREV_TEXTS][short_filename] = text_content # <<< IMPORTANT
+            scene[SCENE_PREV_TEXTS][internal_name] = text_content # <<< IMPORTANT
 
-            full_filepath = scene[SCENE_SHORT_TO_FULL_FILENAME].get(short_filename)
+            full_filepath = scene[SCENE_SHORT_TO_FULL_FILENAME].get(internal_name) # <<< Use internal_name
             if full_filepath:
-                filepaths.append(full_filepath)
+                filepaths.append(full_filepath) # Use full path for reimport list
                 files_changed_for_reimport[full_filepath] = text_content # Use full path for reimport
 
             # Check if this is the active text editor file
@@ -548,4 +562,3 @@ def on_undo_redo(context: bpy.types.Context, undoing: bool):
     except Exception as e:
         print(f"Error applying undo/redo state: {e}", file=sys.stderr)
         traceback.print_exc()
-
