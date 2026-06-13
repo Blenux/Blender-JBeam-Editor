@@ -51,7 +51,7 @@ from .operators import _find_and_frame_element_logic
 # <<< ADDED: Import globals >>>
 # <<< MODIFIED: Import text_editor and bng_sjson >>>
 from . import globals as jb_globals, text_editor, bng_sjson
-from . import globals as jb_globals
+# from . import globals as jb_globals # This line is redundant
 
 # Refresh property input field UI
 # Simplified rename logic
@@ -201,6 +201,17 @@ def _update_cross_part_node_ids_vis(self, context):
     drawing._tag_redraw_3d_views(context)
 # <<< END ADDED >>>
 
+# <<< ADDED: Update function for node group filter changes >>>
+def _update_node_group_filter(self, context):
+    """Updates drawing when node group filter settings change."""
+    # Redraw 3D views for text elements (like Node IDs)
+    if hasattr(drawing, '_tag_redraw_3d_views') and callable(drawing._tag_redraw_3d_views):
+        drawing._tag_redraw_3d_views(context)
+    # Trigger a full visualization rebuild for elements like node dots
+    context.scene.jbeam_editor_veh_render_dirty = True
+    setattr(drawing, 'veh_render_dirty', True)
+# <<< END ADDED >>>
+
 # <<< ADDED: Update function for PC Filters >>>
 def update_pc_filters(self, context):
     """Applies visibility filters based on selected .pc files."""
@@ -315,6 +326,45 @@ class ActivePCFilterItem(bpy.types.PropertyGroup):
     path: bpy.props.StringProperty(name="Active PC Filter Path")
 # <<< END ADDED >>>
 
+# <<< ADDED: Callback function to get available node groups >>>
+def get_available_node_groups(self, context):
+    """
+    Dynamically generates a list of available node groups for the EnumProperty.
+    """
+    items = [
+        ("__NODES_WITHOUT_GROUPS__", "Nodes Without Groups", "Show only nodes that are not assigned to any group")
+    ]
+
+    unique_groups = set()
+    if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata:
+        for node_data in jb_globals.curr_vdata['nodes'].values():
+            if isinstance(node_data, dict):
+                group_attr = node_data.get('group')
+                if isinstance(group_attr, str) and group_attr.strip(): # Ensure group name is not empty
+                    unique_groups.add(group_attr)
+                elif isinstance(group_attr, list):
+                    for g_item in group_attr:
+                        if isinstance(g_item, str) and g_item.strip(): # Ensure group name is not empty
+                            unique_groups.add(g_item)
+
+    sorted_groups = sorted(list(unique_groups), key=str.lower)
+    if sorted_groups: # Add a separator if there are specific groups
+        items.append(("_SEPARATOR_", "--- Specific Groups ---", "", 'SEPARATOR', 0)) # Using item_icon = 0 for separator
+
+    for group_name in sorted_groups:
+        items.append((group_name, group_name, f"Show nodes in group '{group_name}'"))
+
+    if not unique_groups and len(items) == 1: # Only "__NODES_WITHOUT_GROUPS__" is present
+        # Add a placeholder if no specific groups are found and only the default option is there
+        items.append(("_NO_SPECIFIC_GROUPS_", "No Specific Groups Found", "No specific groups defined in the current JBeam data"))
+    elif not unique_groups and len(items) > 1 and items[1][0] == "_SEPARATOR_":
+        # If separator was added but no groups followed, remove separator and add placeholder
+        items.pop(1) # Remove separator
+        items.append(("_NO_SPECIFIC_GROUPS_", "No Specific Groups Found", "No specific groups defined in the current JBeam data"))
+
+
+    return items
+# <<< END ADDED >>>
 
 class UIProperties(bpy.types.PropertyGroup):
     input_node_id: bpy.props.StringProperty(
@@ -393,6 +443,32 @@ class UIProperties(bpy.types.PropertyGroup):
         update=_update_dynamic_node_coloring
     )
 
+    toggle_node_group_text: bpy.props.BoolProperty(
+        name="Show Node Group(s)",
+        description="Toggles displaying the node's assigned group(s) next to its ID",
+        default=False,
+        # Update function to redraw 3D views when toggled
+        update=lambda self, context: drawing._tag_redraw_3d_views(context) if hasattr(drawing, '_tag_redraw_3d_views') and callable(drawing._tag_redraw_3d_views) else None
+    )
+
+    toggle_node_group_filter: bpy.props.BoolProperty(
+        name="Filter by Node Group",
+        description="Enable filtering of Node ID visibility by a selected node group", # MODIFIED description
+        default=False,
+        update=_update_node_group_filter # <<< MODIFIED: Use new update function
+    )
+
+    # <<< REPLACED node_group_filter_text with EnumProperty >>>
+    node_group_to_show: bpy.props.EnumProperty(
+        name="Group to Show",
+        description="Select a specific node group to display, or show nodes without groups. The list is populated from the current JBeam data.",
+        items=get_available_node_groups,
+        default=0, # Default to the first item ("Nodes Without Groups") when filter is active
+        update=_update_node_group_filter # <<< MODIFIED: Use new update function
+    )
+    # <<< END REPLACED >>>
+
+
     # <<< ADDED: Dynamic Node Coloring Properties >>>
     use_dynamic_node_coloring: bpy.props.BoolProperty(
         name="Use Dynamic Coloring (Node Weight)",
@@ -400,6 +476,23 @@ class UIProperties(bpy.types.PropertyGroup):
         default=False,
         update=_update_dynamic_node_coloring # Ensure this update function is assigned
     )
+    # <<< MODIFIED: Separate properties for min and max node thresholds >>>
+    auto_node_threshold_min_display: bpy.props.StringProperty(
+        name="Auto Node Min Threshold",
+        description="Automatically calculated min nodeWeight value for dynamic coloring",
+        default="N/A", # Default value when no data is available
+    )
+    auto_node_threshold_max_display: bpy.props.StringProperty(
+        name="Auto Node Max Threshold",
+        description="Automatically calculated max nodeWeight value for dynamic coloring",
+        default="N/A", # Default value when no data is available
+    )
+    # <<< END MODIFIED >>>
+
+    # Note: dynamic_node_coloring_parameter is omitted as it's fixed to 'nodeWeight' for now.
+    # Note: dynamic_node_color_threshold_low and dynamic_node_color_threshold_high remain
+    # for manual input when use_auto_node_thresholds is off.
+
     use_auto_node_thresholds: bpy.props.BoolProperty(
         name="Use Auto Thresholds",
         description="Automatically determine Low/High thresholds based on the actual min/max nodeWeight values in the active part(s)",
@@ -407,6 +500,7 @@ class UIProperties(bpy.types.PropertyGroup):
         update=_update_dynamic_node_coloring # Ensure this update function is assigned
     )
     # Note: dynamic_node_coloring_parameter is omitted as it's fixed to 'nodeWeight' for now.
+    # Note: dynamic_node_color_threshold_low and dynamic_node_color_threshold_high remain for manual input when use_auto_node_thresholds is off.
     dynamic_node_color_threshold_low: bpy.props.FloatProperty(
         name="Low Threshold",
         description="Node weight below or equal to this threshold are blue (used when Auto Thresholds is off)",
@@ -435,6 +529,21 @@ class UIProperties(bpy.types.PropertyGroup):
         update=_update_cross_part_node_ids_vis # Use the new update function
     )
     # <<< END ADDED >>>
+
+    # --- Node Dot Visualization Properties ---
+    toggle_node_dots_vis: bpy.props.BoolProperty(
+        name="Show Node Dots",
+        description="Toggles the visibility of 3D dots for nodes",
+        default=True,
+        update=lambda self, context: setattr(drawing, 'veh_render_dirty', True)
+    )
+    node_dot_size: bpy.props.FloatProperty(
+        name="Node Dot Size",
+        description="Size of the 3D dots representing nodes",
+        default=10.0,
+        min=1.0, max=20.0,
+        update=lambda self, context: setattr(drawing, 'veh_render_dirty', True) # Redraw needed if size changes
+    )
 
     # --- Tooltip Panel Toggle ---
     show_tooltips_panel: bpy.props.BoolProperty(
@@ -562,6 +671,17 @@ class UIProperties(bpy.types.PropertyGroup):
         default=False,
         update=_update_dynamic_beam_coloring
     )
+    # <<< MODIFIED: Separate properties for min and max beam thresholds >>>
+    auto_beam_threshold_min_display: bpy.props.StringProperty(
+        name="Auto Beam Min Threshold",
+        description="Automatically calculated min value for the selected parameter for dynamic beam coloring",
+        default="N/A", # Default value when no data is available
+    )
+    auto_beam_threshold_max_display: bpy.props.StringProperty(
+        name="Auto Beam Max Threshold",
+        description="Automatically calculated max value for the selected parameter for dynamic beam coloring",
+        default="N/A", # Default value when no data is available
+    )
     # <<< ADDED: Auto Threshold Toggle >>>
     use_auto_thresholds: bpy.props.BoolProperty(
         name="Use Auto Thresholds",
@@ -587,7 +707,7 @@ class UIProperties(bpy.types.PropertyGroup):
         name="Low Threshold",
         description="Values below or equal to this threshold are blue (used when Auto Thresholds is off)", # <<< Updated description
         default=0.0,
-        min=-0.0,
+        min=-0.0, # Allow negative for some params
         max=50000000.0,
         update=_update_dynamic_beam_coloring
     )
@@ -595,7 +715,7 @@ class UIProperties(bpy.types.PropertyGroup):
         name="High Threshold",
         description="Values above or equal to this threshold are red. Values between Low and High transition through the gradient (used when Auto Thresholds is off)", # <<< Updated description
         default=5000000.0,
-        min=-0.0,
+        min=-0.0, # Allow negative for some params
         max=50000000.0,
         update=_update_dynamic_beam_coloring
     )

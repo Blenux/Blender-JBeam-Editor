@@ -441,7 +441,7 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
     objs = veh_collection.all_objects
 
     # Store hidden states for ALL parts first ---
-    all_hidden_edges_state = {}
+    all_hidden_edges_state = {} # <<< ADDED: Dictionary to store edge hidden states
     all_hidden_verts_state = {} # <<< ADDED: Dictionary to store vertex hidden states
     all_hidden_faces_state = {} # <<< ADDED: Dictionary to store face hidden states
     for part in parts:
@@ -459,23 +459,29 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
                 temp_bm = bmesh.new()
                 temp_bm.from_mesh(obj_data)
 
-            # --- Store Edge Hidden State (Existing) ---
-            beam_indices_layer = temp_bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
-            beam_origin_layer = temp_bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
-            if beam_indices_layer and beam_origin_layer:
-                temp_bm.edges.ensure_lookup_table()
-                for edge in temp_bm.edges:
-                    indices_str = edge[beam_indices_layer].decode('utf-8')
-                    # Only store for existing JBeam beams
-                    if indices_str and indices_str != '-1':
-                        try:
-                            first_index = int(indices_str.split(',')[0])
-                            part_origin = edge[beam_origin_layer].decode('utf-8')
-                            # Use part_origin from the edge layer itself for the key
-                            all_hidden_edges_state[(part_origin, first_index)] = edge.hide
-                        except (ValueError, IndexError):
-                             print(f"Warning: Could not parse beam index for storing hidden state (vehicle): {indices_str}", file=sys.stderr)
+            # --- Store Edge Hidden State (Revised for Vehicle) ---
+            node_id_layer_v_store_veh = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
+            is_fake_layer_v_store_veh = temp_bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+            beam_indices_layer_e_store_veh = temp_bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
+            beam_origin_layer_e_store_veh = temp_bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
 
+            if node_id_layer_v_store_veh and is_fake_layer_v_store_veh and beam_indices_layer_e_store_veh and beam_origin_layer_e_store_veh:
+                temp_bm.edges.ensure_lookup_table()
+                temp_bm.verts.ensure_lookup_table()
+                for edge in temp_bm.edges:
+                    indices_str = edge[beam_indices_layer_e_store_veh].decode('utf-8')
+                    if indices_str and indices_str != '-1': # Check if it's a JBeam beam
+                        v1, v2 = edge.verts[0], edge.verts[1]
+                        if v1[is_fake_layer_v_store_veh] == 0 and v2[is_fake_layer_v_store_veh] == 0: # Check if nodes are real
+                            try:
+                                node_id1 = v1[node_id_layer_v_store_veh].decode('utf-8')
+                                node_id2 = v2[node_id_layer_v_store_veh].decode('utf-8')
+                                part_origin = edge[beam_origin_layer_e_store_veh].decode('utf-8') # This is obj.name (part name)
+                                key = (part_origin, frozenset({node_id1, node_id2}))
+                                all_hidden_edges_state[key] = edge.hide
+                            except Exception as e_store_veh_err:
+                                print(f"Warning: Could not store hidden state for edge in vehicle ({node_id1 if 'node_id1' in locals() else '?'}-{node_id2 if 'node_id2' in locals() else '?'}): {e_store_veh_err}", file=sys.stderr)
+            # --- End Store Edge Hidden State (Revised for Vehicle) ---
             # Store Vertex Hidden State ---
             node_id_layer = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
             # Get node origin layer for vertex state key >>>
@@ -548,23 +554,30 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
         # Generate the mesh content
         generate_part_mesh(obj, obj_data, bm, vehicle_bundle, part, vertices, parts_edges.get(part, []), parts_tris.get(part, []), parts_quads.get(part, []), node_index_to_id)
 
-        # Apply hidden edge states ---
-        beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
-        beam_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
-        if beam_indices_layer and beam_origin_layer and all_hidden_edges_state:
+        # --- Apply Edge Hidden State (Revised for Vehicle) ---
+        node_id_layer_v_apply_veh = bm.verts.layers.string.get(constants.VL_NODE_ID)
+        is_fake_layer_v_apply_veh = bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+        beam_indices_layer_e_apply_veh = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
+        beam_origin_layer_e_apply_veh = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
+
+        if node_id_layer_v_apply_veh and is_fake_layer_v_apply_veh and beam_indices_layer_e_apply_veh and beam_origin_layer_e_apply_veh and all_hidden_edges_state:
             bm.edges.ensure_lookup_table()
+            bm.verts.ensure_lookup_table()
             for edge in bm.edges:
-                indices_str = edge[beam_indices_layer].decode('utf-8')
-                if indices_str and indices_str != '-1':
-                    try:
-                        first_index = int(indices_str.split(',')[0])
-                        part_origin = edge[beam_origin_layer].decode('utf-8')
-                        # Use part_origin from the edge layer itself for lookup
-                        if (part_origin, first_index) in all_hidden_edges_state:
-                            edge.hide = all_hidden_edges_state[(part_origin, first_index)]
-                    except (ValueError, IndexError):
-                        print(f"Warning: Could not parse beam index for applying hidden state (vehicle): {indices_str}", file=sys.stderr)
-        # Apply hidden edge states ---
+                indices_str = edge[beam_indices_layer_e_apply_veh].decode('utf-8')
+                if indices_str and indices_str != '-1': # Check if it's a JBeam beam
+                    v1, v2 = edge.verts[0], edge.verts[1]
+                    if v1[is_fake_layer_v_apply_veh] == 0 and v2[is_fake_layer_v_apply_veh] == 0: # Check if nodes are real
+                        try:
+                            node_id1 = v1[node_id_layer_v_apply_veh].decode('utf-8')
+                            node_id2 = v2[node_id_layer_v_apply_veh].decode('utf-8')
+                            part_origin = edge[beam_origin_layer_e_apply_veh].decode('utf-8') # This is obj.name (part name)
+                            key = (part_origin, frozenset({node_id1, node_id2}))
+                            if key in all_hidden_edges_state:
+                                edge.hide = all_hidden_edges_state[key]
+                        except Exception as e_apply_veh_err:
+                            print(f"Warning: Could not apply hidden state for edge in vehicle ({node_id1 if 'node_id1' in locals() else '?'}-{node_id2 if 'node_id2' in locals() else '?'}): {e_apply_veh_err}", file=sys.stderr)
+        # --- End Apply Edge Hidden State (Revised for Vehicle) ---
 
         # Apply hidden vertex states ---
         node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)

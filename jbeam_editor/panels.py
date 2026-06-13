@@ -430,6 +430,16 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
                 row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_font_size', text="Font Size")
                 row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_outline_size', text="Outline Size")
                 row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_text_offset', text="Text Offset")
+                node_vis_col.separator() # Separator before group filter
+                # <<< MOVED: Toggle for Node Group Text >>>
+                row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'toggle_node_group_text')
+                # --- Node Group Filter Section ---
+                node_vis_col.prop(ui_props, 'toggle_node_group_filter')
+                row = node_vis_col.row()
+                row.enabled = ui_props.toggle_node_ids_text and ui_props.toggle_node_group_filter # Enable dropdown only if master toggle and filter toggle are on
+                row.prop(ui_props, 'node_group_to_show', text="") # Text label provided by the property itself ("Group to Show")
+                node_vis_col.separator() # <<< MOVED: Empty line underneath the selection box
+                # --- End Node Group Filter Section ---
 
                 node_vis_col.prop(ui_props, 'toggle_cross_part_node_ids_vis')
 
@@ -439,12 +449,23 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
                 dyn_box = node_vis_col.box()
                 dyn_box.enabled = ui_props.use_dynamic_node_coloring
                 dyn_col = dyn_box.column(align=True)
-                dyn_col.label(text="Parameter: nodeWeight")
+                dyn_col.label(text="Parameter: nodeWeight") # <<< REMOVED ICON
                 dyn_col.prop(ui_props, 'use_auto_node_thresholds', text="Auto Thresholds")
-                row_low = dyn_col.row(); row_low.enabled = not ui_props.use_auto_node_thresholds
-                row_low.prop(ui_props, 'dynamic_node_color_threshold_low', text="Low Threshold")
-                row_high = dyn_col.row(); row_high.enabled = not ui_props.use_auto_node_thresholds
-                row_high.prop(ui_props, 'dynamic_node_color_threshold_high', text="High Threshold")
+                # <<< MODIFIED: Display auto thresholds or manual inputs >>>
+                if ui_props.use_auto_node_thresholds:
+                    dyn_col.label(text=f"Min: {ui_props.auto_node_threshold_min_display}") # Display Min
+                    dyn_col.label(text=f"Max: {ui_props.auto_node_threshold_max_display}") # Display Max
+                else:
+                    row_low = dyn_col.row(); row_low.prop(ui_props, 'dynamic_node_color_threshold_low', text="Low Threshold") # Keep text for manual input
+                    row_high = dyn_col.row(); row_high.prop(ui_props, 'dynamic_node_color_threshold_high', text="High Threshold")
+                # <<< END MODIFIED >>>
+                node_vis_col.separator() # Separator before dot settings
+                # --- Node Dot Visualization ---
+                node_vis_col.prop(ui_props, 'toggle_node_dots_vis', text="Show Node Dots")
+                dot_box = node_vis_col.box()
+                dot_box.enabled = ui_props.toggle_node_dots_vis # Enable/disable based on toggle
+                dot_col = dot_box.column(align=True)
+                dot_col.prop(ui_props, 'node_dot_size') # Keep dot size customization
                 # --- End Dynamic Node Coloring Section ---
 
             # --- 3D Lines Box (New Structure) ---
@@ -475,12 +496,16 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
                     dyn_box = beam_vis_col.box()
                     dyn_box.enabled = ui_props.use_dynamic_beam_coloring
                     dyn_col = dyn_box.column(align=True)
-                    dyn_col.prop(ui_props, 'dynamic_coloring_parameter', text="Parameter")
+                    dyn_col.prop(ui_props, 'dynamic_coloring_parameter', text="Parameter") # Parameter selection remains
                     dyn_col.prop(ui_props, 'use_auto_thresholds', text="Auto Thresholds")
-                    row_low = dyn_col.row(); row_low.enabled = not ui_props.use_auto_thresholds
-                    row_low.prop(ui_props, 'dynamic_color_threshold_low', text="Low Threshold")
-                    row_high = dyn_col.row(); row_high.enabled = not ui_props.use_auto_thresholds
-                    row_high.prop(ui_props, 'dynamic_color_threshold_high', text="High Threshold")
+                    # <<< MODIFIED: Display auto thresholds or manual inputs >>>
+                    if ui_props.use_auto_thresholds:
+                        dyn_col.label(text=f"Min: {ui_props.auto_beam_threshold_min_display}") # Display Min
+                        dyn_col.label(text=f"Max: {ui_props.auto_beam_threshold_max_display}") # Display Max
+                    else:
+                        row_low = dyn_col.row(); row_low.prop(ui_props, 'dynamic_color_threshold_low', text="Low Threshold") # Keep text for manual input
+                        row_high = dyn_col.row(); row_high.prop(ui_props, 'dynamic_color_threshold_high', text="High Threshold")
+                    # <<< END MODIFIED >>>
                     beam_vis_col.separator()
 
                     # Individual Beam Type Settings

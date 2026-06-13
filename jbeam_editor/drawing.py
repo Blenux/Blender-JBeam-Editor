@@ -119,6 +119,10 @@ rail_coords = []
 all_nodes_cache: dict[str, tuple[Vector, str, str]] = {} # {node_id: (world_pos, source_filepath, part_origin)}
 all_nodes_cache_dirty = True # Flag to rebuild cache
 
+# --- Node Dots Visualization ---
+node_dots_batch = None
+node_dots_coords_colors = [] # List of tuples: (world_pos, color_tuple)
+
 # --- Selected Beam Outline --- (Remains the same)
 selected_beam_batch = None
 selected_beam_coords_colors = []
@@ -1793,20 +1797,19 @@ def draw_callback_px(context: bpy.types.Context):
             base_x += text_offset
             base_y += text_offset
     # <<< END MODIFICATION >>>
-
-        # ... (outline drawing logic remains the same, but uses base_x, base_y) ...
         if outline_size > 0:
             blfcolor(font_id, *black_color)
-            # Use base_x, base_y for all positioning
-            lblfPosition(font_id, base_x - outline_size, base_y, 0); lblfDraw(font_id, text)
-            lblfPosition(font_id, base_x + outline_size, base_y, 0); lblfDraw(font_id, text)
-            lblfPosition(font_id, base_x, base_y - outline_size, 0); lblfDraw(font_id, text)
-            lblfPosition(font_id, base_x, base_y + outline_size, 0); lblfDraw(font_id, text)
-            if outline_size > 1:
-                 lblfPosition(font_id, base_x - outline_size, base_y - outline_size, 0); lblfDraw(font_id, text)
-                 lblfPosition(font_id, base_x + outline_size, base_y - outline_size, 0); lblfDraw(font_id, text)
-                 lblfPosition(font_id, base_x - outline_size, base_y + outline_size, 0); lblfDraw(font_id, text)
-                 lblfPosition(font_id, base_x + outline_size, base_y + outline_size, 0); lblfDraw(font_id, text)
+            for s in range(1, outline_size + 1):
+                # Horizontal and Vertical
+                lblfPosition(font_id, base_x - s, base_y, 0); lblfDraw(font_id, text)
+                lblfPosition(font_id, base_x + s, base_y, 0); lblfDraw(font_id, text)
+                lblfPosition(font_id, base_x, base_y - s, 0); lblfDraw(font_id, text)
+                lblfPosition(font_id, base_x, base_y + s, 0); lblfDraw(font_id, text)
+                # Diagonals
+                lblfPosition(font_id, base_x - s, base_y - s, 0); lblfDraw(font_id, text)
+                lblfPosition(font_id, base_x + s, base_y - s, 0); lblfDraw(font_id, text)
+                lblfPosition(font_id, base_x - s, base_y + s, 0); lblfDraw(font_id, text)
+                lblfPosition(font_id, base_x + s, base_y + s, 0); lblfDraw(font_id, text)
         blfcolor(font_id, *text_color)
         # Use base_x, base_y for the final text draw
         lblfPosition(font_id, base_x, base_y, 0)
@@ -1827,6 +1830,11 @@ def draw_callback_px(context: bpy.types.Context):
         use_auto_node_thresh = ui_props.use_auto_node_thresholds
         node_low_thresh = ui_props.dynamic_node_color_threshold_low
         node_high_thresh = ui_props.dynamic_node_color_threshold_high
+
+        # <<< ADDED: Get node group filter settings >>>
+        # <<< MODIFIED: Use new EnumProperty >>>
+        filter_by_group_active = ui_props.toggle_node_group_filter
+        selected_group_for_filter = ui_props.node_group_to_show if filter_by_group_active else None
         # <<< END ADDED >>>
 
         # --- Vehicle Part Iteration ---
@@ -1868,6 +1876,26 @@ def draw_callback_px(context: bpy.types.Context):
 
                         pos_text = location_3d_to_region_2d(ctxRegion, ctxRegionData, coord)
                         if pos_text:
+                            # --- Node Group Filter Logic (Vehicle) ---
+                            if filter_by_group_active:
+                                node_data_for_filter = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
+                                node_actual_groups = set() # Store lowercase group names
+                                if node_data_for_filter and isinstance(node_data_for_filter, dict):
+                                    group_attr = node_data_for_filter.get('group')
+                                    if isinstance(group_attr, str):
+                                        node_actual_groups.add(group_attr.lower())
+                                    elif isinstance(group_attr, list):
+                                        node_actual_groups.update(g.lower() for g in group_attr if isinstance(g, str))
+
+                                if selected_group_for_filter == "__NODES_WITHOUT_GROUPS__":
+                                    if node_actual_groups: # If node has any group
+                                        continue # Skip this node
+                                elif selected_group_for_filter and selected_group_for_filter not in ["__ALL_WITH_GROUPS__", "_SEPARATOR_", "_NO_SPECIFIC_GROUPS_"]: # A specific group is selected
+                                    if selected_group_for_filter.lower() not in node_actual_groups:
+                                        continue # Skip if node doesn't have any of the filtered groups
+
+                            # --- End Node Group Filter Logic (Vehicle) ---
+
                             # --- Determine Color ---
                             # <<< MODIFICATION START >>>
                             should_draw_node = True # Assume we should draw unless calculation fails
@@ -1923,7 +1951,23 @@ def draw_callback_px(context: bpy.types.Context):
                             # <<< MODIFICATION START >>>
                             # Only draw if should_draw_node is True
                             if should_draw_node:
-                                draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color)
+                                # --- ADDED: Node Group Display ---
+                                node_id_display_string = node_id
+                                if ui_props.toggle_node_group_text:
+                                    node_data_for_group = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
+                                    if node_data_for_group and isinstance(node_data_for_group, dict):
+                                        group_info = node_data_for_group.get('group')
+                                        if group_info:
+                                            group_text_suffix = ""
+                                            if isinstance(group_info, str):
+                                                group_text_suffix = f" ({group_info})"
+                                            elif isinstance(group_info, list) and all(isinstance(g, str) for g in group_info):
+                                                if group_info: # Ensure list is not empty
+                                                    group_text_suffix = f" ({', '.join(group_info)})"
+                                            if group_text_suffix:
+                                                node_id_display_string += group_text_suffix
+                                # --- END ADDED ---
+                                draw_text_with_outline(font_id, node_id_display_string, pos_text[0], pos_text[1], text_color)
                             # <<< MODIFICATION END >>>
                 except Exception as e: print(f"Error processing part {obj.name} for drawing: {e}", file=sys.stderr)
                 finally:
@@ -1948,6 +1992,26 @@ def draw_callback_px(context: bpy.types.Context):
 
                     pos_text = location_3d_to_region_2d(ctxRegion, ctxRegionData, coord)
                     if pos_text:
+                        # --- Node Group Filter Logic (Single Part) ---
+                        if filter_by_group_active:
+                            node_data_for_filter = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
+                            node_actual_groups = set() # Store lowercase group names
+                            if node_data_for_filter and isinstance(node_data_for_filter, dict):
+                                group_attr = node_data_for_filter.get('group')
+                                if isinstance(group_attr, str):
+                                    node_actual_groups.add(group_attr.lower())
+                                elif isinstance(group_attr, list):
+                                    node_actual_groups.update(g.lower() for g in group_attr if isinstance(g, str))
+
+                            if selected_group_for_filter == "__NODES_WITHOUT_GROUPS__":
+                                if node_actual_groups:
+                                    continue
+                            elif selected_group_for_filter and selected_group_for_filter not in ["__ALL_WITH_GROUPS__", "_SEPARATOR_", "_NO_SPECIFIC_GROUPS_"]: # A specific group is selected
+                                if selected_group_for_filter.lower() not in node_actual_groups:
+                                    continue
+
+                        # --- End Node Group Filter Logic (Single Part) ---
+
                         # --- Determine Color (Single Part) ---
                         # <<< MODIFICATION START >>>
                         should_draw_node = True # Assume we should draw unless calculation fails
@@ -1992,7 +2056,23 @@ def draw_callback_px(context: bpy.types.Context):
                         # <<< MODIFICATION START >>>
                         # Only draw if should_draw_node is True
                         if should_draw_node:
-                            draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color)
+                            # --- ADDED: Node Group Display (Single Part) ---
+                            node_id_display_string = node_id
+                            if ui_props.toggle_node_group_text:
+                                node_data_for_group = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
+                                if node_data_for_group and isinstance(node_data_for_group, dict):
+                                    group_info = node_data_for_group.get('group')
+                                    if group_info:
+                                        group_text_suffix = ""
+                                        if isinstance(group_info, str):
+                                            group_text_suffix = f" ({group_info})"
+                                        elif isinstance(group_info, list) and all(isinstance(g, str) for g in group_info):
+                                            if group_info: # Ensure list is not empty
+                                                group_text_suffix = f" ({', '.join(group_info)})"
+                                        if group_text_suffix:
+                                            node_id_display_string += group_text_suffix
+                            # --- END ADDED ---
+                            draw_text_with_outline(font_id, node_id_display_string, pos_text[0], pos_text[1], text_color)
                         # <<< MODIFICATION END >>>
 
     # --- Cross-Part Node ID Drawing --- <<< MODIFIED SECTION START >>>
@@ -2054,9 +2134,45 @@ def draw_callback_px(context: bpy.types.Context):
                 pos_text = location_3d_to_region_2d(ctxRegion, ctxRegionData, world_pos)
                 if pos_text:
                     text_color = cross_part_color
+                    # --- Node Group Filter Logic (Cross-Part) ---
+                    if filter_by_group_active:
+                        # For cross-part nodes, group info might be in curr_vdata if it's a shared node,
+                        # or we might need to parse its original file (complex, skip for now for performance).
+                        # Let's check curr_vdata.
+                        node_data_for_filter = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
+                        node_actual_groups = set() # Store lowercase group names
+                        if node_data_for_filter and isinstance(node_data_for_filter, dict):
+                            group_attr = node_data_for_filter.get('group')
+                            if isinstance(group_attr, str):
+                                node_actual_groups.add(group_attr.lower())
+                            elif isinstance(group_attr, list):
+                                node_actual_groups.update(g.lower() for g in group_attr if isinstance(g, str))
+                        if selected_group_for_filter == "__NODES_WITHOUT_GROUPS__":
+                            if node_actual_groups:
+                                continue
+                        elif selected_group_for_filter and selected_group_for_filter not in ["__ALL_WITH_GROUPS__", "_SEPARATOR_", "_NO_SPECIFIC_GROUPS_"]: # A specific group is selected
+                            if selected_group_for_filter.lower() not in node_actual_groups:
+                                continue
+                    # --- End Node Group Filter Logic (Cross-Part) ---
+
                     if node_id in highlighted_nodes:
                         text_color = highlighted_cross_part_color
-                    draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color)
+                    # --- ADDED: Node Group Display (Cross-Part) ---
+                    node_id_display_string = node_id
+                    if ui_props.toggle_node_group_text:
+                        # For cross-part nodes, we need to fetch their data from all_nodes_cache's source file
+                        # This is more complex and might be slow. For now, let's skip group display for cross-part nodes
+                        # or find a more performant way if curr_vdata doesn't have it.
+                        # As a simpler approach, we can check if the node_id exists in curr_vdata (if it's a shared node)
+                        node_data_for_group = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
+                        if node_data_for_group and isinstance(node_data_for_group, dict):
+                            group_info = node_data_for_group.get('group')
+                            if group_info:
+                                if isinstance(group_info, str): node_id_display_string += f" ({group_info})"
+                                elif isinstance(group_info, list) and group_info: node_id_display_string += f" ({', '.join(group_info)})"
+                    # --- END ADDED ---
+                    draw_text_with_outline(font_id, node_id_display_string, pos_text[0], pos_text[1], text_color)
+
     # --- Cross-Part Node ID Drawing --- <<< MODIFIED SECTION END >>>
 
 
@@ -2251,6 +2367,23 @@ def _calculate_dynamic_color(value, low_threshold, high_threshold):
     return final_color
 # <<< END MODIFIED HELPER FUNCTION >>>
 
+# <<< MODIFIED HELPER: Format single number for display >>>
+def _format_number_for_display(value, is_category_valid, no_value_text="No relevant values found", na_text="N/A"):
+    """
+    Formats a single numeric value for display.
+    'is_category_valid' indicates if any valid numbers were processed in the category (e.g., for beams or nodes).
+    'value' is the specific min or max value to format.
+    """
+    if not is_category_valid: # If no valid numbers were processed for this category at all
+        return na_text
+    # If the category had valid numbers, but this specific value (e.g. min) remained at its initial inf/-inf state
+    # (meaning no numbers were actually found to update it, or all numbers were outside a typical range for it)
+    if not math.isfinite(value):
+        return no_value_text
+    # Otherwise, format the finite number as a string
+    return str(value)
+# <<< END ADDED HELPER >>>
+
 
 # Draws beams, rails, torsionbars
 def draw_callback_view(context: bpy.types.Context):
@@ -2282,6 +2415,8 @@ def draw_callback_view(context: bpy.types.Context):
     global selected_beam_batch, selected_beam_coords_colors, selected_beam_max_original_width
     # <<< ADDED: Ensure global is accessible >>>
     global _reported_missing_vars_this_rebuild
+    # Node dots
+    global node_dots_batch, node_dots_coords_colors
     # <<< ADDED: Ensure global is accessible >>>
     global _reported_unsupported_ops_this_rebuild
     # <<< ADDED: Access global node thresholds >>>
@@ -2322,6 +2457,8 @@ def draw_callback_view(context: bpy.types.Context):
         if highlight_torsionbar_outer_batch: highlight_torsionbar_outer_batch = None; batches_were_cleared = True
         if highlight_torsionbar_mid_batch: highlight_torsionbar_mid_batch = None; batches_were_cleared = True
         # Clear selected beam batch
+        if node_dots_batch: node_dots_batch = None; batches_were_cleared = True
+        # Clear selected beam batch
         if selected_beam_batch: selected_beam_batch = None; batches_were_cleared = True
 
         if batches_were_cleared:
@@ -2336,6 +2473,7 @@ def draw_callback_view(context: bpy.types.Context):
             highlight_coords.clear()
             highlight_torsionbar_outer_coords.clear()
             highlight_torsionbar_mid_coords.clear()
+            node_dots_coords_colors.clear()
             selected_beam_coords_colors.clear()
             veh_render_dirty = True # Mark dirty if batches were cleared
         return
@@ -2378,45 +2516,48 @@ def draw_callback_view(context: bpy.types.Context):
         (ui_props.toggle_torsionbars_vis and torsionbar_render_batch is None and torsionbar_coords) or \
         (ui_props.toggle_torsionbars_vis and torsionbar_red_render_batch is None and torsionbar_red_coords) or \
         (ui_props.toggle_rails_vis and rail_render_batch is None and rail_coords) or \
-        (selected_beam_batch is None and selected_beam_coords_colors)
+        (selected_beam_batch is None and selected_beam_coords_colors) or \
+        (ui_props.toggle_node_dots_vis and node_dots_batch is None and node_dots_coords_colors) # Check node dots batch
 
     if batches_missing:
         veh_render_dirty = True
     # <<< END MODIFICATION >>>
 
-    # <<< ADDED: Separate check for highlight batches needing rebuild >>>
-    highlight_batches_missing = (
-        (jb_globals.highlighted_element_type == 'torsionbar' and (highlight_torsionbar_outer_batch is None or highlight_torsionbar_mid_batch is None) and (highlight_torsionbar_outer_coords or highlight_torsionbar_mid_coords)) or
-        (jb_globals.highlighted_element_type not in (None, 'node') and highlight_render_batch is None and highlight_coords)
-    )
-    # If highlight coords exist but batches are missing OR the explicit dirty flag is set
-    if _highlight_dirty or (highlight_batches_missing and (highlight_coords or highlight_torsionbar_outer_coords or highlight_torsionbar_mid_coords)):
-        # --- Rebuild Highlight Batches ONLY ---
-        # Clear only highlight batches
+    # --- Highlight Batch Management ---
+    if _highlight_dirty:
+        # If highlight state changed, always clear old highlight batches.
+        # This ensures that if no new highlight is set, the old one is gone.
         highlight_render_batch = None
         highlight_torsionbar_outer_batch = None
         highlight_torsionbar_mid_batch = None
+        # If it's a node highlight, it might affect node dots, so trigger full rebuild.
+        if jb_globals.highlighted_element_type == 'node':
+            veh_render_dirty = True
+        _highlight_dirty = False # Reset flag
 
-        # Recreate highlight batches using current coords and colors
-        if highlight_coords:
-            colors = [jb_globals.highlighted_element_color] * len(highlight_coords)
-            try: # Add try-except for safety during batch creation
-                highlight_render_batch = batch_for_shader(render_shader, 'LINES', {"pos": highlight_coords, "color": colors})
-            except Exception as e: print(f"Error creating highlight batch: {e}", file=sys.stderr)
-        if highlight_torsionbar_outer_coords:
-            colors = [jb_globals.highlighted_element_color] * len(highlight_torsionbar_outer_coords)
-            try:
-                highlight_torsionbar_outer_batch = batch_for_shader(render_shader, 'LINES', {"pos": highlight_torsionbar_outer_coords, "color": colors})
-            except Exception as e: print(f"Error creating highlight torsionbar outer batch: {e}", file=sys.stderr)
-        if highlight_torsionbar_mid_coords:
-            colors = [jb_globals.highlighted_element_mid_color] * len(highlight_torsionbar_mid_coords)
-            try:
-                highlight_torsionbar_mid_batch = batch_for_shader(render_shader, 'LINES', {"pos": highlight_torsionbar_mid_coords, "color": colors})
-            except Exception as e: print(f"Error creating highlight torsionbar mid batch: {e}", file=sys.stderr)
+    # If not doing a full rebuild, but highlight batches are now None (due to _highlight_dirty or initial state)
+    # and there are coordinates to draw, then rebuild them.
+    if not veh_render_dirty:
+        if jb_globals.highlighted_element_type not in (None, 'node') and highlight_render_batch is None and highlight_coords:
+            if jb_globals.highlighted_element_color: # Ensure color is set
+                colors = [jb_globals.highlighted_element_color] * len(highlight_coords)
+                try:
+                    highlight_render_batch = batch_for_shader(render_shader, 'LINES', {"pos": highlight_coords, "color": colors})
+                except Exception as e: print(f"Error creating highlight batch: {e}", file=sys.stderr)
 
-        _highlight_dirty = False # Reset flag after rebuilding
-        # --- End Rebuild Highlight Batches ---
-    # <<< END ADDED >>>
+        if jb_globals.highlighted_element_type == 'torsionbar':
+            if highlight_torsionbar_outer_batch is None and highlight_torsionbar_outer_coords:
+                if jb_globals.highlighted_element_color: # Ensure color is set
+                    colors = [jb_globals.highlighted_element_color] * len(highlight_torsionbar_outer_coords)
+                    try:
+                        highlight_torsionbar_outer_batch = batch_for_shader(render_shader, 'LINES', {"pos": highlight_torsionbar_outer_coords, "color": colors})
+                    except Exception as e: print(f"Error creating highlight torsionbar outer batch: {e}", file=sys.stderr)
+            if highlight_torsionbar_mid_batch is None and highlight_torsionbar_mid_coords:
+                if jb_globals.highlighted_element_mid_color: # Ensure color is set
+                    colors = [jb_globals.highlighted_element_mid_color] * len(highlight_torsionbar_mid_coords)
+                    try:
+                        highlight_torsionbar_mid_batch = batch_for_shader(render_shader, 'LINES', {"pos": highlight_torsionbar_mid_coords, "color": colors})
+                    except Exception as e: print(f"Error creating highlight torsionbar mid batch: {e}", file=sys.stderr)
 
 
     # --- Rebuild Logic (Main Beams/Nodes) ---
@@ -2429,6 +2570,7 @@ def draw_callback_view(context: bpy.types.Context):
         torsionbar_coords.clear(); torsionbar_red_coords.clear(); rail_coords.clear();
         selected_beam_coords_colors.clear()
         highlight_coords.clear()
+        node_dots_coords_colors.clear()
         highlight_torsionbar_outer_coords.clear()
         highlight_torsionbar_mid_coords.clear()
         selected_beam_max_original_width = 1.0
@@ -2436,11 +2578,12 @@ def draw_callback_view(context: bpy.types.Context):
         # Clear all batches (will be recreated later)
         beam_render_batch = None; dynamic_beam_batch = None; anisotropic_beam_render_batch = None; support_beam_render_batch = None
         hydro_beam_render_batch = None; bounded_beam_render_batch = None; lbeam_render_batch = None; pressured_beam_render_batch = None
-        cross_part_beam_render_batch = None
+        cross_part_beam_render_batch = None # This line was already here
         torsionbar_render_batch = None; torsionbar_red_render_batch = None
         rail_render_batch = None
         selected_beam_batch = None
         highlight_render_batch = None; highlight_torsionbar_outer_batch = None; highlight_torsionbar_mid_batch = None
+        node_dots_batch = None
 
         # --- 2. Reset auto thresholds ---
         auto_min_val = float('inf'); auto_max_val = float('-inf'); auto_thresholds_valid = False
@@ -2480,6 +2623,37 @@ def draw_callback_view(context: bpy.types.Context):
                                 if v[is_fake_layer] == 0:
                                     node_id = v[node_id_layer].decode('utf-8')
                                     node_id_to_hide_status[node_id] = v.hide # Store hide status
+                                    # Populate node_dots_coords_colors here if visible
+                                    if not v.hide and ui_props.toggle_node_dots_vis:
+                                        # --- Node Group Filter Logic for Dots (Vehicle) ---
+                                        passes_group_filter = True
+                                        if ui_props.toggle_node_group_filter:
+                                            node_data_for_filter = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
+                                            node_actual_groups = set()
+                                            if node_data_for_filter and isinstance(node_data_for_filter, dict):
+                                                group_attr = node_data_for_filter.get('group')
+                                                if isinstance(group_attr, str): node_actual_groups.add(group_attr.lower())
+                                                elif isinstance(group_attr, list): node_actual_groups.update(g.lower() for g in group_attr if isinstance(g, str))
+
+                                            selected_group_for_filter_dots = ui_props.node_group_to_show
+                                            if selected_group_for_filter_dots == "__NODES_WITHOUT_GROUPS__":
+                                                if node_actual_groups: passes_group_filter = False
+                                            elif selected_group_for_filter_dots and selected_group_for_filter_dots not in ["__ALL_WITH_GROUPS__", "_SEPARATOR_", "_NO_SPECIFIC_GROUPS_"]:
+                                                if selected_group_for_filter_dots.lower() not in node_actual_groups: passes_group_filter = False
+                                        # --- End Node Group Filter Logic for Dots (Vehicle) ---
+
+                                        if passes_group_filter:
+                                            # Determine dot color based on selection/highlight state
+                                            is_selected_vp = obj_iter == active_obj and v.index in (jb_globals.selected_nodes[i][0] for i in range(len(jb_globals.selected_nodes)))
+                                            is_highlighted_txt = node_id in jb_globals.highlighted_node_ids
+                                            is_slidenode_hl_dot = jb_globals.highlighted_element_type == 'slidenode' and is_highlighted_txt
+                                            dot_color = WHITE_COLOR # Default
+                                            if is_selected_vp and is_slidenode_hl_dot: dot_color = (1.0, 0.5, 0.0, 1.0) # Orange
+                                            elif is_slidenode_hl_dot: dot_color = (1.0, 0.7, 0.7, 1.0) # Light Pink
+                                            elif is_selected_vp and is_highlighted_txt: dot_color = (1.0, 0.5, 0.0, 1.0) # Orange
+                                            elif is_highlighted_txt: dot_color = (0.0, 1.0, 0.0, 0.9) # Green
+                                            elif is_selected_vp: dot_color = (1.0, 1.0, 0.0, 0.9) # Yellow
+                                            node_dots_coords_colors.append((obj_matrix_copy @ v.co.copy(), dot_color))
                                     node_id_to_pos_matrix_map[node_id] = (v.co.copy(), obj_matrix_copy)
 
                                     # Calculate Auto Node Thresholds (Check Visibility)
@@ -2522,6 +2696,37 @@ def draw_callback_view(context: bpy.types.Context):
                             if v[is_fake_layer] == 0:
                                 node_id = v[node_id_layer].decode('utf-8')
                                 node_id_to_hide_status[node_id] = v.hide # Store hide status
+                                # Populate node_dots_coords_colors here if visible
+                                if not v.hide and ui_props.toggle_node_dots_vis:
+                                    # --- Node Group Filter Logic for Dots (Single Part) ---
+                                    passes_group_filter = True
+                                    if ui_props.toggle_node_group_filter:
+                                        node_data_for_filter = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
+                                        node_actual_groups = set()
+                                        if node_data_for_filter and isinstance(node_data_for_filter, dict):
+                                            group_attr = node_data_for_filter.get('group')
+                                            if isinstance(group_attr, str): node_actual_groups.add(group_attr.lower())
+                                            elif isinstance(group_attr, list): node_actual_groups.update(g.lower() for g in group_attr if isinstance(g, str))
+
+                                        selected_group_for_filter_dots = ui_props.node_group_to_show
+                                        if selected_group_for_filter_dots == "__NODES_WITHOUT_GROUPS__":
+                                            if node_actual_groups: passes_group_filter = False
+                                        elif selected_group_for_filter_dots and selected_group_for_filter_dots not in ["__ALL_WITH_GROUPS__", "_SEPARATOR_", "_NO_SPECIFIC_GROUPS_"]:
+                                            if selected_group_for_filter_dots.lower() not in node_actual_groups: passes_group_filter = False
+                                    # --- End Node Group Filter Logic for Dots (Single Part) ---
+
+                                    if passes_group_filter:
+                                        # Determine dot color based on selection/highlight state
+                                        is_selected_vp = v.index in (jb_globals.selected_nodes[i][0] for i in range(len(jb_globals.selected_nodes)))
+                                        is_highlighted_txt = node_id in jb_globals.highlighted_node_ids
+                                        is_slidenode_hl_dot = jb_globals.highlighted_element_type == 'slidenode' and is_highlighted_txt
+                                        dot_color = WHITE_COLOR # Default
+                                        if is_selected_vp and is_slidenode_hl_dot: dot_color = (1.0, 0.5, 0.0, 1.0) # Orange
+                                        elif is_slidenode_hl_dot: dot_color = (1.0, 0.7, 0.7, 1.0) # Light Pink
+                                        elif is_selected_vp and is_highlighted_txt: dot_color = (1.0, 0.5, 0.0, 1.0) # Orange
+                                        elif is_highlighted_txt: dot_color = (0.0, 1.0, 0.0, 0.9) # Green
+                                        elif is_selected_vp: dot_color = (1.0, 1.0, 0.0, 0.9) # Yellow
+                                        node_dots_coords_colors.append((obj_matrix_copy @ v.co.copy(), dot_color))
                                 node_id_to_pos_matrix_map[node_id] = (v.co.copy(), obj_matrix_copy)
 
                                 # Calculate Auto Node Thresholds (Check Visibility)
@@ -2619,11 +2824,13 @@ def draw_callback_view(context: bpy.types.Context):
                                 except (ValueError, TypeError): pass
 
         # <<< DEBUG PRINT START >>>
-        if ui_props.use_dynamic_beam_coloring and ui_props.use_auto_thresholds:
-            print(f"Beam Auto Thresholds: Valid={auto_thresholds_valid}, Min={auto_min_val}, Max={auto_max_val}")
-        if ui_props.use_dynamic_node_coloring and ui_props.use_auto_node_thresholds:
-            print(f"Node Auto Thresholds: Valid={auto_node_thresholds_valid}, Min={auto_node_weight_min}, Max={auto_node_weight_max}")
+        # <<< REMOVED CONSOLE PRINTS >>>
+        # if ui_props.use_dynamic_beam_coloring and ui_props.use_auto_thresholds:
+        #     print(f"Beam Auto Thresholds: Valid={auto_thresholds_valid}, Min={auto_min_val}, Max={auto_max_val}")
+        # if ui_props.use_dynamic_node_coloring and ui_props.use_auto_node_thresholds:
+        #     print(f"Node Auto Thresholds: Valid={auto_node_thresholds_valid}, Min={auto_node_weight_min}, Max={auto_node_weight_max}")
         # <<< DEBUG PRINT END >>>
+
 
         # --- 6. Populate Coordinate Lists (using finalized thresholds) ---
         if is_vehicle_part:
@@ -3054,7 +3261,20 @@ def draw_callback_view(context: bpy.types.Context):
             try: selected_beam_batch = batch_for_shader(render_shader, 'LINES', {"pos": sel_positions, "color": sel_colors})
             except Exception as e: print(f"Error creating selected beam batch: {e}", file=sys.stderr)
 
+        if node_dots_coords_colors:
+            dot_positions = []
+            dot_final_colors = [color for _, color in node_dots_coords_colors] # Extract colors
+            for world_pos, _ in node_dots_coords_colors: # Extract positions
+                dot_positions.append(world_pos)
+            try: node_dots_batch = batch_for_shader(render_shader, 'POINTS', {"pos": dot_positions, "color": dot_final_colors})
+            except Exception as e: print(f"Error creating node dots batch: {e}", file=sys.stderr)
+
         if highlight_coords:
+            # <<< ADDED: Check if highlight color is set >>>
+            if jb_globals.highlighted_element_color is None:
+                # Fallback to white if color is somehow not set
+                jb_globals.highlighted_element_color = WHITE_COLOR
+            # <<< END ADDED >>>
             colors = [jb_globals.highlighted_element_color] * len(highlight_coords)
             try: highlight_render_batch = batch_for_shader(render_shader, 'LINES', {"pos": highlight_coords, "color": colors})
             except Exception as e: print(f"Error creating highlight batch (full rebuild): {e}", file=sys.stderr)
@@ -3062,6 +3282,11 @@ def draw_callback_view(context: bpy.types.Context):
             colors = [jb_globals.highlighted_element_color] * len(highlight_torsionbar_outer_coords)
             try: highlight_torsionbar_outer_batch = batch_for_shader(render_shader, 'LINES', {"pos": highlight_torsionbar_outer_coords, "color": colors})
             except Exception as e: print(f"Error creating highlight torsionbar outer batch (full rebuild): {e}", file=sys.stderr)
+            # <<< ADDED: Check if highlight mid color is set >>>
+            if jb_globals.highlighted_element_mid_color is None:
+                # Fallback to red if mid color is somehow not set
+                jb_globals.highlighted_element_mid_color = (1.0, 0.0, 0.0, 1.0)
+            # <<< END ADDED >>>
         if highlight_torsionbar_mid_coords:
             colors = [jb_globals.highlighted_element_mid_color] * len(highlight_torsionbar_mid_coords)
             try: highlight_torsionbar_mid_batch = batch_for_shader(render_shader, 'LINES', {"pos": highlight_torsionbar_mid_coords, "color": colors})
@@ -3069,7 +3294,20 @@ def draw_callback_view(context: bpy.types.Context):
 
         # --- 9. Reset dirty flags ---
         veh_render_dirty = False
-        _highlight_dirty = False
+        # _highlight_dirty was already reset if it was true.
+        # If it wasn't true, it should remain false.
+
+        # --- 10. Update UI Properties for Display --- <<< MODIFIED >>>
+        # For Beams
+        ui_props.auto_beam_threshold_min_display = _format_number_for_display(auto_min_val, auto_thresholds_valid)
+        ui_props.auto_beam_threshold_max_display = _format_number_for_display(auto_max_val, auto_thresholds_valid)
+        # For Nodes
+        ui_props.auto_node_threshold_min_display = _format_number_for_display(auto_node_weight_min, auto_node_thresholds_valid)
+        ui_props.auto_node_threshold_max_display = _format_number_for_display(auto_node_weight_max, auto_node_thresholds_valid)
+        # <<< END ADDED >>>
+
+        # Tag UI for redraw after updating display properties
+        _tag_redraw_3d_views(context)
     # --- End Rebuild Logic ---
 
     # --- Drawing ---
@@ -3120,6 +3358,12 @@ def draw_callback_view(context: bpy.types.Context):
         final_thickness = selected_beam_max_original_width * ui_props.selected_beam_thickness_multiplier
         gpu.state.line_width_set(final_thickness)
         gpu.state.depth_mask_set(True); selected_beam_batch.draw(render_shader); gpu.state.depth_mask_set(False)
+
+    # <<< MODIFIED: Only draw node dots in Edit Mode >>>
+    if ui_props.toggle_node_dots_vis and node_dots_batch and active_obj and active_obj.mode == 'EDIT': # Check active_obj.mode
+        gpu.state.point_size_set(ui_props.node_dot_size)
+        # Depth mask should be true for points to be occluded correctly
+        gpu.state.depth_mask_set(True); node_dots_batch.draw(render_shader); gpu.state.depth_mask_set(False)
 
     gpu.state.depth_mask_set(True)
     highlight_width = 1.0

@@ -318,7 +318,7 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
             vertices, edges, tris, quads, node_ids = get_vertices_edges_faces(part_data)
 
             # Store hidden edge AND VERTEX states ---
-            hidden_edges_state = {}
+            hidden_edges_state = {} # <<< ADDED: Dictionary to store edge hidden states
             hidden_verts_state = {} # <<< ADDED
             hidden_faces_state = {} # <<< ADDED: Dictionary to store face hidden states
             temp_bm = None
@@ -331,23 +331,29 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
                     temp_bm = bmesh.new()
                     temp_bm.from_mesh(obj_data)
 
-                # --- Store Edge Hidden State (Existing) ---
-                beam_indices_layer = temp_bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
-                beam_origin_layer = temp_bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
-                if beam_indices_layer and beam_origin_layer:
-                    temp_bm.edges.ensure_lookup_table()
-                    for edge in temp_bm.edges:
-                        indices_str = edge[beam_indices_layer].decode('utf-8')
-                        # Only store for existing JBeam beams (not newly added Blender edges)
-                        if indices_str and indices_str != '-1':
-                            try:
-                                first_index = int(indices_str.split(',')[0])
-                                part_origin = edge[beam_origin_layer].decode('utf-8')
-                                # Use part_origin from the edge layer itself for the key
-                                hidden_edges_state[(part_origin, first_index)] = edge.hide
-                            except (ValueError, IndexError):
-                                print(f"Warning: Could not parse beam index for storing hidden state: {indices_str}", file=sys.stderr)
+                # --- Store Edge Hidden State (Revised) ---
+                node_id_layer_v_store = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
+                is_fake_layer_v_store = temp_bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+                beam_indices_layer_e_store = temp_bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
+                beam_origin_layer_e_store = temp_bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
 
+                if node_id_layer_v_store and is_fake_layer_v_store and beam_indices_layer_e_store and beam_origin_layer_e_store:
+                    temp_bm.edges.ensure_lookup_table()
+                    temp_bm.verts.ensure_lookup_table() # For accessing edge.verts
+                    for edge in temp_bm.edges:
+                        indices_str = edge[beam_indices_layer_e_store].decode('utf-8')
+                        if indices_str and indices_str != '-1': # Check if it's a JBeam beam
+                            v1, v2 = edge.verts[0], edge.verts[1]
+                            if v1[is_fake_layer_v_store] == 0 and v2[is_fake_layer_v_store] == 0: # Check if nodes are real
+                                try:
+                                    node_id1 = v1[node_id_layer_v_store].decode('utf-8')
+                                    node_id2 = v2[node_id_layer_v_store].decode('utf-8')
+                                    part_origin = edge[beam_origin_layer_e_store].decode('utf-8')
+                                    key = (part_origin, frozenset({node_id1, node_id2}))
+                                    hidden_edges_state[key] = edge.hide
+                                except Exception as e_store_err:
+                                    print(f"Warning: Could not store hidden state for edge ({node_id1 if 'node_id1' in locals() else '?'}-{node_id2 if 'node_id2' in locals() else '?'}): {e_store_err}", file=sys.stderr)
+                # --- End Store Edge Hidden State (Revised) ---
                 # Store Vertex Hidden State ---
                 node_id_layer = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
                 # Get node origin layer for vertex state key >>>
@@ -400,24 +406,30 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
             generate_part_mesh(obj, obj_data, bm, part_data, chosen_part, jbeam_file_path, vertices, edges, tris, quads, node_ids)
 
             # Apply hidden edge AND VERTEX states ---
-            # --- Apply Edge Hidden State (Existing) ---
-            beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
-            beam_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
-            if beam_indices_layer and beam_origin_layer and hidden_edges_state:
-                bm.edges.ensure_lookup_table()
-                for edge in bm.edges:
-                    indices_str = edge[beam_indices_layer].decode('utf-8')
-                    if indices_str and indices_str != '-1':
-                        try:
-                            first_index = int(indices_str.split(',')[0])
-                            part_origin = edge[beam_origin_layer].decode('utf-8')
-                            # Use part_origin from the edge layer itself for lookup
-                            if (part_origin, first_index) in hidden_edges_state:
-                                edge.hide = hidden_edges_state[(part_origin, first_index)]
-                        except (ValueError, IndexError):
-                            # Should not happen often if storing worked, but good practice
-                            print(f"Warning: Could not parse beam index for applying hidden state: {indices_str}", file=sys.stderr)
+            # --- Apply Edge Hidden State (Revised) ---
+            node_id_layer_v_apply = bm.verts.layers.string.get(constants.VL_NODE_ID)
+            is_fake_layer_v_apply = bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+            beam_indices_layer_e_apply = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
+            beam_origin_layer_e_apply = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
 
+            if node_id_layer_v_apply and is_fake_layer_v_apply and beam_indices_layer_e_apply and beam_origin_layer_e_apply and hidden_edges_state:
+                bm.edges.ensure_lookup_table()
+                bm.verts.ensure_lookup_table()
+                for edge in bm.edges:
+                    indices_str = edge[beam_indices_layer_e_apply].decode('utf-8')
+                    if indices_str and indices_str != '-1': # Check if it's a JBeam beam
+                        v1, v2 = edge.verts[0], edge.verts[1]
+                        if v1[is_fake_layer_v_apply] == 0 and v2[is_fake_layer_v_apply] == 0: # Check if nodes are real
+                            try:
+                                node_id1 = v1[node_id_layer_v_apply].decode('utf-8')
+                                node_id2 = v2[node_id_layer_v_apply].decode('utf-8')
+                                part_origin = edge[beam_origin_layer_e_apply].decode('utf-8')
+                                key = (part_origin, frozenset({node_id1, node_id2}))
+                                if key in hidden_edges_state:
+                                    edge.hide = hidden_edges_state[key]
+                            except Exception as e_apply_err:
+                                print(f"Warning: Could not apply hidden state for edge ({node_id1 if 'node_id1' in locals() else '?'}-{node_id2 if 'node_id2' in locals() else '?'}): {e_apply_err}", file=sys.stderr)
+            # --- End Apply Edge Hidden State (Revised) ---
             # Apply Vertex Hidden State ---
             node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
             # Get node origin layer for vertex state key >>>

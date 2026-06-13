@@ -319,6 +319,8 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
                 v = bm.verts[idx]
                 jb_globals.selected_nodes.append((idx, v[init_node_id_layer].decode('utf-8')))
             except IndexError: pass
+        # <<< ADDED: Set veh_render_dirty if node selection changed >>>
+        drawing.veh_render_dirty = True
         jb_globals.previous_selected_indices = current_selected_indices
     # --- End Update Node Selection ---
 
