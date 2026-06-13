@@ -35,7 +35,11 @@ from .operators import (
     JBEAM_EDITOR_OT_find_node,
     JBEAM_EDITOR_OT_scroll_to_definition,
     JBEAM_EDITOR_OT_open_text_editor_split,
-    JBEAM_EDITOR_OT_confirm_node_deletion, # <<< ADD THIS IMPORT
+    JBEAM_EDITOR_OT_confirm_node_deletion,
+    # <<< ADD NEW OPERATORS >>>
+    JBEAM_EDITOR_OT_warn_native_undo,
+    JBEAM_EDITOR_OT_warn_native_redo,
+    # <<< END ADD >>>
 )
 from .panels import (
     JBEAM_EDITOR_PT_transform_panel_ext,
@@ -73,7 +77,11 @@ classes = (
     JBEAM_EDITOR_OT_find_node,
     JBEAM_EDITOR_OT_scroll_to_definition,
     JBEAM_EDITOR_OT_open_text_editor_split,
-    JBEAM_EDITOR_OT_confirm_node_deletion, # <<< ADD THIS CLASS
+    JBEAM_EDITOR_OT_confirm_node_deletion,
+    # <<< ADD NEW OPERATORS TO LIST >>>
+    JBEAM_EDITOR_OT_warn_native_undo,
+    JBEAM_EDITOR_OT_warn_native_redo,
+    # <<< END ADD >>>
     JBEAM_EDITOR_PT_transform_panel_ext,
     JBEAM_EDITOR_PT_jbeam_panel,
     JBEAM_EDITOR_PT_find_node,
@@ -110,13 +118,37 @@ def init_keymaps():
     kc = bpy.context.window_manager.keyconfigs.addon
     if not kc:
         print("Warning: Addon keyconfig not found, cannot register keymaps.", file=sys.stderr)
-        return None, []
-    km = kc.keymaps.new(name="Window", space_type='EMPTY')
-    kmi = [
-        km.keymap_items.new("jbeam_editor.undo", 'LEFT_BRACKET', 'PRESS', ctrl=True),
-        km.keymap_items.new("jbeam_editor.redo", 'RIGHT_BRACKET', 'PRESS', ctrl=True),
-    ]
-    return km, kmi
+        return [] # Return empty list
+
+    keymaps_added = []
+
+    # --- Addon-specific Undo/Redo ---
+    # <<< Use this existing Window keymap for native interception too >>>
+    km_window = kc.keymaps.new(name="Window", space_type='EMPTY')
+    kmi_undo = km_window.keymap_items.new("jbeam_editor.undo", 'LEFT_BRACKET', 'PRESS', ctrl=True)
+    kmi_redo = km_window.keymap_items.new("jbeam_editor.redo", 'RIGHT_BRACKET', 'PRESS', ctrl=True)
+    keymaps_added.extend([(km_window, kmi_undo), (km_window, kmi_redo)])
+
+    # --- Native Undo/Redo Interception (Now in Window context) ---
+    # <<< REMOVE THIS BLOCK - We don't need the 'Mesh' keymap for this anymore >>>
+    # # Find or create keymap for 3D View > Mesh Edit Mode
+    # km_mesh_edit = kc.keymaps.get('Mesh')
+    # if not km_mesh_edit:
+    #     km_mesh_edit = kc.keymaps.new(name='Mesh', space_type='EMPTY') # Use EMPTY if specific context is tricky
+    # <<< END REMOVAL >>>
+
+    # <<< MODIFIED: Add the native interceptors to the 'Window' keymap >>>
+    # Map Ctrl+Z to our warning operator in the Window context
+    kmi_native_undo = km_window.keymap_items.new(JBEAM_EDITOR_OT_warn_native_undo.bl_idname, 'Z', 'PRESS', ctrl=True)
+    # Map Ctrl+Shift+Z to our warning operator in the Window context
+    kmi_native_redo = km_window.keymap_items.new(JBEAM_EDITOR_OT_warn_native_redo.bl_idname, 'Z', 'PRESS', ctrl=True, shift=True)
+    # <<< END MODIFICATION >>>
+
+    # <<< MODIFIED: Add the new keymap items to the list to be tracked/unregistered >>>
+    keymaps_added.extend([(km_window, kmi_native_undo), (km_window, kmi_native_redo)])
+    # <<< END MODIFICATION >>>
+
+    return keymaps_added # Return the list of tuples
 
 # Helper for finding layer collections (used by handlers)
 def find_layer_collection_recursive(find, col):
@@ -134,10 +166,9 @@ def register():
         bpy.utils.register_class(c)
 
     if not bpy.app.background:
-        km, kmi = init_keymaps()
-        if km:
-            for k_item in kmi:
-                custom_keymaps.append((km, k_item))
+        # <<< MODIFIED: Use the list returned by init_keymaps >>>
+        custom_keymaps = init_keymaps()
+        # <<< END MODIFIED >>>
 
     bpy.types.Scene.ui_properties = bpy.props.PointerProperty(type=UIProperties)
     bpy.types.Scene.jbeam_editor_veh_render_dirty = bpy.props.BoolProperty(default=False)
@@ -215,10 +246,16 @@ def unregister():
         try: bpy.utils.unregister_class(c)
         except RuntimeError: print(f"Could not unregister class {c.__name__}", file=sys.stderr)
 
+    # <<< MODIFIED: Use the stored list of tuples >>>
     for km, kmi in custom_keymaps:
-        try: km.keymap_items.remove(kmi)
-        except Exception as e: print(f"Error removing keymap item: {e}", file=sys.stderr)
+        try:
+            if kmi and km: # Check if both are valid
+                km.keymap_items.remove(kmi)
+        except Exception as e:
+            # Report error but continue unregistering other items
+            print(f"Error removing keymap item '{kmi.idname if kmi else 'N/A'}': {e}", file=sys.stderr)
     custom_keymaps.clear()
+    # <<< END MODIFIED >>>
 
     try:
         if hasattr(bpy.types.Scene, 'ui_properties'): del bpy.types.Scene.ui_properties

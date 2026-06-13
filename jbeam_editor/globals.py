@@ -28,6 +28,7 @@ _force_do_export = False
 prev_obj_selected = None
 selected_nodes = [] # List of tuples: (vertex_index, init_node_id)
 selected_beams = [] # List of tuples: (edge_index, beam_indices_str)
+selected_beam_edge_indices = set() # <<< ADDED: Set of selected edge indices
 selected_tris_quads = [] # List of tuples: (BMFace, face_idx_in_part)
 previous_selected_indices = set() # Set of selected vertex indices from previous update
 
@@ -44,6 +45,7 @@ _selected_node_line_info = None # Dict: {'line': int, 'pos': Vector}
 batch_node_renaming_enabled = False
 # _last_op is managed in handlers.py
 confirm_delete_pending = False # <<< ADDED: Flag to indicate confirmation dialog is active
+# native_undo_redo_warning_shown = False # <<< REMOVE THIS LINE >>>
 
 # Highlight on Click state
 # <<< MODIFIED LINE >>>
@@ -54,6 +56,13 @@ highlighted_element_mid_color = (1.0, 0.0, 0.0, 1.0) # Default red (middle color
 highlighted_element_original_width = 1.0
 highlighted_node_ids = set() # For quick membership checks (e.g., text coloring)
 highlighted_element_ordered_node_ids = [] # <<< ADDED: Store IDs in order for drawing
+_populating_search_id_from_highlight = False # <<< ADDED: Flag for search update control
 
 # Text Editor state tracking for highlighting
 last_text_area_info = {'name': None, 'line_index': -1}
+
+# <<< ADDED: JBeam Variables Cache >>>
+# Stores found variables like: {'$varName': {'value': val, 'source_file': str, 'line_number': int}}
+jbeam_variables_cache: dict = {}
+jbeam_variables_cache_dirty: bool = True
+# <<< END ADDED >>>

@@ -24,6 +24,7 @@ import uuid
 import sys
 import traceback
 import time # Keep for potential future debugging
+import json # <<< ADDED: Import json
 
 from bpy.app.handlers import persistent
 from mathutils import Vector
@@ -41,23 +42,28 @@ from .drawing import (
     _scroll_editor_to_line, all_nodes_cache, part_name_to_obj,
     # Import highlight coord lists
     highlight_coords, highlight_torsionbar_outer_coords, highlight_torsionbar_mid_coords,
-    # highlight_cross_part_coords, # <<< REMOVED: Import cross-part highlight coords
     # <<< Import the moved highlight function >>>
     find_and_highlight_element_for_line, _tag_redraw_3d_views,
     # Import coordinate lists and batch variables for load_post_handler
     beam_coords, anisotropic_beam_coords, support_beam_coords, hydro_beam_coords,
     bounded_beam_coords, lbeam_coords, pressured_beam_coords, torsionbar_coords,
     torsionbar_red_coords, rail_coords, cross_part_beam_coords,
+    # <<< MODIFIED: Import single dynamic list >>>
+    dynamic_beam_coords_colors,
+    # Batches
     beam_render_batch, anisotropic_beam_render_batch, support_beam_render_batch,
     hydro_beam_render_batch, bounded_beam_render_batch, lbeam_render_batch,
     pressured_beam_render_batch, torsionbar_render_batch, torsionbar_red_render_batch,
-    rail_render_batch, cross_part_beam_render_batch, highlight_render_batch,
-    highlight_torsionbar_outer_batch, highlight_torsionbar_mid_batch,
-    # highlight_cross_part_batch, # <<< REMOVED >>>
+    rail_render_batch, cross_part_beam_render_batch,
+    # <<< MODIFIED: Import single dynamic batch >>>
+    dynamic_beam_batch,
+    # Highlight batches
+    highlight_render_batch, highlight_torsionbar_outer_batch, highlight_torsionbar_mid_batch,
 )
 from .operators import JBEAM_EDITOR_OT_batch_node_renaming # Import operator for bl_idname
 from .text_editor import SCENE_SHORT_TO_FULL_FILENAME
 # from .sjsonast import parse as sjsonast_parse, calculate_char_positions as sjsonast_calculate_char_positions, ASTNode # <<< Remove ASTNode import here
+from . import utils # <<< ADDED: Import utils for show_message_box
 
 # Timer intervals
 check_file_interval = 0.1
@@ -89,6 +95,10 @@ op_no_export = {
     'TEXT_OT_move',
     'TEXT_OT_scroll_bar',
     'TEXT_OT_scroll',
+    # <<< ADDED: Prevent export trigger from native undo/redo itself >>>
+    'ed.undo',
+    'ed.redo',
+    # <<< END ADDED >>>
 }
 
 _last_op = None # Used in poll_active_operators
@@ -145,7 +155,6 @@ def draw_callback_text_editor(context: bpy.types.Context):
             highlight_coords.clear()
             highlight_torsionbar_outer_coords.clear()
             highlight_torsionbar_mid_coords.clear()
-            # highlight_cross_part_coords.clear() # <<< REMOVED >>>
             jb_globals.highlighted_node_ids.clear() # <<< ADDED: Clear node IDs on error
             jb_globals.highlighted_element_type = None
             drawing.veh_render_dirty = True
@@ -158,7 +167,6 @@ def draw_callback_text_editor(context: bpy.types.Context):
         highlight_coords.clear()
         highlight_torsionbar_outer_coords.clear()
         highlight_torsionbar_mid_coords.clear()
-        # highlight_cross_part_coords.clear() # <<< REMOVED >>>
         jb_globals.highlighted_node_ids.clear() # <<< ADDED: Clear node IDs when toggled off
         jb_globals.highlighted_element_type = None
         drawing.veh_render_dirty = True # Trigger 3D view redraw
@@ -283,13 +291,19 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
         except IndexError: print(f"Error: Could not find vertex with index {newly_selected_vert_index} for renaming.")
         except Exception as rename_err: print(f"Error during batch renaming: {rename_err}")
 
-    jb_globals.selected_nodes.clear()
-    for idx in current_selected_indices:
-        try:
-            v = bm.verts[idx]
-            jb_globals.selected_nodes.append((idx, v[init_node_id_layer].decode('utf-8')))
-        except IndexError: pass
-    jb_globals.previous_selected_indices = current_selected_indices
+    # --- Update Node Selection ---
+    node_selection_changed = False
+    if len(current_selected_indices) != len(jb_globals.previous_selected_indices) or \
+       current_selected_indices != jb_globals.previous_selected_indices:
+        node_selection_changed = True
+        jb_globals.selected_nodes.clear()
+        for idx in current_selected_indices:
+            try:
+                v = bm.verts[idx]
+                jb_globals.selected_nodes.append((idx, v[init_node_id_layer].decode('utf-8')))
+            except IndexError: pass
+        jb_globals.previous_selected_indices = current_selected_indices
+    # --- End Update Node Selection ---
 
     # --- MODIFICATION START ---
     for i, v in enumerate(bm.verts):
@@ -304,7 +318,9 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
             # v[is_fake_layer] should default to 0 (or be set if necessary)
     # --- MODIFICATION END ---
 
-    jb_globals.selected_beams.clear()
+    # --- Update Beam Selection ---
+    beam_selection_changed = False
+    current_selected_beam_indices = set()
     for i, e in enumerate(bm.edges):
         beam_indices = e[beam_indices_layer].decode('utf-8')
         if i >= current_edge_count:
@@ -312,7 +328,22 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
                 e[beam_indices_layer] = bytes('-1', 'utf-8')
                 e[beam_part_origin_layer] = bytes(active_obj_data[constants.MESH_JBEAM_PART], 'utf-8')
         if beam_indices != '' and e.select:
-            jb_globals.selected_beams.append((e.index, beam_indices))
+            current_selected_beam_indices.add(e.index) # Add index to current set
+
+    # Compare current beam selection with previous state
+    if current_selected_beam_indices != jb_globals.selected_beam_edge_indices:
+        beam_selection_changed = True
+        jb_globals.selected_beam_edge_indices = current_selected_beam_indices
+        # Update the list used for properties/tooltips
+        jb_globals.selected_beams.clear()
+        for edge_index in current_selected_beam_indices:
+            try:
+                e = bm.edges[edge_index]
+                beam_indices_str = e[beam_indices_layer].decode('utf-8')
+                jb_globals.selected_beams.append((edge_index, beam_indices_str))
+            except (IndexError, ReferenceError): pass # Ignore if edge becomes invalid
+        drawing.veh_render_dirty = True # Trigger redraw if beam selection changed
+    # --- End Update Beam Selection ---
 
     jb_globals.selected_tris_quads.clear()
     for i, f in enumerate(bm.faces):
@@ -434,8 +465,34 @@ def poll_active_operators_timer():
     wm = context.window_manager
 
     try:
+        # <<< REMOVE Native Undo/Redo Warning Logic >>>
+        # active_obj = context.active_object # Get active object once
+        # is_native_undo_redo = op is not None and op.bl_idname in ('ed.undo', 'ed.redo')
+        #
+        # if is_native_undo_redo:
+        #     # Check context: active object, edit mode, jbeam part, editing enabled
+        #     if (active_obj is not None and
+        #         active_obj.mode == 'EDIT' and
+        #         active_obj.data is not None and
+        #         active_obj.data.get(constants.MESH_JBEAM_PART) is not None and
+        #         active_obj.data.get(constants.MESH_EDITING_ENABLED, False)):
+        #
+        #         # Show popup only if the flag is not set
+        #         if not jb_globals.native_undo_redo_warning_shown:
+        #             utils.show_message_box(
+        #                 icon='ERROR',
+        #                 title="Native Undo/Redo Warning",
+        #                 message="Native Undo/Redo (Ctrl+Z/Ctrl+Shift+Z) is NOT recommended for JBeam editing.\nIt can corrupt data or lead to unexpected behavior.\n\nPlease use the addon's Undo/Redo ([ / ]) instead."
+        #             )
+        #             # Set the flag to prevent showing the popup again for this specific action
+        #             jb_globals.native_undo_redo_warning_shown = True
+        # elif op != _last_op: # Reset flag only if a *different* operator becomes active
+        #     jb_globals.native_undo_redo_warning_shown = False
+        # <<< END REMOVAL >>>
+
+
         # --- Auto Export Logic ---
-        active_obj = context.active_object
+        active_obj = context.active_object # Get active object here if needed for export
         if active_obj is not None and active_obj.data is not None:
             active_obj_data = active_obj.data
             if active_obj_data.get(constants.MESH_JBEAM_PART) is not None and active_obj_data.get(constants.MESH_EDITING_ENABLED, False):
@@ -444,11 +501,16 @@ def poll_active_operators_timer():
                 should_export = jb_globals._force_do_export or (jb_globals._do_export and op_changed and is_export_trigger_op)
 
                 if should_export:
-                    veh_model = active_obj_data.get(constants.MESH_VEHICLE_MODEL)
-                    if veh_model is not None: export_vehicle.auto_export(active_obj, veh_model)
-                    else: export_jbeam.auto_export(active_obj)
-                    refresh_curr_vdata(True)
-                    jb_globals._do_export = False; jb_globals._force_do_export = False
+                    if jb_globals.confirm_delete_pending:
+                        print("Export skipped: Node deletion confirmation is pending.")
+                        jb_globals._do_export = False
+                        jb_globals._force_do_export = False
+                    else:
+                        veh_model = active_obj_data.get(constants.MESH_VEHICLE_MODEL)
+                        if veh_model is not None: export_vehicle.auto_export(active_obj, veh_model)
+                        else: export_jbeam.auto_export(active_obj)
+                        refresh_curr_vdata(True)
+                        jb_globals._do_export = False; jb_globals._force_do_export = False
             else:
                 jb_globals._do_export = False; jb_globals._force_do_export = False
         else:
@@ -464,17 +526,15 @@ def poll_active_operators_timer():
             highlight_coords.clear()
             highlight_torsionbar_outer_coords.clear()
             highlight_torsionbar_mid_coords.clear()
-            # highlight_cross_part_coords.clear() # <<< REMOVED >>>
             jb_globals.highlighted_node_ids.clear() # <<< ADDED: Clear node IDs on error
             jb_globals.highlighted_element_type = None
             # Clear batches directly in drawing module
             drawing.highlight_render_batch = None
             drawing.highlight_torsionbar_outer_batch = None
             drawing.highlight_torsionbar_mid_batch = None
-            # drawing.highlight_cross_part_batch = None # <<< REMOVED >>>
             drawing.veh_render_dirty = True
     finally:
-         _last_op = op
+         _last_op = op # Update _last_op regardless of errors
 
     return poll_active_ops_interval
 
@@ -511,6 +571,7 @@ def load_post_handler(dummy):
     jb_globals.prev_obj_selected = None
     jb_globals.selected_nodes.clear()
     jb_globals.selected_beams.clear()
+    jb_globals.selected_beam_edge_indices.clear() # <<< ADDED: Clear new set
     jb_globals.selected_tris_quads.clear()
     jb_globals.previous_selected_indices.clear()
 
@@ -533,9 +594,16 @@ def load_post_handler(dummy):
     drawing.all_nodes_cache_dirty = True # Force node cache rebuild
     drawing.all_nodes_cache.clear()
     drawing.part_name_to_obj.clear()
+    # <<< ADDED: Reset variable cache state >>>
+    jb_globals.jbeam_variables_cache.clear()
+    jb_globals.jbeam_variables_cache_dirty = True
+    # <<< END ADDED >>>
 
     # Clear coordinate lists
     drawing.beam_coords.clear()
+    # <<< MODIFIED: Clear single dynamic list >>>
+    drawing.dynamic_beam_coords_colors.clear()
+    # <<< END MODIFIED >>>
     drawing.anisotropic_beam_coords.clear()
     drawing.support_beam_coords.clear()
     drawing.hydro_beam_coords.clear()
@@ -549,12 +617,14 @@ def load_post_handler(dummy):
     drawing.highlight_coords.clear()
     drawing.highlight_torsionbar_outer_coords.clear()
     drawing.highlight_torsionbar_mid_coords.clear()
-    # drawing.highlight_cross_part_coords.clear() # <<< REMOVED >>>
 
     # Clear batch variables (set to None)
     # Need to use 'global' keyword if modifying module-level variables directly
     # Or better, access them via the module name 'drawing.'
     drawing.beam_render_batch = None
+    # <<< MODIFIED: Clear single dynamic batch >>>
+    drawing.dynamic_beam_batch = None
+    # <<< END MODIFIED >>>
     drawing.anisotropic_beam_render_batch = None
     drawing.support_beam_render_batch = None
     drawing.hydro_beam_render_batch = None
@@ -568,7 +638,6 @@ def load_post_handler(dummy):
     drawing.highlight_render_batch = None
     drawing.highlight_torsionbar_outer_batch = None
     drawing.highlight_torsionbar_mid_batch = None
-    # drawing.highlight_cross_part_batch = None # <<< REMOVED >>>
 
     # --- ADDED: Explicitly try to refresh data after reset ---
     try:

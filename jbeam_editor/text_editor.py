@@ -179,7 +179,6 @@ def check_open_int_file_for_changes(context: bpy.types.Context, undoing_redoing=
             print('file changed!', filename_full)
 
         # Store the state *before* the change for potential initial history push
-        # state_before_change = last_file_text # <<< REMOVED >>>
 
         scene[SCENE_PREV_TEXTS][short_filename] = curr_file_text
 

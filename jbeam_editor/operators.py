@@ -227,11 +227,12 @@ class JBEAM_EDITOR_OT_batch_node_renaming(bpy.types.Operator):
             ui_props.batch_node_renaming_node_idx = 1
         return {'FINISHED'}
 
-# <<< START REFACTORED NODE SEARCH LOGIC >>>
+# <<< START MODIFIED FUNCTION >>>
 # Helper function for node finding logic
 def _find_and_select_node_id_logic(context: bpy.types.Context, search_id: str, report_func=None):
     """
-    Finds and selects a node by ID in the active object.
+    Finds a node by ID in the active object and frames it in the view
+    without changing the current selection.
     Returns True on success, False on failure.
     Uses report_func (like operator.report) for feedback.
     """
@@ -240,13 +241,12 @@ def _find_and_select_node_id_logic(context: bpy.types.Context, search_id: str, r
 
     # --- Context Checks ---
     obj = context.active_object
+    scene = context.scene # <<< Added scene access >>>
     if not obj or obj.mode != 'EDIT':
         # Don't report if just called from property update without context
         # report_func({'WARNING'}, "Node search requires Edit Mode.")
         return False
-    if not context.tool_settings.mesh_select_mode[0]:
-        report_func({'WARNING'}, "Node search requires Vertex selection mode.")
-        return False
+    
     obj_data = obj.data
     if not obj_data or obj_data.get(constants.MESH_JBEAM_PART) is None or not obj_data.get(constants.MESH_EDITING_ENABLED, False):
         # report_func({'WARNING'}, "Active object is not a valid JBeam part or editing is disabled.")
@@ -268,7 +268,8 @@ def _find_and_select_node_id_logic(context: bpy.types.Context, search_id: str, r
 
     if not node_id_layer or not is_fake_layer:
         report_func({'ERROR'}, "JBeam node layers not found on mesh.")
-        return False # No need to free bm from edit mesh here
+        # No need to free bm from edit mesh here (as it wasn't assigned in this case)
+        return False
 
     bm.verts.ensure_lookup_table()
     found_vert = None
@@ -281,20 +282,8 @@ def _find_and_select_node_id_logic(context: bpy.types.Context, search_id: str, r
                 break # Stop searching once found
 
     if found_vert:
-        # Deselect all vertices first
-        for v_deselect in bm.verts:
-            v_deselect.select = False
-        # Select the found vertex
-        found_vert.select = True
-        # Make the found vertex the active one (important for view_selected)
-        bm.select_history.add(found_vert)
-        bm.select_flush_mode() # Ensure selection updates
-
-        # Update the mesh from the bmesh
-        bmesh.update_edit_mesh(obj_data)
-
-        # --- MODIFIED: Center view on selection ---
-        # Find a 3D View area to provide context for view_selected
+        # --- MODIFIED: Center view on coordinate ---
+        # Find a 3D View area to provide context
         view3d_area = None
         if context.area and context.area.type == 'VIEW_3D':
             view3d_area = context.area
@@ -311,7 +300,6 @@ def _find_and_select_node_id_logic(context: bpy.types.Context, search_id: str, r
 
         if view3d_area:
             try:
-                # Use temp_override to ensure the operator runs in the 3D View context
                 # Find a suitable region within the 3D View area (usually WINDOW)
                 view3d_region = None
                 for region in view3d_area.regions:
@@ -321,7 +309,13 @@ def _find_and_select_node_id_logic(context: bpy.types.Context, search_id: str, r
 
                 if view3d_region:
                     with context.temp_override(area=view3d_area, region=view3d_region):
-                        bpy.ops.view3d.view_selected(use_all_regions=False)
+                        # --- NEW: Center view on coordinate using 3D cursor ---
+                        original_cursor_location = scene.cursor.location.copy() # Store original cursor location
+                        found_node_world_co = obj.matrix_world @ found_vert.co # Get world coordinate
+                        scene.cursor.location = found_node_world_co # Move cursor to node
+                        bpy.ops.view3d.view_center_cursor() # Center view on cursor
+                        scene.cursor.location = original_cursor_location # Restore cursor location
+                        # --- END NEW ---
                 else:
                     report_func({'WARNING'}, "Could not find a suitable region in the 3D Viewport to center view.")
 
@@ -333,7 +327,8 @@ def _find_and_select_node_id_logic(context: bpy.types.Context, search_id: str, r
             report_func({'WARNING'}, "Could not find a 3D Viewport to center the view.")
         # --- END MODIFIED ---
 
-        report_func({'INFO'}, f"Node '{search_id}' found and selected.")
+        # <<< MODIFIED: Changed report message >>>
+        report_func({'INFO'}, f"Node '{search_id}' found and framed.")
         return True
     else:
         report_func({'WARNING'}, f"Node ID '{search_id}' not found in this object.")
@@ -344,16 +339,16 @@ def _find_and_select_node_id_logic(context: bpy.types.Context, search_id: str, r
 class JBEAM_EDITOR_OT_find_node(bpy.types.Operator):
     bl_idname = "jbeam_editor.find_node"
     bl_label = "Find Node"
-    bl_description = "Find and select the specified node ID in the active object (Vertex Mode only)"
+    # <<< MODIFIED: Updated description >>>
+    bl_description = "Find and frame the specified node ID in the active object (Edit Mode only)"
 
     @classmethod
     def poll(cls, context):
         obj = context.active_object
-        # Check if active object is valid JBeam, in Edit mode, editing is enabled, AND in Vertex select mode
         return (obj and obj.mode == 'EDIT' and
                 obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None and
-                obj.data.get(constants.MESH_EDITING_ENABLED, False) and
-                context.tool_settings.mesh_select_mode[0]) # Check vertex select mode (index 0)
+                obj.data.get(constants.MESH_EDITING_ENABLED, False))
+                # context.tool_settings.mesh_select_mode[0]) # Check vertex select mode (index 0)
 
     def execute(self, context):
         scene = context.scene
@@ -364,7 +359,7 @@ class JBEAM_EDITOR_OT_find_node(bpy.types.Operator):
         success = _find_and_select_node_id_logic(context, search_id, self.report)
 
         return {'FINISHED'} if success else {'CANCELLED'}
-# <<< END REFACTORED NODE SEARCH LOGIC >>>
+# <<< END MODIFIED FUNCTION and OPERATOR >>>
 
 # Operator to scroll to definition
 class JBEAM_EDITOR_OT_scroll_to_definition(bpy.types.Operator):
@@ -721,3 +716,106 @@ class JBEAM_EDITOR_OT_confirm_node_deletion(bpy.types.Operator):
              # No need to free bm from edit mesh
 
         return {'FINISHED'}
+
+# <<< START: Modified Native Undo/Redo Warning Operators >>>
+
+def _check_jbeam_edit_context(context: bpy.types.Context):
+    """Helper function to check if we are editing a valid JBeam object."""
+    active_obj = context.active_object
+    return (active_obj is not None and
+            active_obj.mode == 'EDIT' and
+            active_obj.data is not None and
+            active_obj.data.get(constants.MESH_JBEAM_PART) is not None and
+            active_obj.data.get(constants.MESH_EDITING_ENABLED, False))
+
+class JBEAM_EDITOR_OT_warn_native_undo(bpy.types.Operator):
+    """Intercepts native Undo (Ctrl+Z) to warn and confirm if editing a JBeam object."""
+    bl_idname = "jbeam_editor.warn_native_undo"
+    bl_label = "JBeam Native Undo Warning"
+    # bl_description is used in the draw method now
+    bl_description = "Native Undo (Ctrl+Z) is NOT recommended for JBeam editing as it can cause issues.\nProceed anyway?"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    def invoke(self, context, event):
+        if _check_jbeam_edit_context(context):
+            # Show confirmation dialog if editing JBeam
+            # <<< MODIFIED: Added width argument >>>
+            return context.window_manager.invoke_props_dialog(self, width=500)
+        else:
+            # Otherwise, execute the default Blender undo immediately
+            try:
+                bpy.ops.ed.undo('INVOKE_DEFAULT')
+            except RuntimeError as e:
+                # Handle cases where undo might not be available
+                self.report({'WARNING'}, f"Native undo failed: {e}")
+                return {'CANCELLED'}
+            return {'FINISHED'}
+
+    # <<< MODIFIED: draw method for centering >>>
+    def draw(self, context):
+        layout = self.layout
+        # Split the description into lines for better formatting
+        lines = self.bl_description.split('\n')
+        for line in lines:
+            # Create a row for each line and center it
+            row = layout.row()
+            row.alignment = 'CENTER'
+            row.label(text=line)
+
+    def execute(self, context):
+        # This method is only called if the user confirms the dialog
+        try:
+            bpy.ops.ed.undo('INVOKE_DEFAULT')
+            self.report({'WARNING'}, "Executed native Undo despite JBeam editing context.") # Optional warning after execution
+        except RuntimeError as e:
+            # Handle cases where undo might not be available even after confirmation
+            self.report({'WARNING'}, f"Native undo failed after confirmation: {e}")
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+class JBEAM_EDITOR_OT_warn_native_redo(bpy.types.Operator):
+    """Intercepts native Redo (Ctrl+Shift+Z) to warn and confirm if editing a JBeam object."""
+    bl_idname = "jbeam_editor.warn_native_redo"
+    bl_label = "JBeam Native Redo Warning"
+    # bl_description is used in the draw method now
+    bl_description = "Native Redo (Ctrl+Shift+Z) is NOT recommended for JBeam editing as it can cause issues.\nProceed anyway?"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    def invoke(self, context, event):
+        if _check_jbeam_edit_context(context):
+            # Show confirmation dialog if editing JBeam
+            # <<< MODIFIED: Added width argument >>>
+            return context.window_manager.invoke_props_dialog(self, width=500) # Adjusted width to match undo
+        else:
+            # Otherwise, execute the default Blender redo immediately
+            try:
+                bpy.ops.ed.redo('INVOKE_DEFAULT')
+            except RuntimeError as e:
+                # Handle cases where redo might not be available
+                self.report({'WARNING'}, f"Native redo failed: {e}")
+                return {'CANCELLED'}
+            return {'FINISHED'}
+
+    # <<< MODIFIED: draw method for centering >>>
+    def draw(self, context):
+        layout = self.layout
+        # Split the description into lines for better formatting
+        lines = self.bl_description.split('\n')
+        for line in lines:
+            # Create a row for each line and center it
+            row = layout.row()
+            row.alignment = 'CENTER'
+            row.label(text=line)
+
+    def execute(self, context):
+        # This method is only called if the user confirms the dialog
+        try:
+            bpy.ops.ed.redo('INVOKE_DEFAULT')
+            self.report({'WARNING'}, "Executed native Redo despite JBeam editing context.") # Optional warning after execution
+        except RuntimeError as e:
+            # Handle cases where redo might not be available even after confirmation
+            self.report({'WARNING'}, f"Native redo failed after confirmation: {e}")
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+# <<< END: Modified Native Undo/Redo Warning Operators >>>

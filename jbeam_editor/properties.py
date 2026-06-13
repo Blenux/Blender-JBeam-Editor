@@ -26,13 +26,17 @@ import traceback
 from . import constants
 from . import globals as jb_globals # Import globals
 # Import drawing module to access its state/functions if needed later
+# <<< ADDED: Import drawing module directly for setting dirty flag >>>
 from . import drawing
 # Import the update function from drawing.py after it's defined there
 # This avoids circular import if drawing needs properties
-from .drawing import _update_toggle_cross_part_beams_vis, veh_render_dirty # Import veh_render_dirty
+# <<< MODIFIED: Removed _update_dynamic_beam_coloring from this import >>>
+from .drawing import _update_toggle_cross_part_beams_vis, veh_render_dirty
 
 # <<< ADDED: Import the helper function >>>
 from .operators import _find_and_select_node_id_logic
+# <<< ADDED: Import globals >>>
+from . import globals as jb_globals
 
 # Refresh property input field UI
 # Simplified rename logic
@@ -116,18 +120,34 @@ def _update_master_toggle_vis(self, context):
     # (though the scene property should be sufficient)
     setattr(drawing, 'veh_render_dirty', True)
 
-# <<< ADDED: Update callback for search_node_id >>>
+# <<< START MODIFIED FUNCTION _update_search_node_id >>>
 def _update_search_node_id(self, context):
     """
     Called when the search_node_id property changes.
-    Attempts to find and select the node.
+    Attempts to find and select the node, unless the update was triggered
+    by the text editor highlight function.
     """
+    # Check the global flag
+    if jb_globals._populating_search_id_from_highlight:
+        # If the flag is set, it means the highlight function updated the value.
+        # Reset the flag and do nothing else (don't trigger the search).
+        jb_globals._populating_search_id_from_highlight = False
+        return # Exit the callback
+
+    # If the flag was not set, proceed with the normal search logic
+    # (likely triggered by user pressing Enter in the UI field).
     search_id = self.search_node_id.strip()
     if search_id: # Only attempt search if the field is not empty
         # Call the helper logic. Feedback is handled by the helper.
-        # We don't need the return value here in the update callback.
         _find_and_select_node_id_logic(context, search_id)
     # No return needed for update callbacks
+# <<< END MODIFIED FUNCTION _update_search_node_id >>>
+
+# <<< Update function for dynamic coloring properties (defined here) >>>
+def _update_dynamic_beam_coloring(self, context):
+    """Sets the render dirty flag when dynamic coloring settings change."""
+    context.scene.jbeam_editor_veh_render_dirty = True
+    setattr(drawing, 'veh_render_dirty', True)
 
 class UIProperties(bpy.types.PropertyGroup):
     input_node_id: bpy.props.StringProperty(
@@ -140,9 +160,9 @@ class UIProperties(bpy.types.PropertyGroup):
     # Node Search Property
     search_node_id: bpy.props.StringProperty(
         name="Search Node ID",
-        description="Enter the Node ID to find and select (Press Enter to search)", # <<< Updated description
+        description="Enter the Node ID to find and select (Press Enter to search)",
         default="",
-        update=_update_search_node_id # <<< Assign the update callback
+        update=_update_search_node_id # Keep the update callback assigned
     )
 
     batch_node_renaming_naming_scheme: bpy.props.StringProperty(
@@ -157,14 +177,6 @@ class UIProperties(bpy.types.PropertyGroup):
         default=1,
         min=1
     )
-
-    # --- Master Visualization Toggle --- <<< REMOVED (Moved to new panel) >>>
-    # toggle_master_vis: bpy.props.BoolProperty(
-    #     name="Show All Line Visualizations",
-    #     description="Toggles the visibility of all beam/rail/torsionbar lines (excluding highlights)",
-    #     default=True,
-    #     update=_update_master_toggle_vis # Use the new update function
-    # )
 
     toggle_node_ids_text: bpy.props.BoolProperty(
         name="Toggle NodeIDs Text",
@@ -217,6 +229,16 @@ class UIProperties(bpy.types.PropertyGroup):
         default='BOTTOM_LEFT',
     )
 
+    # <<< NEW PROPERTY >>>
+    tooltip_padding_x: bpy.props.IntProperty(
+        name="Horizontal Padding",
+        description="Horizontal distance (in pixels) from the viewport edge (for Left/Right placement)",
+        default=60,
+        min=0,
+        max=200, # Set a reasonable maximum
+    )
+    # <<< END NEW PROPERTY >>>
+
     # --- Shared Tooltip Settings --- <<< MODIFIED >>>
     toggle_line_tooltip: bpy.props.BoolProperty(
         name="Show Line # Tooltip",
@@ -260,13 +282,6 @@ class UIProperties(bpy.types.PropertyGroup):
         default=False
     )
 
-    # --- Beam Visualization Panel Toggle --- <<< REMOVED (Moved to new panel) >>>
-    # show_beam_visualization_panel: bpy.props.BoolProperty(
-    #     name="Beam Visualization",
-    #     description="Expand to see beam visualization options",
-    #     default=False,
-    # )
-
     # <<< ADDED: New Panel Toggle >>>
     show_line_visualizations_panel: bpy.props.BoolProperty(
         name="Line Visualizations",
@@ -293,26 +308,72 @@ class UIProperties(bpy.types.PropertyGroup):
     # Beam visualization properties (NORMAL)
     toggle_beams_vis: bpy.props.BoolProperty(
         name="Show Normal Beams",
-        description="Toggles the visibility of normal beams (Green Lines)",
+        description="Toggles the visibility of normal beams (Green Lines or Dynamic Color)",
         default=True,
-        update=lambda self, context: setattr(context.scene, 'jbeam_editor_veh_render_dirty', True)
+        update=_update_dynamic_beam_coloring
     )
     beam_color: bpy.props.FloatVectorProperty(
         name="Normal Beam Color",
-        description="Color of the normal beam visualization lines",
+        description="Color of the normal beam visualization lines (used when dynamic coloring is off)",
         subtype='COLOR',
         default=(0.0, 1.0, 0.0, 1.0),
         min=0.0, max=1.0,
         size=4,
-        update=lambda self, context: setattr(context.scene, 'jbeam_editor_veh_render_dirty', True)
+        update=_update_dynamic_beam_coloring
     )
     beam_width: bpy.props.FloatProperty(
         name="Normal Beam Width",
         description="Line width for normal beam visualization",
-        default=1.0,
+        default=2.0,
         min=0.1, max=10.0,
-        update=lambda self, context: setattr(context.scene, 'jbeam_editor_veh_render_dirty', True)
+        update=_update_dynamic_beam_coloring
     )
+
+    # --- Dynamic Beam Coloring Properties --- <<< MODIFIED SECTION >>>
+    use_dynamic_beam_coloring: bpy.props.BoolProperty(
+        name="Use Dynamic Coloring",
+        description="Color normal beams based on a selected parameter and thresholds using a blue-cyan-green-yellow-red gradient",
+        default=False,
+        update=_update_dynamic_beam_coloring
+    )
+    # <<< ADDED: Auto Threshold Toggle >>>
+    use_auto_thresholds: bpy.props.BoolProperty(
+        name="Use Auto Thresholds",
+        description="Automatically determine Low/High thresholds based on the actual min/max values in the active part",
+        default=True,
+        update=_update_dynamic_beam_coloring # Use the same update function
+    )
+    # <<< END ADDED >>>
+    dynamic_coloring_parameter: bpy.props.EnumProperty(
+        name="Parameter",
+        description="JBeam parameter to use for dynamic coloring",
+        items=[
+            ('beamSpring', 'beamSpring', 'Color based on beamSpring value'),
+            ('beamDamp', 'beamDamp', 'Color based on beamDamp value'),
+            ('beamDeform', 'beamDeform', 'Color based on beamDeform value'),
+            ('beamStrength', 'beamStrength', 'Color based on beamStrength value'),
+            # Add other relevant parameters if needed
+        ],
+        default='beamSpring',
+        update=_update_dynamic_beam_coloring
+    )
+    dynamic_color_threshold_low: bpy.props.FloatProperty(
+        name="Low Threshold",
+        description="Values below or equal to this threshold are blue (used when Auto Thresholds is off)", # <<< Updated description
+        default=0.0,
+        min=-0.0,
+        max=50000000.0,
+        update=_update_dynamic_beam_coloring
+    )
+    dynamic_color_threshold_high: bpy.props.FloatProperty(
+        name="High Threshold",
+        description="Values above or equal to this threshold are red. Values between Low and High transition through the gradient (used when Auto Thresholds is off)", # <<< Updated description
+        default=5000000.0,
+        min=-0.0,
+        max=50000000.0,
+        update=_update_dynamic_beam_coloring
+    )
+    # --- End Dynamic Beam Coloring Properties ---
 
     # Anisotropic Beam Visualization Properties
     toggle_anisotropic_beams_vis: bpy.props.BoolProperty(
@@ -333,7 +394,7 @@ class UIProperties(bpy.types.PropertyGroup):
     anisotropic_beam_width: bpy.props.FloatProperty(
         name="Anisotropic Beam Width",
         description="Line width for anisotropic beam visualization",
-        default=1.0,
+        default=2.0,
         min=0.1, max=10.0,
         update=lambda self, context: setattr(context.scene, 'jbeam_editor_veh_render_dirty', True)
     )
@@ -357,7 +418,7 @@ class UIProperties(bpy.types.PropertyGroup):
     support_beam_width: bpy.props.FloatProperty(
         name="Support Beam Width",
         description="Line width for support beam visualization",
-        default=1.0,
+        default=2.0,
         min=0.1, max=10.0,
         update=lambda self, context: setattr(context.scene, 'jbeam_editor_veh_render_dirty', True)
     )
@@ -381,7 +442,7 @@ class UIProperties(bpy.types.PropertyGroup):
     hydro_beam_width: bpy.props.FloatProperty(
         name="Hydro Beam Width",
         description="Line width for hydro beam visualization",
-        default=1.0,
+        default=2.0,
         min=0.1, max=10.0,
         update=lambda self, context: setattr(context.scene, 'jbeam_editor_veh_render_dirty', True)
     )
@@ -405,7 +466,7 @@ class UIProperties(bpy.types.PropertyGroup):
     bounded_beam_width: bpy.props.FloatProperty(
         name="Bounded Beam Width",
         description="Line width for bounded beam visualization",
-        default=1.0,
+        default=2.0,
         min=0.1, max=10.0,
         update=lambda self, context: setattr(context.scene, 'jbeam_editor_veh_render_dirty', True)
     )
@@ -429,7 +490,7 @@ class UIProperties(bpy.types.PropertyGroup):
     lbeam_beam_width: bpy.props.FloatProperty(
         name="LBeam Width",
         description="Line width for LBeam visualization",
-        default=1.0,
+        default=2.0,
         min=0.1, max=10.0,
         update=lambda self, context: setattr(context.scene, 'jbeam_editor_veh_render_dirty', True)
     )
@@ -453,7 +514,7 @@ class UIProperties(bpy.types.PropertyGroup):
     pressured_beam_width: bpy.props.FloatProperty(
         name="Pressured Beam Width",
         description="Line width for pressured beam visualization",
-        default=1.0,
+        default=2.0,
         min=0.1, max=10.0,
         update=lambda self, context: setattr(context.scene, 'jbeam_editor_veh_render_dirty', True)
     )
@@ -469,7 +530,7 @@ class UIProperties(bpy.types.PropertyGroup):
         name="Torsionbar Color",
         description="Color of the outer torsionbar visualization segments",
         subtype='COLOR',
-        default=(1.0, 0.5, 0.0, 1.0), # <<< CHANGED: Orange
+        default=(0.0, 0.0, 1.0, 1.0),
         min=0.0, max=1.0,
         size=4,
         update=lambda self, context: setattr(context.scene, 'jbeam_editor_veh_render_dirty', True)
@@ -486,7 +547,7 @@ class UIProperties(bpy.types.PropertyGroup):
     torsionbar_width: bpy.props.FloatProperty(
         name="Torsionbar Width",
         description="Line width for torsionbar visualization",
-        default=1.0,
+        default=2.0,
         min=0.1, max=10.0,
         update=lambda self, context: setattr(context.scene, 'jbeam_editor_veh_render_dirty', True)
     )
@@ -510,7 +571,7 @@ class UIProperties(bpy.types.PropertyGroup):
     rail_width: bpy.props.FloatProperty(
         name="Rail Width",
         description="Line width for rail visualization",
-        default=1.0,
+        default=2.0,
         min=0.1, max=10.0,
         update=lambda self, context: setattr(context.scene, 'jbeam_editor_veh_render_dirty', True)
     )
@@ -534,7 +595,7 @@ class UIProperties(bpy.types.PropertyGroup):
     cross_part_beam_width: bpy.props.FloatProperty(
         name="Cross-Part Beam Width",
         description="Line width for cross-part beam visualization",
-        default=1.0,
+        default=2.0,
         min=0.1, max=10.0,
         update=lambda self, context: setattr(context.scene, 'jbeam_editor_veh_render_dirty', True)
     )
@@ -551,20 +612,35 @@ class UIProperties(bpy.types.PropertyGroup):
     # Highlight Thickness Multiplier Property
     highlight_thickness_multiplier: bpy.props.FloatProperty(
         name="Highlight Thickness Multiplier",
-        description="Multiplier for the line width of the highlighted element",
-        default=5.0,
+        description="Multiplier for the line width of the highlighted element from text editor click",
+        default=4.0,
         min=1.0, max=10.0,
-        update=lambda self, context: setattr(drawing, 'veh_render_dirty', True) # Use drawing's dirty flag
+        update=lambda self, context: setattr(drawing, 'veh_render_dirty', True)
+    )
+
+    # Toggle for Selected Beam Outline
+    show_selected_beam_outline: bpy.props.BoolProperty(
+        name="Show Selected Beam Outline",
+        description="Draw a white outline for beams selected in the 3D viewport",
+        default=True,
+        update=lambda self, context: setattr(drawing, 'veh_render_dirty', True)
+    )
+
+    # Selected Beam Thickness Multiplier Property
+    selected_beam_thickness_multiplier: bpy.props.FloatProperty(
+        name="Selected Beam Thickness Multiplier",
+        description="Multiplier for the line width of beams selected in the 3D viewport, based on their original width", # Updated description
+        default=2.0,
+        min=1.0, max=10.0,
+        update=lambda self, context: setattr(drawing, 'veh_render_dirty', True)
     )
 
     # --- Node Creation Prefixes ---
-    # <<< ADDED PROPERTY >>>
     show_new_node_naming_panel: bpy.props.BoolProperty(
         name="New Node Naming",
         description="Expand to see new node naming options",
         default=False, # Start collapsed by default
     )
-    # <<< END ADDED PROPERTY >>>
 
     # <<< ADDED: Toggle for prefix/suffix feature >>>
     use_node_naming_prefixes: bpy.props.BoolProperty(

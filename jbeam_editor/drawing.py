@@ -25,6 +25,13 @@ import base64
 import pickle
 import sys # <<< Added import
 import traceback # <<< Added import
+import re # <<< ADDED: Import re for variable parsing
+import json # <<< Need json for parsing string values robustly
+# <<< ADDED: Imports for safe expression evaluation >>>
+import ast
+import operator as op
+import math # Ensure math is imported
+
 
 from blf import position as blfpos
 from blf import size as blfsize
@@ -33,7 +40,7 @@ from blf import color as blfcolor
 from blf import dimensions as blfdims
 
 from bpy_extras.view3d_utils import location_3d_to_region_2d
-from mathutils import Vector, Matrix
+from mathutils import Vector, Matrix, Color # <<< ADD Color import
 
 # Import from local modules
 from . import constants
@@ -44,56 +51,70 @@ from . import bng_sjson
 from .text_editor import SCENE_SHORT_TO_FULL_FILENAME
 from .sjsonast import ASTNode # <<< Ensure ASTNode is imported
 from .jbeam import io as jbeam_io # <<< ADDED: Import jbeam_io
+from .utils import Metadata # <<< ADDED: Import Metadata for filtering
 
 if not constants.UNIT_TESTING:
     import gpu
     from gpu_extras.batch import batch_for_shader
 
+# <<< NEW: Define white color constant >>>
+WHITE_COLOR = (1.0, 1.0, 1.0, 1.0)
+
 # Drawing related globals
-veh_render_dirty = False # Flag to trigger batch rebuild
-part_name_to_obj: dict[str, bpy.types.Object] = {} # Cache for vehicle part objects
-warned_missing_nodes_this_rebuild = set() # <<< MOVED: Make this a module-level variable
+veh_render_dirty = False
+part_name_to_obj: dict[str, bpy.types.Object] = {}
+warned_missing_nodes_this_rebuild = set()
 
 # --- Visualization Batches & Coords ---
-beam_render_shader = None
-beam_render_batch = None # NORMAL beams (Green)
+render_shader = None # Will be initialized to SMOOTH_COLOR
+
+# Normal Beams (Static Color) - Only used when dynamic coloring is OFF
+beam_render_batch = None
 beam_coords = []
 
-anisotropic_beam_render_batch = None # Magenta Lines (Default) <<< CORRECTED COMMENT
-anisotropic_beam_coords = []
+# Dynamic Coloring Beams <<< MODIFIED: Single list/batch for ALL types >>>
+dynamic_beam_batch = None
+# Store tuples: (pos1, pos2, color) - will be processed into separate lists for batching
+dynamic_beam_coords_colors = []
+# <<< END MODIFIED >>>
 
+# Other Beam Types (Static Color) - Only used when dynamic coloring is OFF
+anisotropic_beam_render_batch = None
+anisotropic_beam_coords = []
 support_beam_render_batch = None
 support_beam_coords = []
-
 hydro_beam_render_batch = None
 hydro_beam_coords = []
-
 bounded_beam_render_batch = None
 bounded_beam_coords = []
-
 lbeam_render_batch = None
 lbeam_coords = []
-
 pressured_beam_render_batch = None
 pressured_beam_coords = []
+# Cross-Part Beams (Static Color) - Only used when dynamic coloring is OFF
+cross_part_beam_render_batch = None
+cross_part_beam_coords = []
 
+# Torsionbars, Rails (Remain separate)
 torsionbar_render_batch = None
 torsionbar_coords = []
 torsionbar_red_render_batch = None
 torsionbar_red_coords = []
-
 rail_render_batch = None
 rail_coords = []
 
-# --- Cross-Part Beam Visualization ---
-cross_part_beam_render_batch = None
-cross_part_beam_coords = []
+# Node Cache (Remains the same)
 all_nodes_cache: dict[str, tuple[Vector, str, str]] = {} # {node_id: (world_pos, source_filepath, part_origin)}
 all_nodes_cache_dirty = True # Flag to rebuild cache
 
-# --- Highlight on Click ---
-highlight_render_batch = None # For non-torsionbar elements
-highlight_coords = [] # For non-torsionbar elements
+# --- Selected Beam Outline --- (Remains the same)
+selected_beam_batch = None
+selected_beam_coords_colors = []
+selected_beam_max_original_width = 1.0
+
+# --- Highlight on Click --- (Remain the same)
+highlight_render_batch = None
+highlight_coords = []
 highlight_torsionbar_outer_batch = None
 highlight_torsionbar_outer_coords = []
 highlight_torsionbar_mid_batch = None
@@ -541,9 +562,376 @@ def update_all_nodes_cache(context: bpy.types.Context):
     print(f"All nodes cache updated with {len(all_nodes_cache)} nodes.")
     all_nodes_cache_dirty = False
 
+# <<< MODIFIED: Function to update JBeam variables cache >>>
+def update_jbeam_variables_cache(context: bpy.types.Context):
+    """
+    Scans ALL loaded JBeam text files and caches defined variables.
+    Prioritizes '$var = val;' definitions over defaults from ["$var", ...] lists.
+    """
+    # Use the global cache and dirty flag from jb_globals
+    # Don't clear immediately, merge results instead
+    temp_variable_cache = {} # Store findings here first
+    scene = context.scene
+
+    short_to_full_map = scene.get(SCENE_SHORT_TO_FULL_FILENAME, {})
+    if not short_to_full_map:
+        jb_globals.jbeam_variables_cache_dirty = False
+        return
+
+    # Regex to find variable assignments: $varName = value ; (optional comment)
+    variable_regex = re.compile(r'^\s*\$([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.*?)\s*;?\s*(//.*|/\*.*)?$')
+
+    # --- Pass 1: Parse tunable variables ["$var", ...] ---
+    for short_name, text_obj in bpy.data.texts.items():
+        full_filepath = short_to_full_map.get(short_name)
+        if not full_filepath or not full_filepath.lower().endswith('.jbeam'):
+            continue
+
+        try:
+            file_content = text_obj.as_string()
+            if not file_content or '"variables"' not in file_content: # Quick check
+                continue
+
+            # Use bng_sjson for structural parsing
+            try:
+                padded_content = file_content + chr(127) * 2
+                c, i = bng_sjson._skip_white_space(padded_content, 0, full_filepath)
+                parsed_data = None
+                if c == 123:
+                    parsed_data, _ = bng_sjson._read_object(padded_content, i, full_filepath)
+                else:
+                    continue # Skip if file doesn't start with '{'
+
+                if not parsed_data: continue
+
+                for part_name, part_data in parsed_data.items():
+                    if isinstance(part_data, dict) and 'variables' in part_data:
+                        variables_section = part_data['variables']
+                        if isinstance(variables_section, list):
+                            for var_entry in variables_section:
+                                # Check format ["$varName", type, unit, category, default_value, ...]
+                                if (isinstance(var_entry, list) and len(var_entry) >= 5 and
+                                        isinstance(var_entry[0], str) and var_entry[0].startswith('$')):
+                                    var_name = var_entry[0]
+                                    default_value = var_entry[4] # 5th element is default value
+
+                                    # Store default value if not already set by a direct assignment later
+                                    if var_name not in temp_variable_cache:
+                                        temp_variable_cache[var_name] = {
+                                            'value': default_value, # Store raw default value
+                                            'source_file': full_filepath,
+                                            'line_number': None, # Line number is harder to get accurately here
+                                            'source_type': 'default'
+                                        }
+            except SyntaxError as se:
+                print(f"Warning: Skipping variable cache update (Pass 1) for '{full_filepath}' due to syntax error: {se}", file=sys.stderr)
+                continue
+            except Exception as e:
+                print(f"Error processing file {full_filepath} for variable cache (Pass 1): {e}", file=sys.stderr)
+                # traceback.print_exc() # Optional traceback
+
+        except Exception as e:
+            print(f"Error reading file {full_filepath} for variable cache (Pass 1): {e}", file=sys.stderr)
+
+    # --- Pass 2: Parse direct assignments $var = val; (overwrites defaults) ---
+    for short_name, text_obj in bpy.data.texts.items():
+        full_filepath = short_to_full_map.get(short_name)
+        if not full_filepath or not full_filepath.lower().endswith('.jbeam'):
+            continue
+
+        try:
+            file_content = text_obj.as_string()
+            if not file_content:
+                continue
+
+            lines = file_content.splitlines()
+            for line_num, line in enumerate(lines, 1):
+                match = variable_regex.match(line)
+                if match:
+                    var_name_only = match.group(1)
+                    value_str = match.group(2).strip()
+                    parsed_value = None
+
+                    # Attempt to parse the value (same logic as before)
+                    try:
+                        if '.' in value_str or 'e' in value_str.lower(): parsed_value = float(value_str)
+                        else: parsed_value = int(value_str)
+                    except ValueError:
+                        if value_str.lower() == 'true': parsed_value = True
+                        elif value_str.lower() == 'false': parsed_value = False
+                        elif len(value_str) >= 2 and value_str.startswith('"') and value_str.endswith('"'):
+                            try: parsed_value = json.loads(value_str)
+                            except json.JSONDecodeError: parsed_value = value_str[1:-1]
+                        else: parsed_value = value_str # Store as raw string if other parsing fails
+
+                    full_var_name = '$' + var_name_only
+                    # Store or update the variable info (direct assignments overwrite defaults)
+                    temp_variable_cache[full_var_name] = {
+                        'value': parsed_value,
+                        'source_file': full_filepath,
+                        'line_number': line_num,
+                        'source_type': 'assignment'
+                    }
+
+        except Exception as e:
+            print(f"Error processing file {full_filepath} for variable cache (Pass 2): {e}", file=sys.stderr)
+            # traceback.print_exc()
+
+    # --- Finalize Cache ---
+    jb_globals.jbeam_variables_cache.clear()
+    jb_globals.jbeam_variables_cache.update(temp_variable_cache) # Update global cache
+
+    jb_globals.jbeam_variables_cache_dirty = False
+# <<< END MODIFIED FUNCTION >>>
+
+# <<< ADDED: Safe Expression Evaluator using AST >>>
+# Define allowed operators
+allowed_operators = {
+    ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul,
+    ast.Div: op.truediv, ast.Pow: op.pow, ast.USub: op.neg
+    # Add more operators here if needed (e.g., Modulo: ast.Mod: op.mod)
+}
+# Define allowed names (e.g., math functions, constants) - Start empty
+allowed_names = {
+    'pi': math.pi,
+    'e': math.e,
+    # Add math functions if desired, e.g., 'sqrt': math.sqrt
+}
+# Define allowed node types in the AST
+allowed_node_types = {
+    'Expression', 'Constant', 'Name', 'Load', 'BinOp', 'UnaryOp',
+    # Add Call, Attribute etc. if functions/methods are allowed later
+}
+
+class SafeExpressionEvaluator(ast.NodeVisitor):
+    """
+    Safely evaluates an AST expression node, allowing only basic arithmetic
+    and variable lookups from a provided cache.
+    """
+    def __init__(self, variable_cache):
+        self.variable_cache = variable_cache
+        # Limit recursion depth for variable resolution within the expression
+        self._max_depth = 10
+        self._current_depth = 0
+
+    def visit(self, node):
+        """Override visit to check node type and depth."""
+        if self._current_depth >= self._max_depth:
+            raise RecursionError("Maximum expression evaluation depth exceeded")
+
+        node_type_name = type(node).__name__
+        if node_type_name not in allowed_node_types:
+            raise TypeError(f"AST node type {node_type_name} is not allowed")
+
+        self._current_depth += 1
+        try:
+            result = super().visit(node)
+        finally:
+            self._current_depth -= 1
+        return result
+
+    def visit_Expression(self, node):
+        return self.visit(node.body)
+
+    def visit_Constant(self, node):
+        # Handles numbers, strings, True, False, None
+        if isinstance(node.value, (int, float)):
+            return node.value
+        # Allow True/False? JBeam uses lowercase 'true'/'false' typically parsed earlier.
+        # elif isinstance(node.value, bool):
+        #     return node.value
+        else:
+            # Disallow other constants like strings within the expression itself for now
+            raise TypeError(f"Constant type {type(node.value).__name__} not allowed in expression")
+
+    # Handles variable names
+    def visit_Name(self, node):
+        if node.id in allowed_names:
+            return allowed_names[node.id]
+
+        # Assume it's a JBeam variable (already transformed from $var)
+        jbeam_var_name = '$' + node.id.replace('jbeamvar_', '', 1) # Reconstruct original JBeam name
+        cached_var = self.variable_cache.get(jbeam_var_name)
+
+        if cached_var is not None:
+            value = cached_var['value']
+            # Recursively resolve if the value is another expression string
+            if isinstance(value, str) and value.startswith('=$'):
+                # Call the main resolver function, which uses this evaluator
+                # This handles nested variable references like '=$var1' where var1 = '=$var2 * 2'
+                resolved_value = resolve_jbeam_variable_value(value, self.variable_cache, self._current_depth) # Pass depth
+                if isinstance(resolved_value, (int, float)):
+                    return resolved_value
+                else:
+                    # If nested resolution didn't return a number, raise error
+                    raise ValueError(f"Nested variable '{jbeam_var_name}' did not resolve to a number (got {resolved_value})")
+            elif isinstance(value, (int, float)):
+                return value
+            # Handle cached booleans? Convert to 1/0?
+            elif isinstance(value, bool):
+                 return 1.0 if value else 0.0 # Example: Treat bools as 1.0/0.0
+            else:
+                raise TypeError(f"Variable '{jbeam_var_name}' has unsupported type: {type(value).__name__}")
+        else:
+            raise NameError(f"Variable '{jbeam_var_name}' not found in cache")
+
+    # Handles binary operators (+, -, *, /, **)
+    def visit_BinOp(self, node):
+        op_symbol = {ast.Add: '+', ast.Sub: '-', ast.Mult: '*', ast.Div: '/', ast.Pow: '**'}.get(type(node.op), '?')
+        if type(node.op) not in allowed_operators:
+            raise TypeError(f"Operator {type(node.op).__name__} not allowed")
+        left_val = self.visit(node.left)
+        right_val = self.visit(node.right)
+        # Ensure both operands are numbers before operation
+        if not isinstance(left_val, (int, float)) or not isinstance(right_val, (int, float)):
+             raise TypeError(f"Unsupported operand types for {op_symbol}: {type(left_val).__name__}, {type(right_val).__name__}")
+        try:
+            result = allowed_operators[type(node.op)](left_val, right_val)
+            return result
+        except ZeroDivisionError:
+            print(f"Warning: Division by zero encountered in expression.", file=sys.stderr)
+            return float('inf') # Or return 0, or NaN, depending on desired behavior
+
+    # Handles unary operators (e.g., - for negation)
+    def visit_UnaryOp(self, node):
+        op_symbol = {ast.USub: '-'}.get(type(node.op), '?')
+        if type(node.op) not in allowed_operators:
+            raise TypeError(f"Unary operator {type(node.op).__name__} not allowed")
+        operand_val = self.visit(node.operand)
+        if not isinstance(operand_val, (int, float)):
+             raise TypeError(f"Unsupported operand type for {op_symbol}: {type(operand_val).__name__}")
+        result = allowed_operators[type(node.op)](operand_val)
+        return result
+
+def _evaluate_jbeam_expression(expression_str: str, variable_cache: dict, depth: int = 0):
+    """
+    Safely evaluates a JBeam arithmetic expression string (e.g., '$var * 1.1').
+    """
+    # 1. Sanitize: Remove '$' and replace with a safe prefix for variable names
+    # Ensure variable names are valid Python identifiers after removing '$'
+    def replace_var(match):
+        var_name = match.group(1)
+        # Use a prefix that's unlikely to clash and is a valid identifier part
+        # Python identifiers can start with underscore
+        safe_var_name = 'jbeamvar_' + var_name
+        if not safe_var_name.isidentifier():
+            # Handle invalid chars if necessary, or raise error
+            raise NameError(f"Invalid character in variable name: ${var_name}")
+        return safe_var_name
+
+    try:
+        # Use regex to find $variables and replace them
+        # Regex ensures we only match valid variable starts ($ followed by letter/underscore)
+        python_expr = re.sub(r'\$([a-zA-Z_][a-zA-Z0-9_]*)', replace_var, expression_str)
+
+        # 2. Parse the sanitized expression string into an AST
+        tree = ast.parse(python_expr, mode='eval')
+
+        # 3. Evaluate the AST using the safe visitor
+        evaluator = SafeExpressionEvaluator(variable_cache)
+        evaluator._current_depth = depth # Pass current depth for recursion control
+        result = evaluator.visit(tree)
+
+        # Ensure the final result is a number
+        if isinstance(result, (int, float)):
+            return result
+        else:
+            # This might happen if the expression was just a boolean or something unexpected
+            raise TypeError(f"Expression evaluated to non-numeric type: {type(result).__name__}")
+
+    except NameError as e:
+        # Extract the original JBeam variable name if possible
+        name_match = re.search(r"Variable '(\$[a-zA-Z_][a-zA-Z0-9_]*)' not found", str(e)) # Adjusted regex
+        original_var = name_match.group(1) if name_match else "unknown variable"
+        print(f"Evaluation Error: Variable not found - {original_var} (in expression '{expression_str}')", file=sys.stderr)
+        return None # Indicate failure
+    except (SyntaxError, TypeError, ValueError, RecursionError) as e:
+        print(f"Evaluation Error: Could not evaluate expression '{expression_str}': {e}", file=sys.stderr)
+        return None # Indicate failure
+    except Exception as e:
+        print(f"Unexpected Evaluation Error for '{expression_str}': {e}", file=sys.stderr)
+        traceback.print_exc()
+        return None # Indicate failure
+
+# <<< MODIFIED: Function for variable resolution and expression evaluation >>>
+def resolve_jbeam_variable_value(value, variable_cache=None, depth=0):
+    """
+    Resolves JBeam variable references like '=$variable' or evaluates
+    simple arithmetic expressions like '=$variable * 1.1', '"$=$variable * 1.1"',
+    "'$=$variable * 1.1'", or '$=$variable * 1.1'. # <<< Updated docstring
+
+    Args:
+        value: The value to resolve (can be any type).
+        variable_cache: The cache to use (defaults to global cache).
+        depth: Current recursion depth (internal use).
+
+    Returns:
+        The resolved/evaluated value (likely float/int/bool) or the original value
+        if evaluation fails or it's not a recognized expression format.
+    """
+    if variable_cache is None:
+        variable_cache = jb_globals.jbeam_variables_cache
+
+    # Limit overall recursion depth
+    if depth >= 10:
+        print(f"Warning: Maximum recursion depth reached resolving value '{value}'", file=sys.stderr)
+        return value # Return original value to stop recursion
+
+    # <<< MODIFICATION START: Check all 4 patterns after stripping >>>
+    is_expression = False
+    expression_part = None
+    if isinstance(value, str):
+        stripped_value = value.strip() # <<< STRIP the value here
+
+        # Check 1: Double quotes "$=..."
+        check1_startswith = stripped_value.startswith('"$="')
+        check1_endswith = stripped_value.endswith('"')
+        if check1_startswith and check1_endswith:
+            is_expression = True
+            expression_part = stripped_value[3:-1].strip()
+        else:
+            # Check 2: Single quotes '$=...'
+            check2_startswith = stripped_value.startswith("'$='")
+            check2_endswith = stripped_value.endswith("'")
+            if check2_startswith and check2_endswith:
+                 is_expression = True
+                 expression_part = stripped_value[3:-1].strip()
+            else:
+                # Check 3: No quotes, starts with =$
+                check3_startswith = stripped_value.startswith('=$')
+                if check3_startswith:
+                    is_expression = True
+                    expression_part = stripped_value[2:].strip()
+                else:
+                    # <<< Check 4: No quotes, starts with $=$ >>>
+                    check4_startswith = stripped_value.startswith('$=$')
+                    if check4_startswith:
+                        is_expression = True
+                        # Extract starting after the second '$'
+                        expression_part = stripped_value[3:].strip()
+                    # <<< End Check 4 >>>
+    # <<< MODIFICATION END >>>
+
+    if is_expression and expression_part is not None: # <<< Use the flag and check expression_part >>>
+        # Try evaluating the expression part
+        evaluated_result = _evaluate_jbeam_expression(expression_part, variable_cache, depth + 1)
+
+        if evaluated_result is not None:
+            # Successfully evaluated to a number
+            return evaluated_result
+        else:
+            # Evaluation failed, return the original value as a fallback
+            return value # Return original UNSTRIPPED value on failure
+    else:
+        # Not an expression string, return the original value
+        return value # Return original UNSTRIPPED value
+# <<< END MODIFIED FUNCTION >>>
+
+
 # Refresh the current JBeam data based on the active object
 def refresh_curr_vdata(force_refresh=False):
-    global veh_render_dirty, all_nodes_cache_dirty, warned_missing_nodes_this_rebuild # <<< ADD warned_missing_nodes_this_rebuild
+    # <<< MODIFIED: Add jbeam_variables_cache_dirty to globals >>>
+    global veh_render_dirty, all_nodes_cache_dirty, warned_missing_nodes_this_rebuild
     context = bpy.context
     scene = context.scene
     ui_props = scene.ui_properties
@@ -584,12 +972,18 @@ def refresh_curr_vdata(force_refresh=False):
         else:
             jb_globals.curr_vdata = None
 
-        # Always mark cache dirty if object changed or forced refresh
+        # Always mark caches dirty if object changed or forced refresh
         if is_new_jbeam_object or force_refresh:
              all_nodes_cache_dirty = True
+             jb_globals.jbeam_variables_cache_dirty = True # <<< ADDED: Mark variable cache dirty >>>
              warned_missing_nodes_this_rebuild.clear() # <<< ADDED: Clear warnings on significant refresh
 
         veh_render_dirty = True
+
+        # --- ADDED: Trigger variable cache update if dirty ---
+        if jb_globals.jbeam_variables_cache_dirty:
+            update_jbeam_variables_cache(context)
+        # --- END ADDED ---
 
         # --- ADDED: Trigger highlight update on object change ---
         # If the object changed, it's a JBeam part, and highlighting is enabled,
@@ -829,7 +1223,6 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                     )
 
                     if node_overlaps_line and is_element_array and not found_element_on_line:
-                        # print(f"[Highlight Debug] '[' at {node.start_pos}-{node.end_pos} overlaps target line. Section: {current_section_name}, Rail Links: {in_rail_links_array}")
                         # Parse content within this bracket pair from AST
                         temp_node_ids = []
                         temp_values_count = 0
@@ -843,7 +1236,6 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                             k += 1
 
                         num_parsed_ids = len(temp_node_ids)
-                        # print(f"[Highlight Debug] Parsed content: ids={temp_node_ids}, values={temp_values_count}")
 
                         # Determine element type based on context and parsed content
                         if current_section_name == 'nodes' and num_parsed_ids == 1 and temp_values_count >= 3:
@@ -872,10 +1264,8 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                         # <<< END ADDED >>>
 
                         if found_element_on_line:
-                            # print(f"[Highlight Debug] Element FOUND on line: type={element_type}, ids={node_ids}")
                             break # Found the first relevant element on the line
                         else:
-                            # print(f"[Highlight Debug] Parsed array content on line did not match criteria. Section: {current_section_name}, Rail Links: {in_rail_links_array}")
                             pass # Keep searching
 
                     # Normal stack push if not the target element or context wrong
@@ -903,12 +1293,8 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
             i += 1
         # --- End AST Traversal ---
 
-        # <<< DEBUG PRINT: Final result before processing >>>
-        # print(f"[Highlight Debug] Final AST Result before processing: element_type={element_type}, node_ids={node_ids}, found_on_line={found_element_on_line}")
-
         # --- Further Processing & Highlighting ---
         if not found_element_on_line or element_type is None:
-            # print("[Highlight Debug] No valid element found on line or type is None.") # DEBUG
             if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context)
             return False # No valid element found on the line within correct context
 
@@ -948,7 +1334,6 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                  original_color = ui_props.beam_color; original_width = ui_props.beam_width
 
         elif element_type == 'rail':
-             # print("[Highlight Debug] Element identified as RAIL by AST.") # DEBUG
              original_color = ui_props.rail_color
              original_width = ui_props.rail_width
         elif element_type == 'torsionbar':
@@ -969,6 +1354,23 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
             jb_globals.highlighted_element_ordered_node_ids = node_ids
             veh_render_dirty = True
             _tag_redraw_3d_views(context)
+
+            # <<< START MODIFIED LOGIC >>>
+            # If exactly one node is highlighted, update the search field
+            if len(node_ids) == 1:
+                single_node_id = node_ids[0]
+                # Check if the UI property exists and update it
+                if hasattr(ui_props, 'search_node_id'):
+                    # Only update if the value is different to avoid unnecessary updates
+                    # and redundant flag setting.
+                    if ui_props.search_node_id != single_node_id:
+                        # Set the flag *before* assigning the value
+                        jb_globals._populating_search_id_from_highlight = True
+                        # Assign the value (this will trigger the update callback)
+                        ui_props.search_node_id = single_node_id
+                        # The flag will be reset within the update callback itself
+            # <<< END MODIFIED LOGIC >>>
+
             return True
 
         # --- Find Node Positions (For Beams, Rails, Torsionbars, Slidenodes) ---
@@ -999,7 +1401,6 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                                 temp_bm = bmesh.from_edit_mesh(obj_iter_data)
                             except ValueError:
                                 # Mesh not ready for edit mode access yet, skip this object for now
-                                # print("[Highlight Debug] Mesh not ready for edit mode access (ValueError) during initial load/draw. Skipping highlight.", file=sys.stderr)
                                 if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context) # Ensure redraw if highlight was previously active
                                 return False # Abort highlight attempt for this cycle
                         # <<< END MODIFICATION >>>
@@ -1026,7 +1427,6 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                         temp_bm = bmesh.from_edit_mesh(active_obj.data)
                     except ValueError:
                         # Mesh not ready for edit mode access yet, skip highlight
-                        # print("[Highlight Debug] Mesh not ready for edit mode access (ValueError) during initial load/draw. Skipping highlight.", file=sys.stderr)
                         if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context) # Ensure redraw if highlight was previously active
                         return False # Abort highlight attempt for this cycle
                 # <<< END MODIFICATION >>>
@@ -1090,7 +1490,6 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                 slidenode_world_positions[node_id] = wp
 
             if missing_nodes:
-                print(f"[Highlight Debug] Missing nodes for slidenode highlight: {missing_nodes}")
                 if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context)
                 return False
 
@@ -1128,7 +1527,6 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                 world_positions.append(wp)
 
             if missing_nodes:
-                # print(f"[Highlight Debug] Missing nodes for highlight: {missing_nodes}") # DEBUG
                 if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context)
                 return False
 
@@ -1168,7 +1566,6 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                 # Colors/width already set
 
             elif element_type == 'rail':
-                 # print("[Highlight Debug] Populating highlight_coords for RAIL.") # DEBUG
                  # Cross-part check for rails
                  is_cross_part_candidate = False
                  if len(node_origins) == 2:
@@ -1199,7 +1596,6 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
 
         # --- Finalize Highlight State ---
         if highlight_set:
-            # print(f"[Highlight Debug] Highlight SET: type={element_type}, color={original_color}, width={original_width}") # DEBUG
             jb_globals.highlighted_element_type = element_type
             jb_globals.highlighted_element_color = original_color
             jb_globals.highlighted_element_mid_color = original_mid_color
@@ -1211,13 +1607,12 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
             veh_render_dirty = True
             _tag_redraw_3d_views(context)
         else:
-             # print("[Highlight Debug] Highlight NOT SET.") # DEBUG
              if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context)
 
         return highlight_set
 
     except Exception as e:
-        print(f"[Highlight Debug] EXCEPTION in find_and_highlight_element_for_line: {e}", file=sys.stderr)
+        print(f"EXCEPTION in find_and_highlight_element_for_line: {e}", file=sys.stderr)
         traceback.print_exc()
         # Clear highlight on exception
         highlight_coords.clear()
@@ -1428,6 +1823,7 @@ def draw_callback_px(context: bpy.types.Context):
                         draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color) # Default apply_offset is True
                         # <<< END MODIFICATION >>>
 
+
     # --- Cross-Part Node ID Drawing ---
     if ui_props.toggle_node_ids_text and all_nodes_cache:
         cross_part_color = ui_props.cross_part_beam_color
@@ -1501,16 +1897,23 @@ def draw_callback_px(context: bpy.types.Context):
                     # <<< END MODIFICATION >>>
 
 
-    # --- Tooltip Positioning & Drawing --- <<< MODIFIED >>>
-    padding_x = 65; padding_y = 20
+    # --- Tooltip Positioning & Drawing --- <<< MODIFIED SECTION START >>>
+    # <<< MODIFIED LINE: Use property for padding_x >>>
+    padding_x = ui_props.tooltip_padding_x
+    padding_y = 20 # Keep vertical padding hardcoded for now
+    # <<< END MODIFIED LINE >>>
     region_width = ctxRegion.width; region_height = ctxRegion.height
     line_height = lblfDims(font_id, "X")[1]; line_padding = 4
     tooltip_placement = ui_props.tooltip_placement
-    est_max_width = 250
-    if tooltip_placement == 'BOTTOM_LEFT': bottom_left_x = padding_x
-    elif tooltip_placement == 'BOTTOM_CENTER': bottom_left_x = region_width / 2 - est_max_width / 2
-    elif tooltip_placement == 'BOTTOM_RIGHT': bottom_left_x = region_width - est_max_width - padding_x
-    else: bottom_left_x = padding_x
+
+    # Calculate the reference X coordinate based on placement
+    ref_x = 0
+    if tooltip_placement == 'BOTTOM_LEFT':
+        ref_x = padding_x # <<< Uses the padding_x variable (now from property)
+    elif tooltip_placement == 'BOTTOM_CENTER':
+        ref_x = region_width / 2
+    elif tooltip_placement == 'BOTTOM_RIGHT':
+        ref_x = region_width - padding_x # <<< Uses the padding_x variable (now from property)
 
     if is_editing_enabled:
         # --- Beam Tooltips ---
@@ -1524,9 +1927,18 @@ def draw_callback_px(context: bpy.types.Context):
             if line_num is not None:
                 beam_line_y = padding_y + beam_params_height
                 beam_line_height_offset = line_height + line_padding
-                # <<< MODIFICATION: Pass apply_offset=False >>>
-                draw_text_with_outline(font_id, f"Line: {line_num}", bottom_left_x, beam_line_y, ui_props.line_tooltip_color, apply_offset=False)
-                # <<< END MODIFICATION >>>
+                line_text = f"Line: {line_num}"
+                line_width = lblfDims(font_id, line_text)[0]
+
+                # Calculate draw_x based on placement and width
+                draw_x = ref_x
+                if tooltip_placement == 'BOTTOM_CENTER':
+                    draw_x = ref_x - line_width / 2
+                elif tooltip_placement == 'BOTTOM_RIGHT':
+                    draw_x = ref_x - line_width
+
+                # Pass calculated draw_x and apply_offset=False
+                draw_text_with_outline(font_id, line_text, draw_x, beam_line_y, ui_props.line_tooltip_color, apply_offset=False)
 
         if ui_props.toggle_params_tooltip and jb_globals._selected_beam_params_info is not None: # Use shared toggle
             params_list = jb_globals._selected_beam_params_info.get('params_list')
@@ -1535,11 +1947,24 @@ def draw_callback_px(context: bpy.types.Context):
                 start_y = padding_y + (len(params_list) - 1) * (line_height + line_padding)
                 for i, (key, value_repr) in enumerate(params_list):
                     current_y = start_y - (i * (line_height + line_padding)); key_text = f"{key}: "
-                    # <<< MODIFICATION: Pass apply_offset=False >>>
-                    draw_text_with_outline(font_id, key_text, bottom_left_x, current_y, name_color, apply_offset=False)
-                    key_width = lblfDims(font_id, key_text)[0]; value_x = bottom_left_x + key_width
-                    draw_text_with_outline(font_id, value_repr, value_x, current_y, value_color, apply_offset=False)
-                    # <<< END MODIFICATION >>>
+
+                    # Calculate widths and total width for alignment
+                    key_width = lblfDims(font_id, key_text)[0]
+                    value_width = lblfDims(font_id, value_repr)[0]
+                    total_width = key_width + value_width
+
+                    # Calculate draw_x for the key based on placement and total width
+                    key_draw_x = ref_x
+                    if tooltip_placement == 'BOTTOM_CENTER':
+                        key_draw_x = ref_x - total_width / 2
+                    elif tooltip_placement == 'BOTTOM_RIGHT':
+                        key_draw_x = ref_x - total_width
+
+                    value_draw_x = key_draw_x + key_width
+
+                    # Pass calculated draw_x and apply_offset=False
+                    draw_text_with_outline(font_id, key_text, key_draw_x, current_y, name_color, apply_offset=False)
+                    draw_text_with_outline(font_id, value_repr, value_draw_x, current_y, value_color, apply_offset=False)
 
         # --- Node Tooltips ---
         node_params_height = 0; node_line_height_offset = 0
@@ -1553,9 +1978,18 @@ def draw_callback_px(context: bpy.types.Context):
             if line_num is not None:
                 node_line_y = padding_y + total_beam_tooltip_height + node_params_height
                 node_line_height_offset = line_height + line_padding
-                # <<< MODIFICATION: Pass apply_offset=False >>>
-                draw_text_with_outline(font_id, f"Line: {line_num}", bottom_left_x, node_line_y, ui_props.line_tooltip_color, apply_offset=False)
-                # <<< END MODIFICATION >>>
+                line_text = f"Line: {line_num}"
+                line_width = lblfDims(font_id, line_text)[0]
+
+                # Calculate draw_x based on placement and width
+                draw_x = ref_x
+                if tooltip_placement == 'BOTTOM_CENTER':
+                    draw_x = ref_x - line_width / 2
+                elif tooltip_placement == 'BOTTOM_RIGHT':
+                    draw_x = ref_x - line_width
+
+                # Pass calculated draw_x and apply_offset=False
+                draw_text_with_outline(font_id, line_text, draw_x, node_line_y, ui_props.line_tooltip_color, apply_offset=False)
 
         if ui_props.toggle_params_tooltip and jb_globals._selected_node_params_info is not None: # Use shared toggle
             params_list = jb_globals._selected_node_params_info.get('params_list')
@@ -1564,20 +1998,100 @@ def draw_callback_px(context: bpy.types.Context):
                 start_y = padding_y + total_beam_tooltip_height + (len(params_list) - 1) * (line_height + line_padding)
                 for i, (key, value_repr) in enumerate(params_list):
                     current_y = start_y - (i * (line_height + line_padding)); key_text = f"{key}: "
-                    # <<< MODIFICATION: Pass apply_offset=False >>>
-                    draw_text_with_outline(font_id, key_text, bottom_left_x, current_y, name_color, apply_offset=False)
-                    key_width = lblfDims(font_id, key_text)[0]; value_x = bottom_left_x + key_width
-                    draw_text_with_outline(font_id, value_repr, value_x, current_y, value_color, apply_offset=False)
-                    # <<< END MODIFICATION >>>
-    # --- End Tooltip Positioning & Drawing ---
+
+                    # Calculate widths and total width for alignment
+                    key_width = lblfDims(font_id, key_text)[0]
+                    value_width = lblfDims(font_id, value_repr)[0]
+                    total_width = key_width + value_width
+
+                    # Calculate draw_x for the key based on placement and total width
+                    key_draw_x = ref_x
+                    if tooltip_placement == 'BOTTOM_CENTER':
+                        key_draw_x = ref_x - total_width / 2
+                    elif tooltip_placement == 'BOTTOM_RIGHT':
+                        key_draw_x = ref_x - total_width
+
+                    value_draw_x = key_draw_x + key_width
+
+                    # Pass calculated draw_x and apply_offset=False
+                    draw_text_with_outline(font_id, key_text, key_draw_x, current_y, name_color, apply_offset=False)
+                    draw_text_with_outline(font_id, value_repr, value_draw_x, current_y, value_color, apply_offset=False)
+    # --- End Tooltip Positioning & Drawing --- <<< MODIFIED SECTION END >>>
 
     # Final cleanup
     if bm and not is_vehicle_part and active_obj.mode != 'EDIT':
         bm.free()
 
+# <<< MODIFIED HELPER FUNCTION _calculate_dynamic_color >>>
+def _calculate_dynamic_color(value, low_threshold, high_threshold):
+    """
+    Calculates a color based on a value relative to low and high thresholds,
+    interpolating linearly through a Blue -> Cyan -> Green -> Yellow -> Red gradient.
+    Values <= low_threshold are Blue.
+    Values >= high_threshold are Red.
+    Handles basic '=$variable' resolution and expression evaluation for the input value.
+
+    Args:
+        value: The raw value from the JBeam data (can be number, string, expression).
+        low_threshold (float): The lower bound for the color gradient.
+        high_threshold (float): The upper bound for the color gradient.
+
+    Returns:
+        A tuple (R, G, B, A) representing the calculated color, or None if the value
+        could not be resolved to a finite number.
+    """
+    # --- MODIFIED: Resolve/Evaluate variable/expression before conversion ---
+    resolved_value = resolve_jbeam_variable_value(value, jb_globals.jbeam_variables_cache)
+    # --- END MODIFIED ---
+
+    # --- Attempt conversion to float using the resolved value ---
+    try:
+        numeric_value = float(resolved_value)
+        if not math.isfinite(numeric_value):
+            # <<< MODIFIED: Return None on failure >>>
+            return None # Return None for non-finite numbers
+    except (ValueError, TypeError):
+        # Only print warning if the original value looked like an expression
+        # <<< MODIFIED: Return None on failure >>>
+        return None # Return None if conversion fails
+    # --- END ATTEMPT ---
+
+    # Handle invalid thresholds: return None
+    if low_threshold >= high_threshold:
+        # If thresholds are equal, return Green (midpoint color)
+        if low_threshold == high_threshold:
+             return (0.0, 1.0, 0.0, 1.0) # Green
+        # <<< MODIFIED: Return None on failure >>>
+        return None # Return None for invalid thresholds
+
+    # Normalize the numeric_value within the range [low_threshold, high_threshold] to [0, 1]
+    clamped_value = max(low_threshold, min(numeric_value, high_threshold))
+    value_range = high_threshold - low_threshold
+    normalized_value = (clamped_value - low_threshold) / value_range if value_range != 0 else 0.5
+
+    # Interpolate color across 4 segments: Blue -> Cyan, Cyan -> Green, Green -> Yellow, Yellow -> Red
+    segment_size = 0.25
+
+    if normalized_value <= segment_size: # Segment 0: Blue to Cyan (0.0 -> 0.25)
+        t = normalized_value / segment_size if segment_size != 0 else 0; red = 0.0; green = t; blue = 1.0
+    elif normalized_value <= 2 * segment_size: # Segment 1: Cyan to Green (0.25 -> 0.5)
+        t = (normalized_value - segment_size) / segment_size if segment_size != 0 else 0; red = 0.0; green = 1.0; blue = 1.0 - t
+    elif normalized_value <= 3 * segment_size: # Segment 2: Green to Yellow (0.5 -> 0.75)
+        t = (normalized_value - 2 * segment_size) / segment_size if segment_size != 0 else 0; red = t; green = 1.0; blue = 0.0
+    else: # Segment 3: Yellow to Red (0.75 -> 1.0)
+        t = (normalized_value - 3 * segment_size) / segment_size if segment_size != 0 else 0; red = 1.0; green = 1.0 - t; blue = 0.0
+
+    red = max(0.0, min(red, 1.0)); green = max(0.0, min(green, 1.0)); blue = max(0.0, min(blue, 1.0))
+    final_color = (red, green, blue, 1.0) # Return RGBA tuple
+    return final_color
+# <<< END MODIFIED HELPER FUNCTION >>>
+
+
 # Draws beams, rails, torsionbars
 def draw_callback_view(context: bpy.types.Context):
-    global veh_render_dirty, beam_render_shader
+    # ... (global declarations remain the same) ...
+    global veh_render_dirty, render_shader
+    # Static colors (used when dynamic is OFF)
     global beam_render_batch, beam_coords
     global anisotropic_beam_render_batch, anisotropic_beam_coords
     global support_beam_render_batch, support_beam_coords
@@ -1585,17 +2099,24 @@ def draw_callback_view(context: bpy.types.Context):
     global bounded_beam_render_batch, bounded_beam_coords
     global lbeam_render_batch, lbeam_coords
     global pressured_beam_render_batch, pressured_beam_coords
+    global cross_part_beam_render_batch, cross_part_beam_coords
+    # Dynamic colors (used when dynamic is ON)
+    global dynamic_beam_batch, dynamic_beam_coords_colors
+    # Torsionbars, Rails (always separate)
     global torsionbar_render_batch, torsionbar_coords
     global torsionbar_red_render_batch, torsionbar_red_coords
     global rail_render_batch, rail_coords
-    global cross_part_beam_render_batch, cross_part_beam_coords
+    # Node Cache
     global all_nodes_cache, all_nodes_cache_dirty
     # Highlight batches
     global highlight_render_batch, highlight_coords
     global highlight_torsionbar_outer_batch, highlight_torsionbar_outer_coords
     global highlight_torsionbar_mid_batch, highlight_torsionbar_mid_coords
-    global warned_missing_nodes_this_rebuild # <<< ADD global declaration
+    global warned_missing_nodes_this_rebuild
+    # Selected beam outline
+    global selected_beam_batch, selected_beam_coords_colors, selected_beam_max_original_width
 
+    # ... (initial checks: scene, ui_props, active_obj, should_draw) ...
     scene = context.scene
     ui_props = scene.ui_properties
     if not hasattr(context, 'scene') or not hasattr(scene, 'ui_properties'): return
@@ -1608,8 +2129,11 @@ def draw_callback_view(context: bpy.types.Context):
 
     should_draw = is_valid_jbeam_obj and is_selected
     if not should_draw:
-        # ... (batch clearing logic remains the same) ...
+        # ... (batch clearing logic - ensure all relevant batches are cleared) ...
         batches_were_cleared = False
+        # Clear dynamic batch
+        if dynamic_beam_batch: dynamic_beam_batch = None; batches_were_cleared = True
+        # Clear static batches
         if beam_render_batch: beam_render_batch = None; batches_were_cleared = True
         if anisotropic_beam_render_batch: anisotropic_beam_render_batch = None; batches_were_cleared = True
         if support_beam_render_batch: support_beam_render_batch = None; batches_were_cleared = True
@@ -1617,77 +2141,97 @@ def draw_callback_view(context: bpy.types.Context):
         if bounded_beam_render_batch: bounded_beam_render_batch = None; batches_were_cleared = True
         if lbeam_render_batch: lbeam_render_batch = None; batches_were_cleared = True
         if pressured_beam_render_batch: pressured_beam_render_batch = None; batches_were_cleared = True
+        if cross_part_beam_render_batch: cross_part_beam_render_batch = None; batches_were_cleared = True
+        # Clear torsionbar, rail
         if torsionbar_render_batch: torsionbar_render_batch = None; batches_were_cleared = True
         if torsionbar_red_render_batch: torsionbar_red_render_batch = None; batches_were_cleared = True
         if rail_render_batch: rail_render_batch = None; batches_were_cleared = True
-        if cross_part_beam_render_batch: cross_part_beam_render_batch = None; batches_were_cleared = True
         # Clear highlight batches
         if highlight_render_batch: highlight_render_batch = None; batches_were_cleared = True
         if highlight_torsionbar_outer_batch: highlight_torsionbar_outer_batch = None; batches_were_cleared = True
         if highlight_torsionbar_mid_batch: highlight_torsionbar_mid_batch = None; batches_were_cleared = True
+        # Clear selected beam batch
+        if selected_beam_batch: selected_beam_batch = None; batches_were_cleared = True
+
         if batches_were_cleared:
-            beam_coords.clear(); anisotropic_beam_coords.clear(); support_beam_coords.clear()
+            # Clear coordinate lists
+            dynamic_beam_coords_colors.clear()
+            beam_coords.clear()
+            anisotropic_beam_coords.clear(); support_beam_coords.clear()
             hydro_beam_coords.clear(); bounded_beam_coords.clear(); lbeam_coords.clear()
-            pressured_beam_coords.clear(); torsionbar_coords.clear(); torsionbar_red_coords.clear()
-            rail_coords.clear(); cross_part_beam_coords.clear()
-            # Clear highlight coords
+            pressured_beam_coords.clear(); cross_part_beam_coords.clear()
+            torsionbar_coords.clear(); torsionbar_red_coords.clear()
+            rail_coords.clear();
             highlight_coords.clear()
             highlight_torsionbar_outer_coords.clear()
             highlight_torsionbar_mid_coords.clear()
-            veh_render_dirty = True # Use local drawing global
+            selected_beam_coords_colors.clear()
+            veh_render_dirty = True # Mark dirty if batches were cleared
         return
 
-    if beam_render_shader is None:
-        beam_render_shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    # ... (shader init, dirty flag checks, cache updates remain the same) ...
+    if render_shader is None:
+        render_shader = gpu.shader.from_builtin('SMOOTH_COLOR')
 
-    # Use scene property to check if dirty flag was set by property updates
     if scene.jbeam_editor_veh_render_dirty:
         veh_render_dirty = True
-        scene.jbeam_editor_veh_render_dirty = False # Reset scene flag
+        scene.jbeam_editor_veh_render_dirty = False
 
-    # Check if node cache needs updating (always check if dirty)
     if all_nodes_cache_dirty:
         update_all_nodes_cache(context)
-        veh_render_dirty = True # Force batch rebuild after cache update
+        veh_render_dirty = True # Force rebuild if cache updated
 
-    # <<< MODIFIED: Check if batches need rebuilding, considering coordinate lists >>>
-    batches_missing = (
-        (ui_props.toggle_beams_vis and beam_render_batch is None and beam_coords) or # Add coord check
-        (ui_props.toggle_anisotropic_beams_vis and anisotropic_beam_render_batch is None and anisotropic_beam_coords) or # Add coord check
-        (ui_props.toggle_support_beams_vis and support_beam_render_batch is None and support_beam_coords) or # Add coord check
-        (ui_props.toggle_hydro_beams_vis and hydro_beam_render_batch is None and hydro_beam_coords) or # Add coord check
-        (ui_props.toggle_bounded_beams_vis and bounded_beam_render_batch is None and bounded_beam_coords) or # Add coord check
-        (ui_props.toggle_lbeam_beams_vis and lbeam_render_batch is None and lbeam_coords) or # Add coord check
-        (ui_props.toggle_pressured_beams_vis and pressured_beam_render_batch is None and pressured_beam_coords) or # Add coord check
-        (ui_props.toggle_torsionbars_vis and torsionbar_render_batch is None and torsionbar_coords) or # Add coord check (outer)
-        (ui_props.toggle_torsionbars_vis and torsionbar_red_render_batch is None and torsionbar_red_coords) or # Add coord check (mid)
-        (ui_props.toggle_rails_vis and rail_render_batch is None and rail_coords) or # Add coord check
-        (ui_props.toggle_cross_part_beams_vis and cross_part_beam_render_batch is None and cross_part_beam_coords and all_nodes_cache) or # Add coord check
-        # Highlight batches check remains the same as it already checks coords
-        (jb_globals.highlighted_element_type == 'torsionbar' and (highlight_torsionbar_outer_batch is None or highlight_torsionbar_mid_batch is None) and (highlight_torsionbar_outer_coords or highlight_torsionbar_mid_coords)) or
-        # <<< MODIFIED: Exclude 'node', include 'slidenode' >>>
-        (jb_globals.highlighted_element_type not in (None, 'node') and highlight_render_batch is None and highlight_coords)
-    )
+    if jb_globals.jbeam_variables_cache_dirty:
+        update_jbeam_variables_cache(context)
+        veh_render_dirty = True # Force rebuild if cache updated
+
+    # --- Check if batches need rebuilding ---
+    # <<< MODIFIED: Simplified batch checking based on dynamic coloring state >>>
+    batches_missing = False
+    if ui_props.use_dynamic_beam_coloring:
+        # If dynamic coloring is ON, only check the dynamic batch
+        batches_missing = (dynamic_beam_batch is None and dynamic_beam_coords_colors)
+    else:
+        # If dynamic coloring is OFF, check all individual static batches based on toggles
+        batches_missing = (
+            (ui_props.toggle_beams_vis and beam_render_batch is None and beam_coords) or
+            (ui_props.toggle_anisotropic_beams_vis and anisotropic_beam_render_batch is None and anisotropic_beam_coords) or
+            (ui_props.toggle_support_beams_vis and support_beam_render_batch is None and support_beam_coords) or
+            (ui_props.toggle_hydro_beams_vis and hydro_beam_render_batch is None and hydro_beam_coords) or
+            (ui_props.toggle_bounded_beams_vis and bounded_beam_render_batch is None and bounded_beam_coords) or
+            (ui_props.toggle_lbeam_beams_vis and lbeam_render_batch is None and lbeam_coords) or
+            (ui_props.toggle_pressured_beams_vis and pressured_beam_render_batch is None and pressured_beam_coords) or
+            (ui_props.toggle_cross_part_beams_vis and cross_part_beam_render_batch is None and cross_part_beam_coords and all_nodes_cache)
+        )
+    # Check Torsionbar, Rail, Highlight, Selected (always checked)
+    batches_missing = batches_missing or \
+        (ui_props.toggle_torsionbars_vis and torsionbar_render_batch is None and torsionbar_coords) or \
+        (ui_props.toggle_torsionbars_vis and torsionbar_red_render_batch is None and torsionbar_red_coords) or \
+        (ui_props.toggle_rails_vis and rail_render_batch is None and rail_coords) or \
+        (jb_globals.highlighted_element_type == 'torsionbar' and (highlight_torsionbar_outer_batch is None or highlight_torsionbar_mid_batch is None) and (highlight_torsionbar_outer_coords or highlight_torsionbar_mid_coords)) or \
+        (jb_globals.highlighted_element_type not in (None, 'node') and highlight_render_batch is None and highlight_coords) or \
+        (selected_beam_batch is None and selected_beam_coords_colors)
+    # <<< END MODIFIED >>>
+
     if batches_missing:
-        # print("DEBUG: batches_missing = True, forcing rebuild") # Optional debug
         veh_render_dirty = True
-    # <<< END MODIFIED CHECK >>>
 
+
+    # --- Rebuild Logic ---
     if veh_render_dirty:
-        # print(f"DEBUG: Rebuilding batches... Time: {time.time()}") # Optional debug
-        # Set to track nodes warned about *in this rebuild cycle*
-        # warned_missing_nodes_this_rebuild = set() # <<< REMOVED: Now a module-level variable
+        warned_missing_nodes_this_rebuild.clear()
 
-        # Clear regular visualization coords
-        beam_coords.clear(); anisotropic_beam_coords.clear(); support_beam_coords.clear()
+        # Clear coordinate lists
+        dynamic_beam_coords_colors.clear() # Always clear dynamic list
+        beam_coords.clear()
+        anisotropic_beam_coords.clear(); support_beam_coords.clear()
         hydro_beam_coords.clear(); bounded_beam_coords.clear(); lbeam_coords.clear()
-        pressured_beam_coords.clear(); torsionbar_coords.clear(); torsionbar_red_coords.clear()
-        rail_coords.clear(); cross_part_beam_coords.clear()
-        # <<< ADDED: Clear highlight coords >>>
-        # Highlight coords are now cleared and repopulated within find_and_highlight_element_for_line
-        # and the highlight repopulation logic below. No need to clear them here.
+        pressured_beam_coords.clear(); cross_part_beam_coords.clear()
+        torsionbar_coords.clear(); torsionbar_red_coords.clear()
+        rail_coords.clear();
+        selected_beam_coords_colors.clear()
+        selected_beam_max_original_width = 1.0
 
-        # ... (rest of data gathering: active_obj_data, collection, node maps, etc. remains the same) ...
         active_obj_data = active_obj.data
         collection = active_obj.users_collection[0] if active_obj.users_collection else None
         is_vehicle_part = collection is not None and collection.get(constants.COLLECTION_VEHICLE_MODEL) is not None
@@ -1695,23 +2239,75 @@ def draw_callback_view(context: bpy.types.Context):
         node_id_to_hide_status: dict[str, bool] = {}
         node_id_to_pos_matrix_map: dict[str, tuple[Vector, Matrix]] = {}
         current_part_name = active_obj_data.get(constants.MESH_JBEAM_PART)
-        edge_idx_to_beam_type_map: dict[tuple[str, int], str] = {}
+        edge_idx_to_beam_data_map: dict[tuple[str, int], dict] = {}
 
-        # --- Build edge_idx_to_beam_type_map (remains the same) ---
+        # <<< ADDED: Variables for Auto Thresholds >>>
+        auto_min_val = float('inf')
+        auto_max_val = float('-inf')
+        auto_thresholds_valid = False # Flag to indicate if min/max were found
+
+        # --- Build edge_idx_to_beam_data_map & Calculate Auto Thresholds ---
         if jb_globals.curr_vdata and 'beams' in jb_globals.curr_vdata:
             beam_part_counters = {}
+            param_name = ui_props.dynamic_coloring_parameter # Get parameter name once
+            use_dynamic = ui_props.use_dynamic_beam_coloring # Check dynamic coloring once
+            use_auto = ui_props.use_auto_thresholds # Check auto thresholds once
+
             for global_beam_idx, beam_data in enumerate(jb_globals.curr_vdata['beams']):
-                # Check if beam_data is a dict before accessing
                 if isinstance(beam_data, dict):
                     part_origin = beam_data.get('partOrigin')
-                    beam_type = beam_data.get('beamType', '|NORMAL')
                     if part_origin:
                         current_idx_in_part = beam_part_counters.get(part_origin, 0) + 1
                         beam_part_counters[part_origin] = current_idx_in_part
-                        edge_idx_to_beam_type_map[(part_origin, current_idx_in_part)] = beam_type
+                        edge_idx_to_beam_data_map[(part_origin, current_idx_in_part)] = beam_data
 
-        # --- Build node_id_to_hide_status and node_id_to_pos_matrix_map (remains the same) ---
+                        # <<< MODIFIED: Calculate Auto Thresholds for ALL beam types if dynamic coloring is on >>>
+                        if use_dynamic and use_auto: # Check flags first
+                            # Check if this beam type is toggled ON
+                            beam_type = beam_data.get('beamType', '|NORMAL')
+                            type_visible = False
+                            if beam_type == '|NORMAL': type_visible = ui_props.toggle_beams_vis
+                            elif beam_type == '|ANISOTROPIC': type_visible = ui_props.toggle_anisotropic_beams_vis
+                            elif beam_type == '|SUPPORT': type_visible = ui_props.toggle_support_beams_vis
+                            elif beam_type == '|HYDRO': type_visible = ui_props.toggle_hydro_beams_vis
+                            elif beam_type == '|BOUNDED': type_visible = ui_props.toggle_bounded_beams_vis
+                            elif beam_type == '|LBEAM': type_visible = ui_props.toggle_lbeam_beams_vis
+                            elif beam_type == '|PRESSURED': type_visible = ui_props.toggle_pressured_beams_vis
+                            # Add more types here if needed
+
+                            # Check cross-part visibility separately if applicable
+                            is_cross_part = False
+                            id1 = beam_data.get('id1:')
+                            id2 = beam_data.get('id2:')
+                            if id1 and id2:
+                                cache1_data = all_nodes_cache.get(id1)
+                                cache2_data = all_nodes_cache.get(id2)
+                                origin1 = cache1_data[2] if cache1_data else '?'
+                                origin2 = cache2_data[2] if cache2_data else '?'
+                                if origin1 != origin2 and '?' not in {origin1, origin2}:
+                                    is_cross_part = True
+
+                            if is_cross_part:
+                                type_visible = ui_props.toggle_cross_part_beams_vis
+
+                            if type_visible: # Only consider visible types for auto thresholds
+                                param_value_raw = beam_data.get(param_name)
+                                if param_value_raw is not None:
+                                    resolved_value = resolve_jbeam_variable_value(param_value_raw, jb_globals.jbeam_variables_cache)
+                                    try:
+                                        numeric_value = float(resolved_value)
+                                        if math.isfinite(numeric_value): # Only consider finite numbers
+                                            auto_min_val = min(auto_min_val, numeric_value)
+                                            auto_max_val = max(auto_max_val, numeric_value)
+                                            auto_thresholds_valid = True # Mark as valid if at least one number found
+                                    except (ValueError, TypeError):
+                                        pass # Ignore non-numeric resolved values
+                        # <<< END MODIFIED >>>
+
+        # --- Build node_id_to_hide_status and node_id_to_pos_matrix_map ---
+        # ... (logic remains the same for vehicle and single part) ...
         if is_vehicle_part:
+            # ... (vehicle part node map building) ...
             if not part_name_to_obj:
                  for obj_iter in collection.all_objects:
                     if obj_iter.data and obj_iter.data.get(constants.MESH_JBEAM_PART):
@@ -1725,10 +2321,9 @@ def draw_callback_view(context: bpy.types.Context):
                         if obj_iter == active_obj and active_obj.mode == 'EDIT': bm = bmesh.from_edit_mesh(obj_iter_data)
                         else: bm = bmesh.new(); bm.from_mesh(obj_iter_data)
 
-                        # ... (beam drawing logic remains the same) ...
-                        beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
                         node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
                         is_fake_layer = bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+                        beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
                         beam_part_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
 
                         if node_id_layer and is_fake_layer:
@@ -1740,6 +2335,7 @@ def draw_callback_view(context: bpy.types.Context):
                                     node_id_to_hide_status[node_id] = v.hide
                                     node_id_to_pos_matrix_map[node_id] = (v.co.copy(), obj_matrix_copy)
 
+                        # --- Beam Coordinate Population (Vehicle) <<< MODIFIED SECTION >>> ---
                         if beam_indices_layer and beam_part_origin_layer:
                             bm.edges.ensure_lookup_table()
                             for e in bm.edges:
@@ -1749,95 +2345,123 @@ def draw_callback_view(context: bpy.types.Context):
                                     try:
                                         first_beam_idx_in_part = int(beam_idx_str.split(',')[0])
                                         edge_part_origin = e[beam_part_origin_layer].decode('utf-8')
-                                        beam_type = edge_idx_to_beam_type_map.get((edge_part_origin, first_beam_idx_in_part), '|NORMAL')
+                                        beam_data = edge_idx_to_beam_data_map.get((edge_part_origin, first_beam_idx_in_part))
+                                        beam_type = beam_data.get('beamType', '|NORMAL') if beam_data else '|NORMAL'
+
+                                        # <<< Check visibility toggle for this beam type >>>
+                                        type_visible = False
+                                        if beam_type == '|NORMAL': type_visible = ui_props.toggle_beams_vis
+                                        elif beam_type == '|ANISOTROPIC': type_visible = ui_props.toggle_anisotropic_beams_vis
+                                        elif beam_type == '|SUPPORT': type_visible = ui_props.toggle_support_beams_vis
+                                        elif beam_type == '|HYDRO': type_visible = ui_props.toggle_hydro_beams_vis
+                                        elif beam_type == '|BOUNDED': type_visible = ui_props.toggle_bounded_beams_vis
+                                        elif beam_type == '|LBEAM': type_visible = ui_props.toggle_lbeam_beams_vis
+                                        elif beam_type == '|PRESSURED': type_visible = ui_props.toggle_pressured_beams_vis
+                                        # Add more types here if needed
+
+                                        if not type_visible: continue # Skip if this type is toggled off
+                                        # <<< End visibility check >>>
+
                                         v1, v2 = e.verts[0], e.verts[1]
                                         world_pos1 = obj_iter.matrix_world @ v1.co; world_pos2 = obj_iter.matrix_world @ v2.co
 
-                                        if beam_type == '|ANISOTROPIC': anisotropic_beam_coords.extend([world_pos1, world_pos2])
-                                        elif beam_type == '|SUPPORT': support_beam_coords.extend([world_pos1, world_pos2])
-                                        elif beam_type == '|HYDRO': hydro_beam_coords.extend([world_pos1, world_pos2])
-                                        elif beam_type == '|BOUNDED': bounded_beam_coords.extend([world_pos1, world_pos2])
-                                        elif beam_type == '|LBEAM': lbeam_coords.extend([world_pos1, world_pos2])
-                                        elif beam_type == '|PRESSURED': pressured_beam_coords.extend([world_pos1, world_pos2])
-                                        else: beam_coords.extend([world_pos1, world_pos2])
+                                        # Determine original width (used for selected outline)
+                                        original_width = ui_props.beam_width # Default normal width
+                                        if beam_type == '|ANISOTROPIC': original_width = ui_props.anisotropic_beam_width
+                                        elif beam_type == '|SUPPORT': original_width = ui_props.support_beam_width
+                                        elif beam_type == '|HYDRO': original_width = ui_props.hydro_beam_width
+                                        elif beam_type == '|BOUNDED': original_width = ui_props.bounded_beam_width
+                                        elif beam_type == '|LBEAM': original_width = ui_props.lbeam_beam_width
+                                        elif beam_type == '|PRESSURED': original_width = ui_props.pressured_beam_width
+
+                                        # Check if selected
+                                        if e.index in jb_globals.selected_beam_edge_indices:
+                                            selected_beam_coords_colors.append((world_pos1, world_pos2, WHITE_COLOR))
+                                            selected_beam_max_original_width = max(selected_beam_max_original_width, original_width)
+                                        # <<< MODIFIED: Handle dynamic vs static coloring >>>
+                                        elif ui_props.use_dynamic_beam_coloring:
+                                            # Calculate dynamic color
+                                            color_to_use = None # Initialize color_to_use to None
+                                            if beam_data:
+                                                param_name = ui_props.dynamic_coloring_parameter
+                                                param_value_raw = beam_data.get(param_name)
+                                                if param_value_raw is not None:
+                                                    low_thresh = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
+                                                    high_thresh = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
+                                                    # <<< Store result of calculation >>>
+                                                    color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh)
+
+                                            # <<< Check if color calculation succeeded before appending >>>
+                                            if color_to_use is not None:
+                                                dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use))
+                                            # <<< END Check >>>
+                                        else:
+                                            # Append to static lists
+                                            if beam_type == '|NORMAL': beam_coords.extend([world_pos1, world_pos2])
+                                            elif beam_type == '|ANISOTROPIC': anisotropic_beam_coords.extend([world_pos1, world_pos2])
+                                            elif beam_type == '|SUPPORT': support_beam_coords.extend([world_pos1, world_pos2])
+                                            elif beam_type == '|HYDRO': hydro_beam_coords.extend([world_pos1, world_pos2])
+                                            elif beam_type == '|BOUNDED': bounded_beam_coords.extend([world_pos1, world_pos2])
+                                            elif beam_type == '|LBEAM': lbeam_coords.extend([world_pos1, world_pos2])
+                                            elif beam_type == '|PRESSURED': pressured_beam_coords.extend([world_pos1, world_pos2])
+                                        # <<< END MODIFIED >>>
+
                                     except (ValueError, IndexError) as parse_err:
                                         print(f"Warning: Could not parse beam index '{beam_idx_str}' for edge in part '{part_name}'. Error: {parse_err}", file=sys.stderr)
+                        # --- End Beam Coordinate Population (Vehicle) ---
                     except Exception as e: print(f"Error getting geometry data from {obj_iter.name}: {e}", file=sys.stderr)
                     finally:
                         if bm and not (obj_iter == active_obj and active_obj.mode == 'EDIT'): bm.free()
 
-            # --- Torsionbar Drawing (Vehicle) --- #
-            if jb_globals.curr_vdata and 'torsionbars' in jb_globals.curr_vdata and isinstance(jb_globals.curr_vdata['torsionbars'], list):
+            # --- Torsionbar, Rail Drawing (Vehicle) ---
+            # ... (logic remains the same - these are not dynamically colored) ...
+            if ui_props.toggle_torsionbars_vis and jb_globals.curr_vdata and 'torsionbars' in jb_globals.curr_vdata and isinstance(jb_globals.curr_vdata['torsionbars'], list):
+                # ... (torsionbar coord population) ...
                 for tb in jb_globals.curr_vdata['torsionbars']:
                     ids = []
-                    # Check if tb is dict or list
-                    if isinstance(tb, dict):
-                        ids = [tb.get(f'id{i}:') for i in range(1, 5)]
-                    elif isinstance(tb, list) and len(tb) >= 4:
-                        ids = tb[:4]
-
+                    if isinstance(tb, dict): ids = [tb.get(f'id{i}:') for i in range(1, 5)]
+                    elif isinstance(tb, list) and len(tb) >= 4: ids = tb[:4]
                     if len(ids) != 4 or not all(ids): continue
                     if any(node_id_to_hide_status.get(id, False) for id in ids): continue
-
-                    world_pos = [None] * 4; node_origins = [None] * 4 # <<< Store origins individually
+                    world_pos = [None] * 4; node_origins = [None] * 4
                     all_nodes_found = True; missing_nodes = []
-
                     for i, node_id in enumerate(ids):
                         pos_data = node_id_to_pos_matrix_map.get(node_id)
-                        cache_data = all_nodes_cache.get(node_id) # Use cache regardless of toggle
-                        wp = None
-                        origin = '?'
-
+                        cache_data = all_nodes_cache.get(node_id)
+                        wp = None; origin = '?'
                         if pos_data:
                             wp = pos_data[1] @ pos_data[0]
                             for obj_iter in collection.all_objects:
                                 if (obj_iter.matrix_world - pos_data[1]).is_zero(1e-5):
                                     if obj_iter.data and obj_iter.data.get(constants.MESH_JBEAM_PART):
-                                        origin = obj_iter.data[constants.MESH_JBEAM_PART]
-                                        break
-                        elif cache_data: # Use cache if not in visible objects
-                            wp = cache_data[0]
-                            origin = cache_data[2]
-
-                        if wp is None:
-                            all_nodes_found = False
-                            missing_nodes.append(node_id)
-
-                        world_pos[i] = wp
-                        node_origins[i] = origin # <<< Store origin for this node index
-
-                    # <<< WARNING LOGIC (Use module-level set) >>>
-                    if not all_nodes_found and ui_props.toggle_torsionbars_vis:
+                                        origin = obj_iter.data[constants.MESH_JBEAM_PART]; break
+                        elif cache_data: wp = cache_data[0]; origin = cache_data[2]
+                        if wp is None: all_nodes_found = False; missing_nodes.append(node_id)
+                        world_pos[i] = wp; node_origins[i] = origin
+                    if not all_nodes_found:
                         if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes):
                             print(f"Warning: Could not find position data for torsionbar nodes {missing_nodes}", file=sys.stderr)
                             warned_missing_nodes_this_rebuild.update(missing_nodes)
                         continue
-                    # <<< END WARNING LOGIC >>>
-                    # ... (Add coords if found) ...
                     torsionbar_coords.extend([world_pos[0], world_pos[1]])
                     torsionbar_red_coords.extend([world_pos[1], world_pos[2]])
                     torsionbar_coords.extend([world_pos[2], world_pos[3]])
 
-            # --- Rail Drawing (Vehicle) ---
-            if jb_globals.curr_vdata and 'rails' in jb_globals.curr_vdata and isinstance(jb_globals.curr_vdata['rails'], dict):
+            if ui_props.toggle_rails_vis and jb_globals.curr_vdata and 'rails' in jb_globals.curr_vdata and isinstance(jb_globals.curr_vdata['rails'], dict):
+                 # ... (rail coord population) ...
                  for rail_name, rail_info in jb_globals.curr_vdata['rails'].items():
                     rail_nodes = None
-                    if isinstance(rail_info, list) and len(rail_info) == 2:
-                        rail_nodes = rail_info
-                    elif isinstance(rail_info, dict):
-                        rail_nodes = rail_info.get('links:')
-
+                    if isinstance(rail_info, list) and len(rail_info) == 2: rail_nodes = rail_info
+                    elif isinstance(rail_info, dict): rail_nodes = rail_info.get('links:')
                     if isinstance(rail_nodes, list) and len(rail_nodes) == 2:
                         ids = rail_nodes
                         if not all(ids): continue
                         if any(node_id_to_hide_status.get(id, False) for id in ids): continue
-
-                        world_pos = [None] * 2; node_origins = set() # Rails only have one segment, set is fine
+                        world_pos = [None] * 2; node_origins = set()
                         all_nodes_found = True; missing_nodes = []
-
                         for i, node_id in enumerate(ids):
                             pos_data = node_id_to_pos_matrix_map.get(node_id)
-                            cache_data = all_nodes_cache.get(node_id) # Use cache regardless of toggle
+                            cache_data = all_nodes_cache.get(node_id)
                             wp = None; origin = '?'
                             if pos_data:
                                 wp = pos_data[1] @ pos_data[0]
@@ -1845,93 +2469,75 @@ def draw_callback_view(context: bpy.types.Context):
                                     if (obj_iter.matrix_world - pos_data[1]).is_zero(1e-5):
                                         if obj_iter.data and obj_iter.data.get(constants.MESH_JBEAM_PART):
                                             origin = obj_iter.data[constants.MESH_JBEAM_PART]; break
-                            elif cache_data: # Use cache if not in visible objects
-                                wp = cache_data[0]; origin = cache_data[2]
-
+                            elif cache_data: wp = cache_data[0]; origin = cache_data[2]
                             if wp is None: all_nodes_found = False; missing_nodes.append(node_id)
                             else: node_origins.add(origin)
                             world_pos[i] = wp
 
-                        # <<< WARNING LOGIC (Use module-level set) >>>
-                        if not all_nodes_found and ui_props.toggle_rails_vis:
+                        if all_nodes_found:
+                            rail_coords.extend(world_pos)
+                        elif ui_props.toggle_rails_vis:
                             if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes):
                                 print(f"Warning: Could not find position data for rail nodes {missing_nodes}", file=sys.stderr)
                                 warned_missing_nodes_this_rebuild.update(missing_nodes)
-                            continue
-                        # <<< END WARNING LOGIC >>>
-                        # ... (Add coords if found) ...
-                        rail_coords.extend(world_pos)
 
-            # --- Cross-Part Beam Drawing (Vehicle) ---
-            # Only populate cross_part_beam_coords if the visualization toggle is ON
+            # --- Cross-Part Beam Drawing (Vehicle) <<< MODIFIED >>> ---
             if ui_props.toggle_cross_part_beams_vis and jb_globals.curr_vdata and 'beams' in jb_globals.curr_vdata:
-                for beam in jb_globals.curr_vdata['beams']:
-                    # Check if beam is dict before accessing
-                    if not isinstance(beam, dict) or beam.get('partOrigin') != current_part_name: continue
-                    id1, id2 = beam.get('id1:'), beam.get('id2:')
+                for beam_data in jb_globals.curr_vdata['beams']: # Use beam_data directly
+                    if not isinstance(beam_data, dict) or beam_data.get('partOrigin') != current_part_name: continue
+                    id1, id2 = beam_data.get('id1:'), beam_data.get('id2:')
                     if not id1 or not id2: continue
-
-                    # Check if both nodes exist in the currently loaded geometry for the vehicle/part
                     id1_in_active_geom = id1 in node_id_to_pos_matrix_map
                     id2_in_active_geom = id2 in node_id_to_pos_matrix_map
+                    if id1_in_active_geom and id2_in_active_geom: continue # Skip if both nodes are in current geometry
+                    if node_id_to_hide_status.get(id1, False) or node_id_to_hide_status.get(id2, False): continue
 
-                    # If BOTH nodes are part of the active geometry, it's NOT a cross-part beam for drawing purposes
-                    if id1_in_active_geom and id2_in_active_geom:
-                        continue # Skip adding to cross_part_beam_coords
-
-                    # Check hide status using the map (only relevant if we proceed)
-                    if node_id_to_hide_status.get(id1, False) or node_id_to_hide_status.get(id2, False):
-                        continue
-
-                    # Now, determine if it *is* actually cross-part based on cache,
-                    # since we know at least one node is NOT in the active geometry map.
                     cache1_data = all_nodes_cache.get(id1)
                     cache2_data = all_nodes_cache.get(id2)
                     world_pos1, world_pos2 = None, None
                     is_truly_cross_part = False
-                    missing_nodes = [] # <<< ADDED: Track missing nodes for warning
-
+                    missing_nodes = []
                     origin1 = cache1_data[2] if cache1_data else '?'
                     origin2 = cache2_data[2] if cache2_data else '?'
 
-                    # It's cross-part if origins differ OR if one node is missing from cache entirely (implies external)
-                    # Check if origins differ AND neither is unknown ('?')
-                    if origin1 != origin2 and '?' not in {origin1, origin2}:
-                         is_truly_cross_part = True
-                    # Also consider it cross-part if one node is in active geom and the other isn't (and not hidden)
-                    elif (id1_in_active_geom and not id2_in_active_geom) or \
-                         (not id1_in_active_geom and id2_in_active_geom):
-                         is_truly_cross_part = True
-
+                    # Determine if it's truly cross-part based on origins or geometry presence
+                    if origin1 != origin2 and '?' not in {origin1, origin2}: is_truly_cross_part = True
+                    elif (id1_in_active_geom and not id2_in_active_geom) or (not id1_in_active_geom and id2_in_active_geom): is_truly_cross_part = True
 
                     if is_truly_cross_part:
-                        # Get positions (prioritize active geom map, then cache)
-                        if id1_in_active_geom:
-                            pos1_data = node_id_to_pos_matrix_map[id1]
-                            world_pos1 = pos1_data[1] @ pos1_data[0]
-                        elif cache1_data:
-                            world_pos1 = cache1_data[0]
-                        else: # <<< ADDED: Track missing node 1
-                            missing_nodes.append(id1)
+                        # Get world positions
+                        if id1_in_active_geom: pos1_data = node_id_to_pos_matrix_map[id1]; world_pos1 = pos1_data[1] @ pos1_data[0]
+                        elif cache1_data: world_pos1 = cache1_data[0]
+                        else: missing_nodes.append(id1)
+                        if id2_in_active_geom: pos2_data = node_id_to_pos_matrix_map[id2]; world_pos2 = pos2_data[1] @ pos2_data[0]
+                        elif cache2_data: world_pos2 = cache2_data[0]
+                        else: missing_nodes.append(id2)
 
-                        if id2_in_active_geom:
-                            pos2_data = node_id_to_pos_matrix_map[id2]
-                            world_pos2 = pos2_data[1] @ pos2_data[0]
-                        elif cache2_data:
-                            world_pos2 = cache2_data[0]
-                        else: # <<< ADDED: Track missing node 2
-                            missing_nodes.append(id2)
-
-                        # <<< WARNING LOGIC (Use module-level set) >>>
                         if missing_nodes:
                             if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes):
-                                print(f"Warning: Could not find position data for beam nodes {missing_nodes}", file=sys.stderr)
+                                print(f"Warning: Could not find position data for cross-part beam nodes {missing_nodes}", file=sys.stderr)
                                 warned_missing_nodes_this_rebuild.update(missing_nodes)
-                            continue # Skip adding coords if nodes missing
-                        # <<< END WARNING LOGIC >>>
+                            continue
 
-                        # Add to coords only if both positions found (already checked by warning logic)
-                        cross_part_beam_coords.extend([world_pos1, world_pos2])
+                        # <<< Add to dynamic or static list based on setting >>>
+                        if ui_props.use_dynamic_beam_coloring:
+                            color_to_use = None # Initialize color_to_use to None
+                            if beam_data: # Check if beam_data exists
+                                param_name = ui_props.dynamic_coloring_parameter
+                                param_value_raw = beam_data.get(param_name)
+                                if param_value_raw is not None:
+                                    low_thresh = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
+                                    high_thresh = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
+                                    # <<< Store result of calculation >>>
+                                    color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh)
+
+                            # <<< Check if color calculation succeeded before appending >>>
+                            if color_to_use is not None:
+                                dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use))
+                            # <<< END Check >>>
+                        else:
+                            cross_part_beam_coords.extend([world_pos1, world_pos2])
+                        # <<< End Add to dynamic or static list >>>
 
         else: # Single Part
             if active_obj.visible_get():
@@ -1941,12 +2547,10 @@ def draw_callback_view(context: bpy.types.Context):
                     if active_obj.mode == 'EDIT': bm = bmesh.from_edit_mesh(active_obj_data)
                     else: bm = bmesh.new(); bm.from_mesh(active_obj_data)
 
-                    # --- Build node maps for single part (remains the same) ---
+                    # --- Build node maps for single part ---
+                    # ... (logic remains the same) ...
                     node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
                     is_fake_layer = bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
-                    beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
-                    beam_part_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
-
                     if node_id_layer and is_fake_layer:
                         bm.verts.ensure_lookup_table()
                         obj_matrix_copy = active_obj.matrix_world.copy()
@@ -1956,7 +2560,9 @@ def draw_callback_view(context: bpy.types.Context):
                                 node_id_to_hide_status[node_id] = v.hide
                                 node_id_to_pos_matrix_map[node_id] = (v.co.copy(), obj_matrix_copy)
 
-                    # --- Beam Drawing (Single Part - remains the same) ---
+                    # --- Beam Coordinate Population (Single Part) <<< MODIFIED SECTION >>> ---
+                    beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
+                    beam_part_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
                     if beam_indices_layer and beam_part_origin_layer:
                         bm.edges.ensure_lookup_table()
                         for e in bm.edges:
@@ -1966,340 +2572,390 @@ def draw_callback_view(context: bpy.types.Context):
                                 try:
                                     first_beam_idx_in_part = int(beam_idx_str.split(',')[0])
                                     edge_part_origin = e[beam_part_origin_layer].decode('utf-8')
-                                    beam_type = edge_idx_to_beam_type_map.get((edge_part_origin, first_beam_idx_in_part), '|NORMAL')
+                                    beam_data = edge_idx_to_beam_data_map.get((edge_part_origin, first_beam_idx_in_part))
+                                    beam_type = beam_data.get('beamType', '|NORMAL') if beam_data else '|NORMAL'
+
+                                    # <<< Check visibility toggle for this beam type >>>
+                                    type_visible = False
+                                    if beam_type == '|NORMAL': type_visible = ui_props.toggle_beams_vis
+                                    elif beam_type == '|ANISOTROPIC': type_visible = ui_props.toggle_anisotropic_beams_vis
+                                    elif beam_type == '|SUPPORT': type_visible = ui_props.toggle_support_beams_vis
+                                    elif beam_type == '|HYDRO': type_visible = ui_props.toggle_hydro_beams_vis
+                                    elif beam_type == '|BOUNDED': type_visible = ui_props.toggle_bounded_beams_vis
+                                    elif beam_type == '|LBEAM': type_visible = ui_props.toggle_lbeam_beams_vis
+                                    elif beam_type == '|PRESSURED': type_visible = ui_props.toggle_pressured_beams_vis
+                                    # Add more types here if needed
+
+                                    if not type_visible: continue # Skip if this type is toggled off
+                                    # <<< End visibility check >>>
+
                                     v1, v2 = e.verts[0], e.verts[1]
                                     world_pos1 = active_obj.matrix_world @ v1.co; world_pos2 = active_obj.matrix_world @ v2.co
 
-                                    if beam_type == '|ANISOTROPIC': anisotropic_beam_coords.extend([world_pos1, world_pos2])
-                                    elif beam_type == '|SUPPORT': support_beam_coords.extend([world_pos1, world_pos2])
-                                    elif beam_type == '|HYDRO': hydro_beam_coords.extend([world_pos1, world_pos2])
-                                    elif beam_type == '|BOUNDED': bounded_beam_coords.extend([world_pos1, world_pos2])
-                                    elif beam_type == '|LBEAM': lbeam_coords.extend([world_pos1, world_pos2])
-                                    elif beam_type == '|PRESSURED': pressured_beam_coords.extend([world_pos1, world_pos2])
-                                    else: beam_coords.extend([world_pos1, world_pos2])
+                                    # Determine original width (used for selected outline)
+                                    original_width = ui_props.beam_width # Default normal width
+                                    if beam_type == '|ANISOTROPIC': original_width = ui_props.anisotropic_beam_width
+                                    elif beam_type == '|SUPPORT': original_width = ui_props.support_beam_width
+                                    elif beam_type == '|HYDRO': original_width = ui_props.hydro_beam_width
+                                    elif beam_type == '|BOUNDED': original_width = ui_props.bounded_beam_width
+                                    elif beam_type == '|LBEAM': original_width = ui_props.lbeam_beam_width
+                                    elif beam_type == '|PRESSURED': original_width = ui_props.pressured_beam_width
+
+                                    # Check if selected
+                                    if e.index in jb_globals.selected_beam_edge_indices:
+                                        selected_beam_coords_colors.append((world_pos1, world_pos2, WHITE_COLOR))
+                                        selected_beam_max_original_width = max(selected_beam_max_original_width, original_width)
+                                    # <<< MODIFIED: Handle dynamic vs static coloring >>>
+                                    elif ui_props.use_dynamic_beam_coloring:
+                                        # Calculate dynamic color
+                                        color_to_use = None # Initialize color_to_use to None
+                                        if beam_data:
+                                            param_name = ui_props.dynamic_coloring_parameter
+                                            param_value_raw = beam_data.get(param_name)
+                                            if param_value_raw is not None:
+                                                low_thresh = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
+                                                high_thresh = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
+                                                # <<< Store result of calculation >>>
+                                                color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh)
+
+                                        # <<< Check if color calculation succeeded before appending >>>
+                                        if color_to_use is not None:
+                                            dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use))
+                                        # <<< END Check >>>
+                                    else:
+                                        # Append to static lists
+                                        if beam_type == '|NORMAL': beam_coords.extend([world_pos1, world_pos2])
+                                        elif beam_type == '|ANISOTROPIC': anisotropic_beam_coords.extend([world_pos1, world_pos2])
+                                        elif beam_type == '|SUPPORT': support_beam_coords.extend([world_pos1, world_pos2])
+                                        elif beam_type == '|HYDRO': hydro_beam_coords.extend([world_pos1, world_pos2])
+                                        elif beam_type == '|BOUNDED': bounded_beam_coords.extend([world_pos1, world_pos2])
+                                        elif beam_type == '|LBEAM': lbeam_coords.extend([world_pos1, world_pos2])
+                                        elif beam_type == '|PRESSURED': pressured_beam_coords.extend([world_pos1, world_pos2])
+                                    # <<< END MODIFIED >>>
+
                                 except (ValueError, IndexError) as parse_err:
                                     print(f"Warning: Could not parse beam index '{beam_idx_str}' for edge in part '{part_name}'. Error: {parse_err}", file=sys.stderr)
+                    # --- End Beam Coordinate Population (Single Part) ---
 
-                    # --- Torsionbar Drawing (Single Part) --- #
-                    if jb_globals.curr_vdata and 'torsionbars' in jb_globals.curr_vdata and isinstance(jb_globals.curr_vdata['torsionbars'], list):
+                    # --- Torsionbar, Rail Drawing (Single Part) ---
+                    # ... (logic remains the same - these are not dynamically colored) ...
+                    if ui_props.toggle_torsionbars_vis and jb_globals.curr_vdata and 'torsionbars' in jb_globals.curr_vdata and isinstance(jb_globals.curr_vdata['torsionbars'], list):
+                        # ... (torsionbar coord population) ...
                         for tb in jb_globals.curr_vdata['torsionbars']:
                             ids = []
-                            # Check if tb is dict or list
-                            if isinstance(tb, dict):
-                                ids = [tb.get(f'id{i}:') for i in range(1, 5)]
-                            elif isinstance(tb, list) and len(tb) >= 4:
-                                ids = tb[:4]
-
+                            if isinstance(tb, dict): ids = [tb.get(f'id{i}:') for i in range(1, 5)]
+                            elif isinstance(tb, list) and len(tb) >= 4: ids = tb[:4]
                             if len(ids) != 4 or not all(ids): continue
                             if any(node_id_to_hide_status.get(id, False) for id in ids): continue
-
-                            world_pos = [None] * 4; node_origins = [None] * 4 # <<< Store origins individually
+                            world_pos = [None] * 4; node_origins = [None] * 4
                             all_nodes_found = True; missing_nodes = []
-
                             for i, node_id in enumerate(ids):
                                 pos_data = node_id_to_pos_matrix_map.get(node_id)
-                                cache_data = all_nodes_cache.get(node_id) # Use cache regardless of toggle
-                                wp = None
-                                origin = '?'
-
-                                if pos_data:
-                                    wp = pos_data[1] @ pos_data[0]
-                                    origin = part_name # Origin is the current part
-                                elif cache_data: # Use cache if not in visible objects
-                                    wp = cache_data[0]
-                                    origin = cache_data[2]
-
-                                if wp is None:
-                                    all_nodes_found = False
-                                    missing_nodes.append(node_id)
-
-                                world_pos[i] = wp
-                                node_origins[i] = origin # <<< Store origin for this node index
-
-                            # <<< WARNING LOGIC (Use module-level set) >>>
-                            if not all_nodes_found and ui_props.toggle_torsionbars_vis:
+                                cache_data = all_nodes_cache.get(node_id)
+                                wp = None; origin = '?'
+                                if pos_data: wp = pos_data[1] @ pos_data[0]; origin = part_name
+                                elif cache_data: wp = cache_data[0]; origin = cache_data[2]
+                                if wp is None: all_nodes_found = False; missing_nodes.append(node_id)
+                                world_pos[i] = wp; node_origins[i] = origin
+                            if not all_nodes_found:
                                 if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes):
                                     print(f"Warning: Could not find position data for torsionbar nodes {missing_nodes}", file=sys.stderr)
                                     warned_missing_nodes_this_rebuild.update(missing_nodes)
                                 continue
-                            # <<< END WARNING LOGIC >>>
-                            # ... (Add coords if found) ...
                             torsionbar_coords.extend([world_pos[0], world_pos[1]])
                             torsionbar_red_coords.extend([world_pos[1], world_pos[2]])
                             torsionbar_coords.extend([world_pos[2], world_pos[3]])
 
-                    # --- Rail Drawing (Single Part) ---
-                    if jb_globals.curr_vdata and 'rails' in jb_globals.curr_vdata and isinstance(jb_globals.curr_vdata['rails'], dict):
+                    if ui_props.toggle_rails_vis and jb_globals.curr_vdata and 'rails' in jb_globals.curr_vdata and isinstance(jb_globals.curr_vdata['rails'], dict):
+                        # ... (rail coord population) ...
                         for rail_name, rail_info in jb_globals.curr_vdata['rails'].items():
                             rail_nodes = None
-                            if isinstance(rail_info, list) and len(rail_info) == 2:
-                                rail_nodes = rail_info
-                            elif isinstance(rail_info, dict):
-                                rail_nodes = rail_info.get('links:')
-
+                            if isinstance(rail_info, list) and len(rail_info) == 2: rail_nodes = rail_info
+                            elif isinstance(rail_info, dict): rail_nodes = rail_info.get('links:')
                             if isinstance(rail_nodes, list) and len(rail_nodes) == 2:
                                 ids = rail_nodes
                                 if not all(ids): continue
                                 if any(node_id_to_hide_status.get(id, False) for id in ids): continue
-
-                                world_pos = [None] * 2; node_origins = set() # Rails only have one segment, set is fine
+                                world_pos = [None] * 2; node_origins = set()
                                 all_nodes_found = True; missing_nodes = []
-
                                 for i, node_id in enumerate(ids):
                                     pos_data = node_id_to_pos_matrix_map.get(node_id)
-                                    cache_data = all_nodes_cache.get(node_id) # Use cache regardless of toggle
+                                    cache_data = all_nodes_cache.get(node_id)
                                     wp = None; origin = '?'
-                                    if pos_data:
-                                        wp = pos_data[1] @ pos_data[0]; origin = part_name
-                                    elif cache_data: # Use cache if not in visible objects
-                                        wp = cache_data[0]; origin = cache_data[2]
-
+                                    if pos_data: wp = pos_data[1] @ pos_data[0]; origin = part_name
+                                    elif cache_data: wp = cache_data[0]; origin = cache_data[2]
                                     if wp is None: all_nodes_found = False; missing_nodes.append(node_id)
                                     else: node_origins.add(origin)
                                     world_pos[i] = wp
 
-                                # <<< WARNING LOGIC (Use module-level set) >>>
-                                if not all_nodes_found and ui_props.toggle_rails_vis:
+                                if all_nodes_found:
+                                    rail_coords.extend(world_pos)
+                                elif ui_props.toggle_rails_vis:
                                     if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes):
                                         print(f"Warning: Could not find position data for rail nodes {missing_nodes}", file=sys.stderr)
                                         warned_missing_nodes_this_rebuild.update(missing_nodes)
-                                    continue
-                                # <<< END WARNING LOGIC >>>
-                                # ... (Add coords if found) ...
-                                rail_coords.extend(world_pos)
 
-                    # --- Cross-Part Beam Drawing (Single Part) ---
-                    # Only populate cross_part_beam_coords if the visualization toggle is ON
+                    # --- Cross-Part Beam Drawing (Single Part) <<< MODIFIED >>> ---
                     if ui_props.toggle_cross_part_beams_vis and jb_globals.curr_vdata and 'beams' in jb_globals.curr_vdata:
                         obj_matrix = active_obj.matrix_world
-                        for beam in jb_globals.curr_vdata['beams']:
-                            # Check if beam is dict before accessing
-                            if not isinstance(beam, dict) or beam.get('partOrigin') != current_part_name: continue
-                            id1, id2 = beam.get('id1:'), beam.get('id2:')
+                        for beam_data in jb_globals.curr_vdata['beams']: # Use beam_data directly
+                            if not isinstance(beam_data, dict) or beam_data.get('partOrigin') != current_part_name: continue
+                            id1, id2 = beam_data.get('id1:'), beam_data.get('id2:')
                             if not id1 or not id2: continue
-
-                            # Check if both nodes exist in the single part's geometry map
                             id1_in_active_geom = id1 in node_id_to_pos_matrix_map
                             id2_in_active_geom = id2 in node_id_to_pos_matrix_map
+                            if id1_in_active_geom and id2_in_active_geom: continue # Skip if both nodes are in current geometry
+                            if node_id_to_hide_status.get(id1, False) or node_id_to_hide_status.get(id2, False): continue
 
-                            if id1_in_active_geom and id2_in_active_geom:
-                                continue # Skip if both nodes are in the active part's geometry
-
-                            # Check hide status
-                            if node_id_to_hide_status.get(id1, False) or node_id_to_hide_status.get(id2, False):
-                                continue
-
-                            # Determine if it's truly cross-part based on cache
                             cache1_data = all_nodes_cache.get(id1)
                             cache2_data = all_nodes_cache.get(id2)
                             world_pos1, world_pos2 = None, None
                             is_truly_cross_part = False
-                            missing_nodes = [] # <<< ADDED: Track missing nodes
-
+                            missing_nodes = []
                             origin1 = cache1_data[2] if cache1_data else '?'
                             origin2 = cache2_data[2] if cache2_data else '?'
 
-                            # Check if origins differ AND neither is unknown ('?')
-                            if origin1 != origin2 and '?' not in {origin1, origin2}:
-                                is_truly_cross_part = True
-                            elif (id1_in_active_geom and not id2_in_active_geom) or \
-                                 (not id1_in_active_geom and id2_in_active_geom):
-                                is_truly_cross_part = True
+                            # Determine if it's truly cross-part
+                            if origin1 != origin2 and '?' not in {origin1, origin2}: is_truly_cross_part = True
+                            elif (id1_in_active_geom and not id2_in_active_geom) or (not id1_in_active_geom and id2_in_active_geom): is_truly_cross_part = True
 
                             if is_truly_cross_part:
-                                if id1_in_active_geom:
-                                    pos1_data = node_id_to_pos_matrix_map[id1]
-                                    world_pos1 = obj_matrix @ pos1_data[0]
-                                elif cache1_data:
-                                    world_pos1 = cache1_data[0]
-                                else: # <<< ADDED: Track missing node 1
-                                    missing_nodes.append(id1)
+                                # Get world positions
+                                if id1_in_active_geom: pos1_data = node_id_to_pos_matrix_map[id1]; world_pos1 = obj_matrix @ pos1_data[0]
+                                elif cache1_data: world_pos1 = cache1_data[0]
+                                else: missing_nodes.append(id1)
+                                if id2_in_active_geom: pos2_data = node_id_to_pos_matrix_map[id2]; world_pos2 = obj_matrix @ pos2_data[0]
+                                elif cache2_data: world_pos2 = cache2_data[0]
+                                else: missing_nodes.append(id2)
 
-                                if id2_in_active_geom:
-                                    pos2_data = node_id_to_pos_matrix_map[id2]
-                                    world_pos2 = obj_matrix @ pos2_data[0]
-                                elif cache2_data:
-                                    world_pos2 = cache2_data[0]
-                                else: # <<< ADDED: Track missing node 2
-                                    missing_nodes.append(id2)
-
-                                # <<< WARNING LOGIC (Use module-level set) >>>
                                 if missing_nodes:
                                     if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes):
-                                        print(f"Warning: Could not find position data for beam nodes {missing_nodes}", file=sys.stderr)
+                                        print(f"Warning: Could not find position data for cross-part beam nodes {missing_nodes}", file=sys.stderr)
                                         warned_missing_nodes_this_rebuild.update(missing_nodes)
-                                    continue # Skip adding coords if nodes missing
-                                # <<< END WARNING LOGIC >>>
+                                    continue
 
-                                cross_part_beam_coords.extend([world_pos1, world_pos2])
+                                # <<< Add to dynamic or static list based on setting >>>
+                                if ui_props.use_dynamic_beam_coloring:
+                                    color_to_use = None # Initialize color_to_use to None
+                                    if beam_data: # Check if beam_data exists
+                                        param_name = ui_props.dynamic_coloring_parameter
+                                        param_value_raw = beam_data.get(param_name)
+                                        if param_value_raw is not None:
+                                            low_thresh = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
+                                            high_thresh = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
+                                            # <<< Store result of calculation >>>
+                                            color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh)
+
+                                    # <<< Check if color calculation succeeded before appending >>>
+                                    if color_to_use is not None:
+                                        dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use))
+                                    # <<< END Check >>>
+                                else:
+                                    cross_part_beam_coords.extend([world_pos1, world_pos2])
+                                # <<< End Add to dynamic or static list >>>
+
                 except Exception as e: print(f"Error getting geometry data from {active_obj.name}: {e}", file=sys.stderr)
                 finally:
                     if bm and not (active_obj.mode == 'EDIT'): bm.free()
 
-        # <<< START: Re-populate highlight coordinates >>>
-        # This logic runs AFTER the main visualization coords are populated
-        # It uses the highlight state set by find_and_highlight_element_for_line
+        # --- Highlight Coordinate Population ---
+        # ... (logic remains the same) ...
         if jb_globals.highlighted_element_type is not None and jb_globals.highlighted_element_type != 'node':
-            # Use the ORDERED list of node IDs for beams, rails, torsionbars
-            # For slidenodes, the rail coords are already in highlight_coords
             ordered_highlight_node_ids = jb_globals.highlighted_element_ordered_node_ids
-            highlight_world_positions = [] # This will be ordered correctly now
+            highlight_world_positions = []
             all_highlight_nodes_found = True
             missing_highlight_nodes = []
-
-            # Only find positions if it's not a slidenode (slidenode coords handled in find_and_highlight)
-            if jb_globals.highlighted_element_type != 'slidenode':
+            # <<< MODIFIED: Handle slidenode highlight coords separately >>>
+            if jb_globals.highlighted_element_type == 'slidenode':
+                 # Slidenode highlight coords are already populated directly in highlight_coords
+                 # by find_and_highlight_element_for_line
+                 pass # No extra coord finding needed here
+            else: # Beams, Rails, Torsionbars
                 for node_id in ordered_highlight_node_ids:
                     wp = None
                     pos_data = node_id_to_pos_matrix_map.get(node_id)
                     cache_data = all_nodes_cache.get(node_id)
-
-                    if pos_data:
-                        wp = pos_data[1] @ pos_data[0]
-                    elif cache_data:
-                        wp = cache_data[0]
-
-                    if wp is None:
-                        all_highlight_nodes_found = False
-                        missing_highlight_nodes.append(node_id)
-
-                    highlight_world_positions.append(wp) # Appends in the correct order
+                    if pos_data: wp = pos_data[1] @ pos_data[0]
+                    elif cache_data: wp = cache_data[0]
+                    if wp is None: all_highlight_nodes_found = False; missing_highlight_nodes.append(node_id)
+                    highlight_world_positions.append(wp)
 
                 if not all_highlight_nodes_found:
                     if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_highlight_nodes):
                         print(f"Warning: Could not find position data for highlighted nodes {missing_highlight_nodes}", file=sys.stderr)
                         warned_missing_nodes_this_rebuild.update(missing_highlight_nodes)
-                    # Clear highlight type if nodes are missing to prevent drawing stale highlight
+                    # Clear highlight state if nodes not found
                     jb_globals.highlighted_element_type = None
-                    jb_globals.highlighted_node_ids.clear() # Also clear the set
-                    jb_globals.highlighted_element_ordered_node_ids.clear() # Also clear the list
-                    highlight_coords.clear() # Clear any potentially partially populated coords
+                    jb_globals.highlighted_node_ids.clear()
+                    jb_globals.highlighted_element_ordered_node_ids.clear()
+                    highlight_coords.clear()
                     highlight_torsionbar_outer_coords.clear()
                     highlight_torsionbar_mid_coords.clear()
                 else:
-                    # Populate coordinate lists based on type (excluding slidenode)
                     element_type = jb_globals.highlighted_element_type
                     if element_type in ('beam', 'rail', 'cross_part_beam'):
-                        if len(highlight_world_positions) >= 2:
-                            highlight_coords.extend([highlight_world_positions[0], highlight_world_positions[1]])
+                        if len(highlight_world_positions) >= 2: highlight_coords.extend([highlight_world_positions[0], highlight_world_positions[1]])
                     elif element_type == 'torsionbar':
                         if len(highlight_world_positions) >= 4:
+                            # Corrected indices for torsionbar highlight
                             highlight_torsionbar_outer_coords.extend([highlight_world_positions[0], highlight_world_positions[1]])
                             highlight_torsionbar_mid_coords.extend([highlight_world_positions[1], highlight_world_positions[2]])
                             highlight_torsionbar_outer_coords.extend([highlight_world_positions[2], highlight_world_positions[3]])
-            # Else: If it's a slidenode, highlight_coords should already be populated by find_and_highlight_element_for_line
-            # No need to do anything here for slidenode coords.
+            # <<< END MODIFIED >>>
 
-        # <<< END: Re-populate highlight coordinates >>>
-
-
-        # --- Create Batches ---
-        # If coords list is empty, set batch to None. Otherwise create it.
-        if beam_coords: beam_render_batch = batch_for_shader(beam_render_shader, 'LINES', {"pos": beam_coords})
-        else: beam_render_batch = None
-        if anisotropic_beam_coords: anisotropic_beam_render_batch = batch_for_shader(beam_render_shader, 'LINES', {"pos": anisotropic_beam_coords})
-        else: anisotropic_beam_render_batch = None
-        if support_beam_coords: support_beam_render_batch = batch_for_shader(beam_render_shader, 'LINES', {"pos": support_beam_coords})
-        else: support_beam_render_batch = None
-        if hydro_beam_coords: hydro_beam_render_batch = batch_for_shader(beam_render_shader, 'LINES', {"pos": hydro_beam_coords})
-        else: hydro_beam_render_batch = None
-        if bounded_beam_coords: bounded_beam_render_batch = batch_for_shader(beam_render_shader, 'LINES', {"pos": bounded_beam_coords})
-        else: bounded_beam_render_batch = None
-        if lbeam_coords: lbeam_render_batch = batch_for_shader(beam_render_shader, 'LINES', {"pos": lbeam_coords})
-        else: lbeam_render_batch = None
-        if pressured_beam_coords: pressured_beam_render_batch = batch_for_shader(beam_render_shader, 'LINES', {"pos": pressured_beam_coords})
-        else: pressured_beam_render_batch = None
-        if torsionbar_coords: torsionbar_render_batch = batch_for_shader(beam_render_shader, 'LINES', {"pos": torsionbar_coords})
-        else: torsionbar_render_batch = None
-        if torsionbar_red_coords: torsionbar_red_render_batch = batch_for_shader(beam_render_shader, 'LINES', {"pos": torsionbar_red_coords})
-        else: torsionbar_red_render_batch = None
-        if rail_coords: rail_render_batch = batch_for_shader(beam_render_shader, 'LINES', {"pos": rail_coords})
-        else: rail_render_batch = None # Set to None if no coords
-        if cross_part_beam_coords: cross_part_beam_render_batch = batch_for_shader(beam_render_shader, 'LINES', {"pos": cross_part_beam_coords})
-        else: cross_part_beam_render_batch = None
-
-        # Create highlight batches (logic remains the same, uses updated coords)
+        # --- Create Batches <<< MODIFIED >>> ---
+        # Clear all batches first
+        beam_render_batch = None; dynamic_beam_batch = None
+        anisotropic_beam_render_batch = None; support_beam_render_batch = None
+        hydro_beam_render_batch = None; bounded_beam_render_batch = None
+        lbeam_render_batch = None; pressured_beam_render_batch = None
+        cross_part_beam_render_batch = None
+        torsionbar_render_batch = None; torsionbar_red_render_batch = None
+        rail_render_batch = None
+        selected_beam_batch = None
         highlight_render_batch = None
-        highlight_torsionbar_outer_batch = None
-        highlight_torsionbar_mid_batch = None
+        highlight_torsionbar_outer_batch = None; highlight_torsionbar_mid_batch = None
+
+        if ui_props.use_dynamic_beam_coloring:
+            # Create dynamic batch only
+            if dynamic_beam_coords_colors:
+                dyn_positions = []
+                dyn_colors = []
+                for pos1, pos2, color in dynamic_beam_coords_colors:
+                    dyn_positions.extend([pos1, pos2])
+                    dyn_colors.extend([color, color])
+                dynamic_beam_batch = batch_for_shader(render_shader, 'LINES', {"pos": dyn_positions, "color": dyn_colors})
+        else:
+            # Create static batches only
+            if beam_coords:
+                static_beam_colors = [ui_props.beam_color] * len(beam_coords)
+                beam_render_batch = batch_for_shader(render_shader, 'LINES', {"pos": beam_coords, "color": static_beam_colors})
+            if anisotropic_beam_coords:
+                colors = [ui_props.anisotropic_beam_color] * len(anisotropic_beam_coords)
+                anisotropic_beam_render_batch = batch_for_shader(render_shader, 'LINES', {"pos": anisotropic_beam_coords, "color": colors})
+            if support_beam_coords:
+                colors = [ui_props.support_beam_color] * len(support_beam_coords)
+                support_beam_render_batch = batch_for_shader(render_shader, 'LINES', {"pos": support_beam_coords, "color": colors})
+            if hydro_beam_coords:
+                colors = [ui_props.hydro_beam_color] * len(hydro_beam_coords)
+                hydro_beam_render_batch = batch_for_shader(render_shader, 'LINES', {"pos": hydro_beam_coords, "color": colors})
+            if bounded_beam_coords:
+                colors = [ui_props.bounded_beam_color] * len(bounded_beam_coords)
+                bounded_beam_render_batch = batch_for_shader(render_shader, 'LINES', {"pos": bounded_beam_coords, "color": colors})
+            if lbeam_coords:
+                colors = [ui_props.lbeam_beam_color] * len(lbeam_coords)
+                lbeam_render_batch = batch_for_shader(render_shader, 'LINES', {"pos": lbeam_coords, "color": colors})
+            if pressured_beam_coords:
+                colors = [ui_props.pressured_beam_color] * len(pressured_beam_coords)
+                pressured_beam_render_batch = batch_for_shader(render_shader, 'LINES', {"pos": pressured_beam_coords, "color": colors})
+            if cross_part_beam_coords:
+                colors = [ui_props.cross_part_beam_color] * len(cross_part_beam_coords)
+                cross_part_beam_render_batch = batch_for_shader(render_shader, 'LINES', {"pos": cross_part_beam_coords, "color": colors})
+
+        # Create batches for torsionbar, rail (always separate)
+        if torsionbar_coords:
+            colors = [ui_props.torsionbar_color] * len(torsionbar_coords)
+            torsionbar_render_batch = batch_for_shader(render_shader, 'LINES', {"pos": torsionbar_coords, "color": colors})
+        if torsionbar_red_coords:
+            colors = [ui_props.torsionbar_mid_color] * len(torsionbar_red_coords)
+            torsionbar_red_render_batch = batch_for_shader(render_shader, 'LINES', {"pos": torsionbar_red_coords, "color": colors})
+        if rail_coords:
+            colors = [ui_props.rail_color] * len(rail_coords)
+            rail_render_batch = batch_for_shader(render_shader, 'LINES', {"pos": rail_coords, "color": colors})
+
+        # Create selected beam batch
+        if selected_beam_coords_colors:
+            sel_positions = []
+            sel_colors = []
+            for pos1, pos2, color in selected_beam_coords_colors:
+                sel_positions.extend([pos1, pos2])
+                sel_colors.extend([color, color])
+            selected_beam_batch = batch_for_shader(render_shader, 'LINES', {"pos": sel_positions, "color": sel_colors})
+
+        # Create highlight batches
         if highlight_coords:
-            highlight_render_batch = batch_for_shader(beam_render_shader, 'LINES', {"pos": highlight_coords})
+            colors = [jb_globals.highlighted_element_color] * len(highlight_coords)
+            highlight_render_batch = batch_for_shader(render_shader, 'LINES', {"pos": highlight_coords, "color": colors})
         if highlight_torsionbar_outer_coords:
-            highlight_torsionbar_outer_batch = batch_for_shader(beam_render_shader, 'LINES', {"pos": highlight_torsionbar_outer_coords})
+            colors = [jb_globals.highlighted_element_color] * len(highlight_torsionbar_outer_coords)
+            highlight_torsionbar_outer_batch = batch_for_shader(render_shader, 'LINES', {"pos": highlight_torsionbar_outer_coords, "color": colors})
         if highlight_torsionbar_mid_coords:
-            highlight_torsionbar_mid_batch = batch_for_shader(beam_render_shader, 'LINES', {"pos": highlight_torsionbar_mid_coords})
+            colors = [jb_globals.highlighted_element_mid_color] * len(highlight_torsionbar_mid_coords)
+            highlight_torsionbar_mid_batch = batch_for_shader(render_shader, 'LINES', {"pos": highlight_torsionbar_mid_coords, "color": colors})
 
-        veh_render_dirty = False # Reset flag AFTER batch creation/clearing
+        veh_render_dirty = False
+    # --- End Rebuild Logic ---
 
-    # --- Drawing ---
-    # ... (GPU drawing calls remain the same) ...
+    # --- Drawing <<< MODIFIED >>> ---
     gpu.state.depth_test_set('LESS_EQUAL')
+    gpu.state.blend_set('ALPHA')
 
-    if beam_render_batch is not None and ui_props.toggle_beams_vis:
-        beam_render_shader.uniform_float("color", ui_props.beam_color); gpu.state.line_width_set(ui_props.beam_width)
-        gpu.state.depth_mask_set(True); beam_render_batch.draw(beam_render_shader); gpu.state.depth_mask_set(False)
+    if ui_props.use_dynamic_beam_coloring:
+        # Draw dynamic batch only
+        if dynamic_beam_batch:
+            gpu.state.line_width_set(ui_props.beam_width) # Use main beam width
+            gpu.state.depth_mask_set(True); dynamic_beam_batch.draw(render_shader); gpu.state.depth_mask_set(False)
+    else:
+        # Draw static batches based on toggles
+        if beam_render_batch is not None and ui_props.toggle_beams_vis:
+            gpu.state.line_width_set(ui_props.beam_width)
+            gpu.state.depth_mask_set(True); beam_render_batch.draw(render_shader); gpu.state.depth_mask_set(False)
+        if anisotropic_beam_render_batch is not None and ui_props.toggle_anisotropic_beams_vis:
+            gpu.state.line_width_set(ui_props.anisotropic_beam_width)
+            gpu.state.depth_mask_set(True); anisotropic_beam_render_batch.draw(render_shader); gpu.state.depth_mask_set(False)
+        if support_beam_render_batch is not None and ui_props.toggle_support_beams_vis:
+            gpu.state.line_width_set(ui_props.support_beam_width)
+            gpu.state.depth_mask_set(True); support_beam_render_batch.draw(render_shader); gpu.state.depth_mask_set(False)
+        if hydro_beam_render_batch is not None and ui_props.toggle_hydro_beams_vis:
+            gpu.state.line_width_set(ui_props.hydro_beam_width)
+            gpu.state.depth_mask_set(True); hydro_beam_render_batch.draw(render_shader); gpu.state.depth_mask_set(False)
+        if bounded_beam_render_batch is not None and ui_props.toggle_bounded_beams_vis:
+            gpu.state.line_width_set(ui_props.bounded_beam_width)
+            gpu.state.depth_mask_set(True); bounded_beam_render_batch.draw(render_shader); gpu.state.depth_mask_set(False)
+        if lbeam_render_batch is not None and ui_props.toggle_lbeam_beams_vis:
+            gpu.state.line_width_set(ui_props.lbeam_beam_width)
+            gpu.state.depth_mask_set(True); lbeam_render_batch.draw(render_shader); gpu.state.depth_mask_set(False)
+        if pressured_beam_render_batch is not None and ui_props.toggle_pressured_beams_vis:
+            gpu.state.line_width_set(ui_props.pressured_beam_width)
+            gpu.state.depth_mask_set(True); pressured_beam_render_batch.draw(render_shader); gpu.state.depth_mask_set(False)
+        if cross_part_beam_render_batch is not None and ui_props.toggle_cross_part_beams_vis:
+            gpu.state.line_width_set(ui_props.cross_part_beam_width)
+            gpu.state.depth_mask_set(True); cross_part_beam_render_batch.draw(render_shader); gpu.state.depth_mask_set(False)
 
-    if anisotropic_beam_render_batch is not None and ui_props.toggle_anisotropic_beams_vis:
-        beam_render_shader.uniform_float("color", ui_props.anisotropic_beam_color); gpu.state.line_width_set(ui_props.anisotropic_beam_width)
-        gpu.state.depth_mask_set(True); anisotropic_beam_render_batch.draw(beam_render_shader); gpu.state.depth_mask_set(False)
-
-    if support_beam_render_batch is not None and ui_props.toggle_support_beams_vis:
-        beam_render_shader.uniform_float("color", ui_props.support_beam_color); gpu.state.line_width_set(ui_props.support_beam_width)
-        gpu.state.depth_mask_set(True); support_beam_render_batch.draw(beam_render_shader); gpu.state.depth_mask_set(False)
-
-    if hydro_beam_render_batch is not None and ui_props.toggle_hydro_beams_vis:
-        beam_render_shader.uniform_float("color", ui_props.hydro_beam_color); gpu.state.line_width_set(ui_props.hydro_beam_width)
-        gpu.state.depth_mask_set(True); hydro_beam_render_batch.draw(beam_render_shader); gpu.state.depth_mask_set(False)
-
-    if bounded_beam_render_batch is not None and ui_props.toggle_bounded_beams_vis:
-        beam_render_shader.uniform_float("color", ui_props.bounded_beam_color); gpu.state.line_width_set(ui_props.bounded_beam_width)
-        gpu.state.depth_mask_set(True); bounded_beam_render_batch.draw(beam_render_shader); gpu.state.depth_mask_set(False)
-
-    if lbeam_render_batch is not None and ui_props.toggle_lbeam_beams_vis:
-        beam_render_shader.uniform_float("color", ui_props.lbeam_beam_color); gpu.state.line_width_set(ui_props.lbeam_beam_width)
-        gpu.state.depth_mask_set(True); lbeam_render_batch.draw(beam_render_shader); gpu.state.depth_mask_set(False)
-
-    if pressured_beam_render_batch is not None and ui_props.toggle_pressured_beams_vis:
-        beam_render_shader.uniform_float("color", ui_props.pressured_beam_color); gpu.state.line_width_set(ui_props.pressured_beam_width)
-        gpu.state.depth_mask_set(True); pressured_beam_render_batch.draw(beam_render_shader); gpu.state.depth_mask_set(False)
-
+    # Draw torsionbar, rail (always separate)
     if torsionbar_render_batch is not None and ui_props.toggle_torsionbars_vis:
-        beam_render_shader.uniform_float("color", ui_props.torsionbar_color); gpu.state.line_width_set(ui_props.torsionbar_width)
-        gpu.state.depth_mask_set(True); torsionbar_render_batch.draw(beam_render_shader); gpu.state.depth_mask_set(False)
-
+        gpu.state.line_width_set(ui_props.torsionbar_width)
+        gpu.state.depth_mask_set(True); torsionbar_render_batch.draw(render_shader); gpu.state.depth_mask_set(False)
     if torsionbar_red_render_batch is not None and ui_props.toggle_torsionbars_vis:
-        beam_render_shader.uniform_float("color", ui_props.torsionbar_mid_color); gpu.state.line_width_set(ui_props.torsionbar_width)
-        gpu.state.depth_mask_set(True); torsionbar_red_render_batch.draw(beam_render_shader); gpu.state.depth_mask_set(False)
-
-    # Rail Draw Call
+        gpu.state.line_width_set(ui_props.torsionbar_width)
+        gpu.state.depth_mask_set(True); torsionbar_red_render_batch.draw(render_shader); gpu.state.depth_mask_set(False)
     if rail_render_batch is not None and ui_props.toggle_rails_vis:
-        beam_render_shader.uniform_float("color", ui_props.rail_color); gpu.state.line_width_set(ui_props.rail_width)
-        gpu.state.depth_mask_set(True); rail_render_batch.draw(beam_render_shader); gpu.state.depth_mask_set(False)
+        gpu.state.line_width_set(ui_props.rail_width)
+        gpu.state.depth_mask_set(True); rail_render_batch.draw(render_shader); gpu.state.depth_mask_set(False)
 
-    # Draw cross-part beams only if toggle is ON
-    if cross_part_beam_render_batch is not None and ui_props.toggle_cross_part_beams_vis:
-        beam_render_shader.uniform_float("color", ui_props.cross_part_beam_color); gpu.state.line_width_set(ui_props.cross_part_beam_width)
-        gpu.state.depth_mask_set(True); cross_part_beam_render_batch.draw(beam_render_shader); gpu.state.depth_mask_set(False)
+    # Draw selected beam outline
+    if ui_props.show_selected_beam_outline and selected_beam_batch:
+        final_thickness = selected_beam_max_original_width * ui_props.selected_beam_thickness_multiplier
+        gpu.state.line_width_set(final_thickness)
+        gpu.state.depth_mask_set(True)
+        selected_beam_batch.draw(render_shader)
+        gpu.state.depth_mask_set(False)
 
     # Draw highlight batches
-    # ... (highlight drawing remains the same) ...
     highlight_width = jb_globals.highlighted_element_original_width * ui_props.highlight_thickness_multiplier
-    gpu.state.depth_mask_set(True) # Ensure highlight draws over others if needed
-
+    gpu.state.depth_mask_set(True)
     if highlight_torsionbar_outer_batch is not None:
-        beam_render_shader.uniform_float("color", jb_globals.highlighted_element_color) # Use default outer color
         gpu.state.line_width_set(highlight_width)
-        highlight_torsionbar_outer_batch.draw(beam_render_shader)
-
+        highlight_torsionbar_outer_batch.draw(render_shader)
     if highlight_torsionbar_mid_batch is not None:
-        beam_render_shader.uniform_float("color", jb_globals.highlighted_element_mid_color) # Use default mid color
         gpu.state.line_width_set(highlight_width)
-        highlight_torsionbar_mid_batch.draw(beam_render_shader)
-
-    if highlight_render_batch is not None: # Draw non-torsionbar highlight
-        beam_render_shader.uniform_float("color", jb_globals.highlighted_element_color)
+        highlight_torsionbar_mid_batch.draw(render_shader)
+    if highlight_render_batch is not None:
         gpu.state.line_width_set(highlight_width)
-        highlight_render_batch.draw(beam_render_shader)
+        highlight_render_batch.draw(render_shader)
 
-    gpu.state.depth_mask_set(False) # Reset depth mask
+    gpu.state.depth_mask_set(False)
     gpu.state.line_width_set(1.0)
+    gpu.state.blend_set('NONE')
+    # --- End Drawing ---
+
