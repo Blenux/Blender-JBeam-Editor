@@ -21,7 +21,7 @@
 import base64
 from pathlib import Path
 import re
-import sys
+import sys # Make sure sys is imported if not already
 import pickle
 import traceback
 
@@ -100,6 +100,45 @@ def load_vehicle(vehicle_directories: list[str], vehicle_config: dict, model_nam
 
     jbeam_node_beam.process(vehicle)
 
+    # <<< FIX START: Attempt to add partOrigin post-hoc >>>
+    # This is a workaround assuming jbeam_node_beam.process should have done this.
+    # It relies on the 'nodes' still having partOrigin after processing.
+    if 'nodes' in vehicle and 'beams' in vehicle:
+        # Create a map of node ID to its partOrigin
+        node_origins = {nid: data.get('partOrigin') for nid, data in vehicle['nodes'].items() if data.get('partOrigin') is not None}
+        beams_updated_count = 0
+        beams_missing_origin = 0
+        beams_unable_to_fix = 0
+
+        for beam in vehicle['beams']:
+            # Check if partOrigin is missing or explicitly None
+            if beam.get('partOrigin') is None:
+                beams_missing_origin += 1
+                inferred_origin = None
+                # Try to infer origin from the first node
+                node1_id = beam.get('id1:')
+                if node1_id:
+                    inferred_origin = node_origins.get(node1_id)
+
+                # If first node didn't work, try the second node
+                if inferred_origin is None:
+                    node2_id = beam.get('id2:')
+                    if node2_id:
+                        inferred_origin = node_origins.get(node2_id)
+
+                # If we found an origin, assign it
+                if inferred_origin is not None:
+                    beam['partOrigin'] = inferred_origin
+                    beams_updated_count += 1
+                else:
+                    beams_unable_to_fix += 1
+                    # Optional: Log the beam that couldn't be fixed
+                    # print(f"Warning: Could not infer partOrigin for beam: {beam.get('id1:', '?')}-{beam.get('id2:', '?')}")
+
+        if beams_missing_origin > 0:
+            print(f"Attempted to fix missing 'partOrigin' in {beams_missing_origin} beams. Successfully updated: {beams_updated_count}. Unable to fix: {beams_unable_to_fix}")
+    # <<< FIX END >>>
+
     vehicle['vehicleDirectory'] = vehicle_directories[0]
     vehicle['activeParts'] = active_parts_orig
     vehicle['model'] = model_name
@@ -169,7 +208,10 @@ def get_vertices_edges_faces(vehicle_bundle: dict):
 
         if 'triangles' in vdata:
             for tri in vdata['triangles']:
-                part_origin = tri['partOrigin']
+                # Use .get() for safety >>>
+                part_origin = tri.get('partOrigin') # Get part origin if available
+                if part_origin is None: continue # Skip if no origin (shouldn't happen after fix)
+
                 part_blender_tris = parts_tris.setdefault(part_origin, [])
 
                 ids = (tri['id1:'], tri['id2:'], tri['id3:'])
@@ -188,7 +230,10 @@ def get_vertices_edges_faces(vehicle_bundle: dict):
         # Translate quads to faces
         if 'quads' in vdata:
             for quad in vdata['quads']:
-                part_origin = quad['partOrigin']
+                 # Use .get() for safety >>>
+                part_origin = quad.get('partOrigin') # Get part origin if available
+                if part_origin is None: continue # Skip if no origin
+
                 part_blender_quads = parts_quads.setdefault(part_origin, [])
 
                 ids = (quad['id1:'], quad['id2:'], quad['id3:'], quad['id4:'])
@@ -213,7 +258,10 @@ def get_vertices_edges_faces(vehicle_bundle: dict):
         # Translate beams to edges
         if 'beams' in vdata:
             for beam in vdata['beams']:
-                part_origin = beam['partOrigin']
+                 # Use .get() for safety >>>
+                part_origin = beam.get('partOrigin') # Get part origin if available
+                if part_origin is None: continue # Skip if no origin
+
                 edges = parts_edges.setdefault(part_origin, [])
 
                 ids = (beam['id1:'], beam['id2:'])
@@ -254,6 +302,7 @@ def generate_part_mesh(obj: bpy.types.Object, obj_data: bpy.types.Mesh, bm: bmes
     inv_matrix_world = obj.matrix_world.inverted()
     bytes_part = bytes(part, 'utf-8')
 
+    # Ensure 'nodes' exists before iterating >>>
     if 'nodes' in vdata:
         nodes: dict[str, dict] = vdata['nodes']
         transformed_positions = {}
@@ -266,7 +315,9 @@ def generate_part_mesh(obj: bpy.types.Object, obj_data: bpy.types.Mesh, bm: bmes
             bytes_node_id = bytes(node_id, 'utf-8')
             v[init_node_id_layer] = bytes_node_id
             v[node_id_layer] = bytes_node_id
-            v[node_origin_layer] = bytes(nodes[node_id]['partOrigin'], 'utf-8')
+            # Use .get() for safety, default to current part >>>
+            node_part_origin = nodes.get(node_id, {}).get('partOrigin', part)
+            v[node_origin_layer] = bytes(node_part_origin, 'utf-8')
             v[node_is_fake_layer] = is_fake
 
     bm_verts.ensure_lookup_table()
@@ -276,10 +327,16 @@ def generate_part_mesh(obj: bpy.types.Object, obj_data: bpy.types.Mesh, bm: bmes
     for i, edge in enumerate(edges, 1):
         if edge is not None:
             if not edge in added_edges:
-                e = bm_edges_new((bm_verts[edge[0]], bm_verts[edge[1]]))
-                e[beam_indices_layer] = bytes(f'{i}', 'utf-8')
-                e[beam_origin_layer] = bytes_part
-                added_edges[edge] = e
+                 # Check if vertices exist before creating edge >>>
+                try:
+                    v1 = bm_verts[edge[0]]
+                    v2 = bm_verts[edge[1]]
+                    e = bm_edges_new((v1, v2))
+                    e[beam_indices_layer] = bytes(f'{i}', 'utf-8')
+                    e[beam_origin_layer] = bytes_part
+                    added_edges[edge] = e
+                except IndexError:
+                    print(f"Warning: Vertex index out of range for edge {i} in part '{part}'. Skipping edge.", file=sys.stderr)
             else:
                 e = added_edges[edge]
                 last_indices = e[beam_indices_layer].decode('utf-8')
@@ -287,15 +344,30 @@ def generate_part_mesh(obj: bpy.types.Object, obj_data: bpy.types.Mesh, bm: bmes
 
     for i, tri in enumerate(tris, 1):
         if tri is not None:
-            f = bm_faces_new((bm_verts[tri[0]], bm_verts[tri[1]], bm_verts[tri[2]]))
-            f[face_idx_layer] = i
-            f[face_origin_layer] = bytes_part
+            # Check if vertices exist before creating face >>>
+            try:
+                v1 = bm_verts[tri[0]]
+                v2 = bm_verts[tri[1]]
+                v3 = bm_verts[tri[2]]
+                f = bm_faces_new((v1, v2, v3))
+                f[face_idx_layer] = i
+                f[face_origin_layer] = bytes_part
+            except IndexError:
+                 print(f"Warning: Vertex index out of range for triangle {i} in part '{part}'. Skipping triangle.", file=sys.stderr)
 
     for i, quad in enumerate(quads, 1):
         if quad is not None:
-            f = bm_faces_new((bm_verts[quad[0]], bm_verts[quad[1]], bm_verts[quad[2]], bm_verts[quad[3]]))
-            f[face_idx_layer] = i
-            f[face_origin_layer] = bytes_part
+            # Check if vertices exist before creating face >>>
+            try:
+                v1 = bm_verts[quad[0]]
+                v2 = bm_verts[quad[1]]
+                v3 = bm_verts[quad[2]]
+                v4 = bm_verts[quad[3]]
+                f = bm_faces_new((v1, v2, v3, v4))
+                f[face_idx_layer] = i
+                f[face_origin_layer] = bytes_part
+            except IndexError:
+                print(f"Warning: Vertex index out of range for quad {i} in part '{part}'. Skipping quad.", file=sys.stderr)
 
     obj_data[constants.MESH_JBEAM_PART] = part
     obj_data[constants.MESH_JBEAM_FILE_PATH] = jbeam_filepath
@@ -332,6 +404,7 @@ def generate_meshes(vehicle_bundle: dict):
         part_obj = bpy.data.objects.new(part, obj_data)
         generate_part_mesh(part_obj, obj_data, bm, vehicle_bundle, part, vertices, parts_edges.get(part, []), parts_tris.get(part, []), parts_quads.get(part, []), node_index_to_id)
         bm.to_mesh(obj_data)
+        bm.free() # Free bmesh after use >>>
         obj_data.update()
 
         # add object to vehicle collection
@@ -349,7 +422,7 @@ def generate_meshes(vehicle_bundle: dict):
 
 
 def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Collection, vehicle_bundle: dict):
-    context = bpy.context
+    # context = bpy.context # context is already passed as an argument
     io_ctx = vehicle_bundle['ioCtx']
     veh_files = vehicle_bundle['vehFiles']
     vdata = vehicle_bundle['vdata']
@@ -363,6 +436,69 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
     parts_set = set()
     prev_active_obj_name = context.active_object.name if context.active_object else None
     objs = veh_collection.all_objects
+
+    # --- BEGIN MODIFICATION: Store hidden states for ALL parts first ---
+    all_hidden_edges_state = {}
+    all_hidden_verts_state = {} # <<< ADDED: Dictionary to store vertex hidden states
+    for part in parts:
+        if part == '' or part not in objs: # Skip empty parts or parts not in the collection
+            continue
+
+        obj = objs[part]
+        obj_data = obj.data
+        temp_bm = None
+        try:
+            # Check if this specific object is in edit mode, otherwise create from mesh data
+            if obj == context.active_object and obj.mode == 'EDIT':
+                temp_bm = bmesh.from_edit_mesh(obj_data)
+            else:
+                temp_bm = bmesh.new()
+                temp_bm.from_mesh(obj_data)
+
+            # --- Store Edge Hidden State (Existing) ---
+            beam_indices_layer = temp_bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
+            beam_origin_layer = temp_bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
+            if beam_indices_layer and beam_origin_layer:
+                temp_bm.edges.ensure_lookup_table()
+                for edge in temp_bm.edges:
+                    indices_str = edge[beam_indices_layer].decode('utf-8')
+                    # Only store for existing JBeam beams
+                    if indices_str and indices_str != '-1':
+                        try:
+                            first_index = int(indices_str.split(',')[0])
+                            part_origin = edge[beam_origin_layer].decode('utf-8')
+                            # Use part_origin from the edge layer itself for the key
+                            all_hidden_edges_state[(part_origin, first_index)] = edge.hide
+                        except (ValueError, IndexError):
+                             print(f"Warning: Could not parse beam index for storing hidden state (vehicle): {indices_str}", file=sys.stderr)
+
+            # --- ADDED: Store Vertex Hidden State ---
+            node_id_layer = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
+            # Get node origin layer for vertex state key >>>
+            node_origin_layer = temp_bm.verts.layers.string.get(constants.VL_NODE_PART_ORIGIN)
+            is_fake_layer = temp_bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+            # Check node_origin_layer exists >>>
+            if node_id_layer and node_origin_layer and is_fake_layer:
+                temp_bm.verts.ensure_lookup_table()
+                for vert in temp_bm.verts:
+                    if vert[is_fake_layer] == 0: # Only store real nodes
+                        node_id = vert[node_id_layer].decode('utf-8')
+                        # Use part_origin from vertex layer for key >>>
+                        part_origin = vert[node_origin_layer].decode('utf-8')
+                        all_hidden_verts_state[(part_origin, node_id)] = vert.hide
+            # --- END ADDED ---
+
+        except Exception as e:
+            print(f"Error storing hidden state for {part}: {e}", file=sys.stderr)
+        finally:
+            if temp_bm:
+                # Only free if it wasn't the active edit mesh OR if it was created temporarily
+                if not (obj == context.active_object and obj.mode == 'EDIT'):
+                    temp_bm.free()
+    # --- END MODIFICATION: Store hidden states ---
+
+
+    # --- Loop through parts to regenerate/update meshes ---
     for part in parts:
         if part == '': # skip slots with empty parts
             continue
@@ -374,7 +510,8 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
             obj = objs[part]
             obj_data = obj.data
 
-            if obj.mode == 'EDIT':
+            # Clear the mesh *after* storing states for all parts
+            if obj == context.active_object and obj.mode == 'EDIT': # Check if this specific obj is the active one in edit mode
                 bm = bmesh.from_edit_mesh(obj_data)
                 bm.clear()
             else:
@@ -382,39 +519,85 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
                 bm.from_mesh(obj_data)
                 bm.clear()
         else:
+            # Create new object if it didn't exist
             bm = bmesh.new()
             obj_data = bpy.data.meshes.new(part)
             obj = bpy.data.objects.new(part, obj_data)
             veh_collection.objects.link(obj) # add object to scene collection
 
+        # Generate the mesh content
         generate_part_mesh(obj, obj_data, bm, vehicle_bundle, part, vertices, parts_edges.get(part, []), parts_tris.get(part, []), parts_quads.get(part, []), node_index_to_id)
+
+        # --- BEGIN MODIFICATION: Apply hidden edge states ---
+        beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
+        beam_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
+        if beam_indices_layer and beam_origin_layer and all_hidden_edges_state:
+            bm.edges.ensure_lookup_table()
+            for edge in bm.edges:
+                indices_str = edge[beam_indices_layer].decode('utf-8')
+                if indices_str and indices_str != '-1':
+                    try:
+                        first_index = int(indices_str.split(',')[0])
+                        part_origin = edge[beam_origin_layer].decode('utf-8')
+                        # Use part_origin from the edge layer itself for lookup
+                        if (part_origin, first_index) in all_hidden_edges_state:
+                            edge.hide = all_hidden_edges_state[(part_origin, first_index)]
+                    except (ValueError, IndexError):
+                        print(f"Warning: Could not parse beam index for applying hidden state (vehicle): {indices_str}", file=sys.stderr)
+        # --- END MODIFICATION: Apply hidden edge states ---
+
+        # --- ADDED: Apply hidden vertex states ---
+        node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
+        # Get node origin layer for vertex state key >>>
+        node_origin_layer = bm.verts.layers.string.get(constants.VL_NODE_PART_ORIGIN)
+        is_fake_layer = bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+        # Check node_origin_layer exists >>>
+        if node_id_layer and node_origin_layer and is_fake_layer and all_hidden_verts_state:
+            bm.verts.ensure_lookup_table()
+            for vert in bm.verts:
+                 if vert[is_fake_layer] == 0: # Only apply to real nodes
+                    node_id = vert[node_id_layer].decode('utf-8')
+                    # Use part_origin from vertex layer for key >>>
+                    part_origin = vert[node_origin_layer].decode('utf-8')
+                    if (part_origin, node_id) in all_hidden_verts_state:
+                        vert.hide = all_hidden_verts_state[(part_origin, node_id)]
+        # --- END ADDED ---
+
         bm.normal_update()
 
-        if obj.mode == 'EDIT':
+        # Write back to mesh
+        if obj == context.active_object and obj.mode == 'EDIT': # Check if this specific obj is the active one in edit mode
             bmesh.update_edit_mesh(obj_data)
         else:
             bm.to_mesh(obj_data)
-        bm.free()
+        bm.free() # Free the bmesh used for generation/modification
         obj_data.update()
-        parts_set.add(part)
+        parts_set.add(part) # Keep track of parts that were processed
 
-    # Delete objects from vehicle collection that aren't part of parts
+    # Delete objects from vehicle collection that aren't part of the *new* parts configuration
     obj_datas_to_remove = []
     obj: bpy.types.Object
-    for obj in veh_collection.all_objects[:]:
+    for obj in veh_collection.all_objects[:]: # Iterate over a copy
         if obj.name not in parts_set:
             obj_datas_to_remove.append(obj.data)
             bpy.data.objects.remove(obj, do_unlink=True)
 
+    # Clean up mesh data for removed objects
     for obj_data in obj_datas_to_remove:
-        bpy.data.meshes.remove(obj_data, do_unlink=True)
+        # Check if mesh data still exists before removing
+        if obj_data and obj_data.name in bpy.data.meshes:
+             bpy.data.meshes.remove(obj_data, do_unlink=True)
 
+    # Update collection properties
+    vehicle_bundle['vdata'] = vdata # Ensure the modified vdata (with partOrigin fixes) is saved back >>>
+    veh_collection[constants.COLLECTION_VEHICLE_BUNDLE] = base64.b64encode(pickle.dumps(vehicle_bundle, -1)).decode('ascii') # Update bundle after changes
     veh_collection[constants.COLLECTION_IO_CTX] = io_ctx
     veh_collection[constants.COLLECTION_VEH_FILES] = veh_files
     veh_collection[constants.COLLECTION_PC_FILEPATH] = pc_filepath
     veh_collection[constants.COLLECTION_VEHICLE_MODEL] = vehicle_model
     veh_collection[constants.COLLECTION_MAIN_PART] = main_part_name
 
+    # Restore active object selection if it still exists
     if prev_active_obj_name is not None and prev_active_obj_name in context.scene.objects:
         context.view_layer.objects.active = context.scene.objects[prev_active_obj_name]
 
@@ -441,6 +624,7 @@ def reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Colle
             # Create Blender meshes from JBeam data
             _reimport_vehicle(context, veh_collection, vehicle_bundle)
 
+        # Save the potentially modified vehicle_bundle back >>>
         veh_collection[constants.COLLECTION_VEHICLE_BUNDLE] = base64.b64encode(pickle.dumps(vehicle_bundle, -1)).decode('ascii')
 
         context.scene['jbeam_editor_reimporting_jbeam'] = 1 # Prevents exporting jbeam
@@ -546,3 +730,4 @@ class JBEAM_EDITOR_OT_import_vehicle(Operator, ImportHelper):
         if not res:
             return {'CANCELLED'}
         return {'FINISHED'}
+
