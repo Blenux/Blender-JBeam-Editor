@@ -29,6 +29,7 @@ import bmesh
 from . import constants
 from . import text_editor
 from . import export_utils
+from . import globals as jb_globals # Import globals
 
 import timeit
 
@@ -40,6 +41,12 @@ def export(veh_collection: bpy.types.Collection, active_obj: bpy.types.Object):
         scene = context.scene
         ui_props = scene.ui_properties
         affect_node_references = ui_props.affect_node_references
+
+        # Check if the local rename toggle should override the global affect_node_references
+        if jb_globals._use_local_rename_toggle_for_next_export:
+            affect_node_references = ui_props.rename_selected_node_references
+            # This flag will be reset in end_export_cycle()
+            # jb_globals._use_local_rename_toggle_for_next_export = False # Reset after use
 
         veh_bundle = pickle.loads(base64.b64decode(veh_collection[constants.COLLECTION_VEHICLE_BUNDLE]))
         vdata = veh_bundle['vdata']
@@ -125,6 +132,8 @@ def export(veh_collection: bpy.types.Collection, active_obj: bpy.types.Object):
 
     except:
         traceback.print_exc()
+    finally:
+        export_utils.end_export_cycle() # Ensure cleanup happens
 
 
 def auto_export(obj: bpy.types.Object, veh_model: str):
