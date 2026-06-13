@@ -65,6 +65,12 @@ PINK_COLOR = (1.0, 0.0, 1.0, 0.9) # Pink color for active vertex dot
 auto_node_weight_min = float('inf')
 auto_node_weight_max = float('-inf')
 auto_node_thresholds_valid = False
+# <<< ADDED: Global vars for beam auto thresholds >>>
+auto_beam_min_val = float('inf')
+auto_beam_max_val = float('-inf')
+auto_beam_thresholds_valid = False
+# <<< END ADDED >>>
+
 # <<< END ADDED >>>
 
 # Drawing related globals
@@ -466,6 +472,113 @@ def find_node_line_number(jbeam_filepath: str, target_part_origin: str, target_n
     except Exception as e:
         print(f"Error finding node line number: {e}", file=sys.stderr)
         traceback.print_exc()
+        return None
+
+# Helper function to find the line number of a triangle in the AST
+def find_triangle_line_number(jbeam_filepath: str, target_part_origin: str, target_ids: tuple[str, str, str]):
+    """
+    Finds the 1-based line number of a specific triangle definition in a JBeam file
+    by matching all three node IDs in any order.
+    """
+    if any(nid.startswith('TEMP_') for nid in target_ids):
+        return None
+
+    file_content = text_editor.read_int_file(jbeam_filepath)
+    if not file_content: return None
+
+    try:
+        ast_data = sjsonast.parse(file_content)
+        if not ast_data: return None
+        ast_nodes = ast_data['ast']['nodes']
+        sjsonast.calculate_char_positions(ast_nodes)
+
+        stack = []
+        in_dict = True
+        pos_in_arr = 0
+        temp_dict_key = None
+        dict_key = None
+
+        i = 0
+        while i < len(ast_nodes):
+            node: sjsonast.ASTNode = ast_nodes[i]
+            node_type = node.data_type
+
+            if node_type == 'wsc':
+                i += 1
+                continue
+
+            in_target_part = len(stack) > 0 and stack[0][0] == target_part_origin
+            in_triangles_section = (
+                in_target_part and
+                len(stack) == 2 and
+                stack[1][0] == 'triangles' and
+                not in_dict # Inside the triangles array
+            )
+
+            if in_dict:
+                if node_type == '{':
+                    if dict_key is not None: stack.append((dict_key, True))
+                    dict_key = None; temp_dict_key = None; in_dict = True
+                elif node_type == '[':
+                    if dict_key is not None: stack.append((dict_key, True))
+                    dict_key = None; temp_dict_key = None; in_dict = False
+                elif node_type == '}':
+                    if stack: _, in_dict = stack.pop()
+                    else: in_dict = None
+                else:
+                    if temp_dict_key is None and node_type == '"': temp_dict_key = node.value
+                    elif node_type == ':': dict_key = temp_dict_key
+                    elif dict_key is not None: dict_key = None; temp_dict_key = None
+            else: # In array
+                if node_type == '[': # Start of a triangle definition array
+                    entry_start_node = node
+                    stack.append((pos_in_arr, False))
+                    pos_in_arr = 0; # Reset for inner array
+
+                    if in_triangles_section:
+                        parsed_ids = []
+                        k = i + 1
+                        while k < len(ast_nodes):
+                            inner_node = ast_nodes[k]
+                            if inner_node.data_type == ']': break
+                            if inner_node.data_type == '"': parsed_ids.append(inner_node.value)
+                            k += 1
+
+                        if len(parsed_ids) >= 3 and set(parsed_ids[:3]) == set(target_ids):
+                            start_char_pos = entry_start_node.start_pos
+                            line_number = file_content[:start_char_pos].count('\n') + 1
+                            return line_number
+                elif node_type == '{':
+                    stack.append((pos_in_arr, False)); pos_in_arr = 0; in_dict = True
+                elif node_type == ']':
+                    if stack:
+                        prev_idx, prev_in_dict = stack.pop()
+                        in_dict = prev_in_dict
+                        pos_in_arr = prev_idx + 1 if not prev_in_dict else 0
+                    else: in_dict = None
+                else: # Value node
+                    pos_in_arr +=1
+            i += 1
+        return None
+    except Exception: # pylint: disable=broad-except-clause
+        return None
+
+# Helper function to find the line number of a quad in the AST
+def find_quad_line_number(jbeam_filepath: str, target_part_origin: str, target_ids: tuple[str, str, str, str]):
+    """
+    Finds the 1-based line number of a specific quad definition in a JBeam file
+    by matching all four node IDs in any order.
+    """
+    if any(nid.startswith('TEMP_') for nid in target_ids):
+        return None
+
+    file_content = text_editor.read_int_file(jbeam_filepath)
+    if not file_content: return None
+
+    try:
+        # Re-use the triangle finding logic, just change the section name
+        return find_triangle_line_number(jbeam_filepath, target_part_origin, target_ids)
+    except Exception: # pylint: disable=broad-except-clause
         return None
 
 # Helper function to find the line number of a torsionbar in the AST
@@ -1891,38 +2004,50 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
 
         # --- Determine Color/Width based on AST-determined element_type ---
         if element_type == 'beam':
-            # Determine specific beam type color/width
+            # --- MODIFIED: Determine beam color, considering dynamic coloring for highlight ---
+            found_beam_data = None
             if jb_globals.curr_vdata and 'beams' in jb_globals.curr_vdata:
                 target_id1, target_id2 = node_ids[0], node_ids[1]
                 active_obj = context.active_object
-                target_part_origin = None
-                if active_obj and active_obj.data:
-                    target_part_origin = active_obj.data.get(constants.MESH_JBEAM_PART)
+                target_part_origin = active_obj.data.get(constants.MESH_JBEAM_PART) if active_obj and active_obj.data else None
 
                 if target_part_origin:
-                    found_beam_data = None
                     for beam_data in jb_globals.curr_vdata['beams']:
                         if isinstance(beam_data, dict) and beam_data.get('partOrigin') == target_part_origin:
-                            b_id1 = beam_data.get('id1:')
-                            b_id2 = beam_data.get('id2:')
-                            if (b_id1 == target_id1 and b_id2 == target_id2) or \
-                               (b_id1 == target_id2 and b_id2 == target_id1):
-                                found_beam_data = beam_data; break
-                    if found_beam_data:
-                        beam_type_from_data = found_beam_data.get('beamType', '|NORMAL')
-                        if beam_type_from_data == '|ANISOTROPIC': original_color = ui_props.anisotropic_beam_color # <<< REMOVED width assignment
-                        elif beam_type_from_data == '|SUPPORT': original_color = ui_props.support_beam_color # <<< REMOVED width assignment
-                        elif beam_type_from_data == '|HYDRO': original_color = ui_props.hydro_beam_color # <<< REMOVED width assignment
-                        elif beam_type_from_data == '|BOUNDED': original_color = ui_props.bounded_beam_color # <<< REMOVED width assignment
-                        elif beam_type_from_data == '|LBEAM': original_color = ui_props.lbeam_beam_color # <<< REMOVED width assignment
-                        elif beam_type_from_data == '|PRESSURED': original_color = ui_props.pressured_beam_color # <<< REMOVED width assignment
-                        else: original_color = ui_props.beam_color # <<< REMOVED width assignment - Default normal
-                    else: # Beam definition found on line, but not in curr_vdata (maybe newly added?)
-                        original_color = ui_props.beam_color # <<< REMOVED width assignment - Use default normal
-                else: # No target part origin found? Use default normal
-                    original_color = ui_props.beam_color # <<< REMOVED width assignment
-            else: # No beams in curr_vdata? Use default normal
-                 original_color = ui_props.beam_color # <<< REMOVED width assignment
+                            b_id1, b_id2 = beam_data.get('id1:'), beam_data.get('id2:')
+                            if (b_id1 == target_id1 and b_id2 == target_id2) or (b_id1 == target_id2 and b_id2 == target_id1):
+                                found_beam_data = beam_data
+                                break
+
+            if ui_props.use_dynamic_beam_coloring and found_beam_data:
+                # Dynamic coloring is ON. Calculate the dynamic color for the highlight.
+                param_name = ui_props.dynamic_coloring_parameter
+                param_value_raw = found_beam_data.get(param_name)
+                if param_value_raw is not None:
+                    # Use the auto-thresholds if enabled and valid, otherwise use manual thresholds.
+                    # Note: Auto thresholds are calculated during a full rebuild. This might use slightly stale values, but is generally correct.
+                    low_thresh = auto_beam_min_val if ui_props.use_auto_thresholds and auto_beam_thresholds_valid else ui_props.dynamic_color_threshold_low
+                    high_thresh = auto_beam_max_val if ui_props.use_auto_thresholds and auto_beam_thresholds_valid else ui_props.dynamic_color_threshold_high
+                    dynamic_color = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh, 'beam')
+                    if dynamic_color:
+                        original_color = dynamic_color
+                    else:
+                        # Fallback to default beam color if dynamic calculation fails
+                        original_color = ui_props.beam_color
+                else:
+                    # Fallback if the parameter doesn't exist on the beam
+                    original_color = ui_props.beam_color
+            else:
+                # Dynamic coloring is OFF or beam data not found. Use static colors.
+                beam_type_from_data = found_beam_data.get('beamType', '|NORMAL') if found_beam_data else '|NORMAL'
+                if beam_type_from_data == '|ANISOTROPIC': original_color = ui_props.anisotropic_beam_color
+                elif beam_type_from_data == '|SUPPORT': original_color = ui_props.support_beam_color
+                elif beam_type_from_data == '|HYDRO': original_color = ui_props.hydro_beam_color
+                elif beam_type_from_data == '|BOUNDED': original_color = ui_props.bounded_beam_color
+                elif beam_type_from_data == '|LBEAM': original_color = ui_props.lbeam_beam_color
+                elif beam_type_from_data == '|PRESSURED': original_color = ui_props.pressured_beam_color
+                else: original_color = ui_props.beam_color # Default normal
+            # --- END MODIFIED ---
 
         elif element_type == 'rail':
              original_color = ui_props.rail_color # <<< REMOVED width assignment
@@ -2363,20 +2488,19 @@ def draw_callback_px(context: bpy.types.Context):
         if apply_offset:
             base_x += text_offset
             base_y += text_offset
-    # <<< END MODIFICATION >>>
         if outline_size > 0:
+            s = outline_size # Use the max outline size directly
             blfcolor(font_id, *black_color)
-            for s in range(1, outline_size + 1):
-                # Horizontal and Vertical
-                lblfPosition(font_id, base_x - s, base_y, 0); lblfDraw(font_id, text)
-                lblfPosition(font_id, base_x + s, base_y, 0); lblfDraw(font_id, text)
-                lblfPosition(font_id, base_x, base_y - s, 0); lblfDraw(font_id, text)
-                lblfPosition(font_id, base_x, base_y + s, 0); lblfDraw(font_id, text)
-                # Diagonals
-                lblfPosition(font_id, base_x - s, base_y - s, 0); lblfDraw(font_id, text)
-                lblfPosition(font_id, base_x + s, base_y - s, 0); lblfDraw(font_id, text)
-                lblfPosition(font_id, base_x - s, base_y + s, 0); lblfDraw(font_id, text)
-                lblfPosition(font_id, base_x + s, base_y + s, 0); lblfDraw(font_id, text)
+            # Draw outline text 8 times at the max offset, removing the loop.
+            lblfPosition(font_id, base_x - s, base_y, 0); lblfDraw(font_id, text)
+            lblfPosition(font_id, base_x + s, base_y, 0); lblfDraw(font_id, text)
+            lblfPosition(font_id, base_x, base_y - s, 0); lblfDraw(font_id, text)
+            lblfPosition(font_id, base_x, base_y + s, 0); lblfDraw(font_id, text)
+            lblfPosition(font_id, base_x - s, base_y - s, 0); lblfDraw(font_id, text)
+            lblfPosition(font_id, base_x + s, base_y - s, 0); lblfDraw(font_id, text)
+            lblfPosition(font_id, base_x - s, base_y + s, 0); lblfDraw(font_id, text)
+            lblfPosition(font_id, base_x + s, base_y + s, 0); lblfDraw(font_id, text)
+
         blfcolor(font_id, *text_color)
         # Use base_x, base_y for the final text draw
         lblfPosition(font_id, base_x, base_y, 0)
@@ -3032,7 +3156,7 @@ def draw_callback_view(context: bpy.types.Context):
     # <<< ADDED: Ensure global is accessible >>>
     global _reported_unsupported_ops_this_rebuild
     # <<< ADDED: Access global node thresholds >>>
-    global auto_node_weight_min, auto_node_weight_max, auto_node_thresholds_valid
+    global auto_node_weight_min, auto_node_weight_max, auto_node_thresholds_valid, auto_beam_min_val, auto_beam_max_val, auto_beam_thresholds_valid
 
     # ... (initial checks: scene, ui_props, active_obj, should_draw) ...
     scene = context.scene
@@ -3148,7 +3272,7 @@ def draw_callback_view(context: bpy.types.Context):
         _highlight_dirty = False # Reset flag
 
     # If not doing a full rebuild, but highlight batches are now None (due to _highlight_dirty or initial state)
-    # and there are coordinates to draw, then rebuild them.
+    # and there are coordinates to draw, then rebuild them. # noqa: E701
     if not veh_render_dirty:
         if jb_globals.highlighted_element_type not in (None, 'node') and highlight_render_batch is None and highlight_coords:
             if jb_globals.highlighted_element_color: # Ensure color is set
@@ -3263,9 +3387,9 @@ def draw_callback_view(context: bpy.types.Context):
         node_dots_batch = None
 
         # --- 2. Reset auto thresholds ---
-        auto_min_val = float('inf'); auto_max_val = float('-inf'); auto_thresholds_valid = False
+        auto_beam_min_val = float('inf'); auto_beam_max_val = float('-inf'); auto_beam_thresholds_valid = False
         auto_node_weight_min = float('inf'); auto_node_weight_max = float('-inf'); auto_node_thresholds_valid = False
-
+        
         # --- Get context data ---
         active_obj_data = active_obj.data
         collection = active_obj.users_collection[0] if active_obj.users_collection else None
@@ -3513,10 +3637,10 @@ def draw_callback_view(context: bpy.types.Context):
                                 resolved_value = resolve_jbeam_variable_value(param_value_raw, jb_globals.jbeam_variables_cache, 0, context, False)
                                 try:
                                     numeric_value = float(resolved_value)
-                                    if math.isfinite(numeric_value):
-                                        auto_min_val = min(auto_min_val, numeric_value)
-                                        auto_max_val = max(auto_max_val, numeric_value)
-                                        auto_thresholds_valid = True
+                                    if math.isfinite(numeric_value): # noqa: E721
+                                        auto_beam_min_val = min(auto_beam_min_val, numeric_value)
+                                        auto_beam_max_val = max(auto_beam_max_val, numeric_value)
+                                        auto_beam_thresholds_valid = True
                                 except (ValueError, TypeError): pass
 
         # --- 6. Populate Coordinate Lists (using finalized thresholds) ---
@@ -3570,8 +3694,8 @@ def draw_callback_view(context: bpy.types.Context):
                                                 param_value_raw = beam_data.get(param_name)
                                                 if param_value_raw is not None:
                                                     # Use FINALIZED auto thresholds
-                                                    low_thresh = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
-                                                    high_thresh = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
+                                                    low_thresh = auto_beam_min_val if ui_props.use_auto_thresholds and auto_beam_thresholds_valid else ui_props.dynamic_color_threshold_low
+                                                    high_thresh = auto_beam_max_val if ui_props.use_auto_thresholds and auto_beam_thresholds_valid else ui_props.dynamic_color_threshold_high
                                                     color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh, 'beam')
                                             if color_to_use is not None:
                                                 dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use))
@@ -3732,13 +3856,13 @@ def draw_callback_view(context: bpy.types.Context):
                             if should_add_to_dynamic_list_vehicle:
                                 color_to_use_dyn_veh = None
                                 if is_cross_part and ui_props.use_generic_cross_part_beam_color:
-                                    color_to_use_dyn_veh = ui_props.cross_part_beam_color
+                                            color_to_use_dyn_veh = ui_props.cross_part_beam_color # noqa: F841
                                 else:
                                     param_name_dyn_veh = ui_props.dynamic_coloring_parameter
                                     param_value_raw_dyn_veh = beam_data.get(param_name_dyn_veh)
                                     if param_value_raw_dyn_veh is not None:
                                         low_thresh_dyn_veh = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
-                                        high_thresh_dyn_veh = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
+                                        high_thresh_dyn_veh = auto_beam_max_val if ui_props.use_auto_thresholds and auto_beam_thresholds_valid else ui_props.dynamic_color_threshold_high
                                         color_to_use_dyn_veh = _calculate_dynamic_color(param_value_raw_dyn_veh, low_thresh_dyn_veh, high_thresh_dyn_veh, 'beam')
                                 if color_to_use_dyn_veh:
                                     dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use_dyn_veh))
@@ -3810,8 +3934,8 @@ def draw_callback_view(context: bpy.types.Context):
                                             param_value_raw = beam_data.get(param_name)
                                             if param_value_raw is not None:
                                                 # Use FINALIZED auto thresholds
-                                                low_thresh = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
-                                                high_thresh = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
+                                                low_thresh = auto_beam_min_val if ui_props.use_auto_thresholds and auto_beam_thresholds_valid else ui_props.dynamic_color_threshold_low # Use auto_beam_min_val
+                                                high_thresh = auto_beam_max_val if ui_props.use_auto_thresholds and auto_beam_thresholds_valid else ui_props.dynamic_color_threshold_high # Use auto_beam_max_val
                                                 color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh, 'beam')
                                         if color_to_use is not None:
                                             dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use))
@@ -3959,13 +4083,13 @@ def draw_callback_view(context: bpy.types.Context):
                                     if should_add_to_dynamic_list_single:
                                         color_to_use_dyn_single = None
                                         if ui_props.use_generic_cross_part_beam_color:
-                                            color_to_use_dyn_single = ui_props.cross_part_beam_color
+                                            color_to_use_dyn_single = ui_props.cross_part_beam_color # noqa: F841
                                         else:
                                             param_name_dyn_single = ui_props.dynamic_coloring_parameter
                                             param_value_raw_dyn_single = beam_data.get(param_name_dyn_single)
                                             if param_value_raw_dyn_single is not None:
                                                 low_thresh_dyn_single = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
-                                                high_thresh_dyn_single = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
+                                                high_thresh_dyn_single = auto_beam_max_val if ui_props.use_auto_thresholds and auto_beam_thresholds_valid else ui_props.dynamic_color_threshold_high
                                                 color_to_use_dyn_single = _calculate_dynamic_color(param_value_raw_dyn_single, low_thresh_dyn_single, high_thresh_dyn_single, 'beam')
                                         if color_to_use_dyn_single:
                                             dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use_dyn_single))
@@ -4143,8 +4267,8 @@ def draw_callback_view(context: bpy.types.Context):
 
         # --- Update UI Properties for Display (Auto Thresholds) ---
         # For Beams
-        ui_props.auto_beam_threshold_min_display = _format_number_for_display(auto_min_val, auto_thresholds_valid)
-        ui_props.auto_beam_threshold_max_display = _format_number_for_display(auto_max_val, auto_thresholds_valid)
+        ui_props.auto_beam_threshold_min_display = _format_number_for_display(auto_beam_min_val, auto_beam_thresholds_valid)
+        ui_props.auto_beam_threshold_max_display = _format_number_for_display(auto_beam_max_val, auto_beam_thresholds_valid)
         # For Nodes
         ui_props.auto_node_threshold_min_display = _format_number_for_display(auto_node_weight_min, auto_node_thresholds_valid)
         ui_props.auto_node_threshold_max_display = _format_number_for_display(auto_node_weight_max, auto_node_thresholds_valid)
@@ -4195,9 +4319,12 @@ def draw_callback_view(context: bpy.types.Context):
         _tag_redraw_3d_views(context)
     # --- End Rebuild Logic ---
 
-    # --- Drawing ---
-    gpu.state.depth_test_set('LESS_EQUAL')
-    gpu.state.depth_test_set('NONE')
+    # --- Drawing ---    
+    # Set depth test based on viewport X-Ray setting
+    if context.space_data.shading.show_xray:
+        gpu.state.depth_test_set('NONE')  # Draw on top of everything
+    else:
+        gpu.state.depth_test_set('LESS_EQUAL')  # Respect depth and be occluded
     gpu.state.blend_set('ALPHA')
 
     # Draw dynamic_beam_batch if it exists.

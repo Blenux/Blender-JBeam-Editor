@@ -21,6 +21,7 @@
 import bpy
 
 import hashlib
+import os
 import re
 from pathlib import Path # <<< ADDED: Import Path
 import traceback # Ensure traceback is imported
@@ -44,6 +45,8 @@ regex = re.compile(r'^.*/vehicles/(.*)$')
 
 history_stack = []
 history_stack_idx = -1
+
+file_mtimes = {} # Dictionary to store last modification time of files
 
 def _get_short_jbeam_path(path: str):
     match = re.match(regex, path)
@@ -74,11 +77,20 @@ def _get_internal_filename(filepath: str) -> str:
         return _to_short_filename(filepath) # Use MD5 hash for other types
 
 
+def update_file_mtime(filepath: str):
+    """Updates the stored modification time for a file."""
+    if not filepath: return
+    try:
+        file_mtimes[filepath] = os.path.getmtime(filepath)
+    except OSError:
+        pass
+
 def write_from_ext_to_int_file(filepath: str):
     filetext = utils.read_file(filepath)
     if filetext is None:
         return None
     write_int_file(filepath, filetext)
+    update_file_mtime(filepath) # Update mtime after reading from disk
     return filetext
 
 
@@ -89,6 +101,7 @@ def write_from_int_to_ext_file(filepath: str):
         return False
 
     res = utils.write_file(filepath, text.as_string())
+    if res: update_file_mtime(filepath) # Update mtime after writing to disk
     return res
 
 
@@ -279,6 +292,43 @@ def check_open_int_file_for_changes(context: bpy.types.Context, undoing_redoing=
 
     return file_changed
 
+
+def check_external_file_changes(context: bpy.types.Context):
+    """
+    Checks if the active text file has been modified externally.
+    Returns the filepath if changed, None otherwise.
+    """
+    scene = context.scene
+    if SCENE_SHORT_TO_FULL_FILENAME not in scene:
+        return None
+
+    # Find active text editor and its text
+    text = None
+    for area in context.screen.areas:
+        if area.type == "TEXT_EDITOR":
+            if area.spaces.active:
+                text = area.spaces.active.text
+            break
+    
+    if text is None:
+        return None
+
+    internal_name = text.name
+    filepath = scene[SCENE_SHORT_TO_FULL_FILENAME].get(internal_name)
+    
+    if filepath and os.path.exists(filepath):
+        current_mtime = os.path.getmtime(filepath)
+        last_mtime = file_mtimes.get(filepath)
+        
+        if last_mtime is not None and current_mtime > last_mtime:
+            # Update mtime immediately to prevent repeated triggers for the same change
+            file_mtimes[filepath] = current_mtime
+            return filepath
+        elif last_mtime is None:
+            # First time seeing this file, store current mtime
+            file_mtimes[filepath] = current_mtime
+            
+    return None
 
 def check_int_files_for_changes(context: bpy.types.Context, filenames: list, undoing_redoing=False, reimport=True, regenerate_mesh=True):
     scene = context.scene

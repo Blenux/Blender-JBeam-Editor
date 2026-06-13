@@ -48,6 +48,7 @@ from .operators import (
     JBEAM_EDITOR_OT_clear_pc_filters, # <<< ADDED: Import filter operators
     JBEAM_EDITOR_OT_import_folder, # <<< ADDED: Import new folder import operator
     JBEAM_EDITOR_OT_reload_pc_file, # <<< ADDED: Import new PC reload operator
+    JBEAM_EDITOR_OT_external_file_changed_dialog, # <<< ADDED
 )
 from .panels import (
     JBEAM_EDITOR_PT_transform_panel_ext,
@@ -107,6 +108,7 @@ classes = (
     JBEAM_EDITOR_OT_clear_pc_filters, # <<< ADDED
     JBEAM_EDITOR_OT_import_folder, # <<< ADDED: Add new folder import operator
     JBEAM_EDITOR_OT_reload_pc_file, # <<< ADDED: Add new PC reload operator
+    JBEAM_EDITOR_OT_external_file_changed_dialog, # <<< ADDED
     JBEAM_EDITOR_PT_transform_panel_ext,
     JBEAM_EDITOR_PT_jbeam_panel,
     JBEAM_EDITOR_PT_find_node,

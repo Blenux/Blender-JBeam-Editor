@@ -21,6 +21,7 @@
 import bpy
 import bmesh
 import sys
+import os
 import traceback # <<< ADDED: Import traceback
 import json
 from pathlib import Path # <<< ADDED: Import Path
@@ -30,8 +31,8 @@ from . import constants
 from . import text_editor
 from . import globals as jb_globals # Import globals
 # Import drawing module and specific elements needed
-from . import drawing, properties # <<< ADDED: Import drawing and properties modules
-from .drawing import refresh_curr_vdata, find_node_line_number, find_beam_line_number, find_rail_line_number, _scroll_editor_to_line, _tag_redraw_3d_views # Import drawing functions
+from . import drawing, properties
+from .drawing import refresh_curr_vdata, find_node_line_number, find_beam_line_number, find_rail_line_number, find_triangle_line_number, find_quad_line_number, _scroll_editor_to_line, _tag_redraw_3d_views # Import drawing functions
 from .text_editor import _to_short_filename # <<< ADDED: Import helper
 # <<< MODIFIED: Import utils and text_editor >>>
 from . import utils
@@ -494,7 +495,12 @@ class JBEAM_EDITOR_OT_scroll_to_definition(bpy.types.Operator):
         len_selected_nodes = len(jb_globals.selected_nodes)
 
         # Check if exactly one node OR one beam is selected
-        return len_selected_nodes == 1 or len(jb_globals.selected_beams) == 1 or (len_selected_nodes == 2 and ui_props.find_jump_to_rail_on_2_nodes)
+        # Each condition should be checked independently.
+        if len_selected_nodes == 1: return True
+        if len(jb_globals.selected_beams) == 1: return True
+        if len_selected_nodes == 2 and ui_props.find_jump_to_rail_on_2_nodes: return True
+        if len_selected_nodes in (3, 4) and ui_props.find_jump_to_face_on_3_4_nodes: return True
+        return False
 
     def execute(self, context):
         obj = context.active_object
@@ -516,6 +522,16 @@ class JBEAM_EDITOR_OT_scroll_to_definition(bpy.types.Operator):
 
         line_num = None
         target_element_type = None
+
+        # If find_face is on but we don't have 3 or 4 nodes, report and cancel.
+        if ui_props.find_jump_to_face_on_3_4_nodes and len(jb_globals.selected_nodes) not in (3, 4):
+            self.report({'WARNING'}, "Select 3 or 4 nodes to find a face.")
+            return {'CANCELLED'}
+
+        # If find_rail is on but we don't have 2 nodes, report and cancel.
+        if ui_props.find_jump_to_rail_on_2_nodes and len(jb_globals.selected_nodes) != 2:
+            self.report({'WARNING'}, "Select 2 nodes to find a rail.")
+            return {'CANCELLED'}
 
         # Check Rail Selection (2 nodes) first to give it priority
         if len(jb_globals.selected_nodes) == 2 and ui_props.find_jump_to_rail_on_2_nodes:
@@ -539,6 +555,22 @@ class JBEAM_EDITOR_OT_scroll_to_definition(bpy.types.Operator):
                                     line_num = find_rail_line_number(jbeam_filepath, obj_data[constants.MESH_JBEAM_PART], rail_name)
                                     break # Stop searching once found
 
+        elif len(jb_globals.selected_nodes) in (3, 4) and ui_props.find_jump_to_face_on_3_4_nodes:
+            node_ids = tuple(node_info[1] for node_info in jb_globals.selected_nodes)
+            target_part_origin = obj_data[constants.MESH_JBEAM_PART] # Assume face is in the current part
+
+            if len(node_ids) == 3:
+                target_element_type = "Triangle"
+                line_num = find_triangle_line_number(jbeam_filepath, target_part_origin, node_ids)
+            elif len(node_ids) == 4:
+                target_element_type = "Quad"
+                # We can reuse the triangle finding logic for quads by just changing the section name,
+                # but for simplicity and clarity, we'll use a dedicated function.
+                # Let's assume find_quad_line_number exists.
+                line_num = find_quad_line_number(jbeam_filepath, target_part_origin, node_ids)
+
+
+
         elif len(jb_globals.selected_nodes) == 1:
             target_element_type = "Node"
             vert_index, node_id = jb_globals.selected_nodes[0]
@@ -555,7 +587,9 @@ class JBEAM_EDITOR_OT_scroll_to_definition(bpy.types.Operator):
                 self.report({'ERROR'}, f"Error accessing node data: {e}")
                 return {'CANCELLED'}
 
-        elif len(jb_globals.selected_beams) == 1: # Check Beam Selection
+        # If find_face is on, don't try to find a beam when an edge is selected.
+        # The user intends to find a face, but has the wrong selection.
+        elif len(jb_globals.selected_beams) == 1 and not ui_props.find_jump_to_face_on_3_4_nodes:
             target_element_type = "Beam"
             edge_index, beam_indices_str = jb_globals.selected_beams[0]
             try:
@@ -590,6 +624,11 @@ class JBEAM_EDITOR_OT_scroll_to_definition(bpy.types.Operator):
                     else:
                          self.report({'ERROR'}, f"Error accessing beam data: {e}")
                     return {'CANCELLED'}
+
+        elif ui_props.find_jump_to_face_on_3_4_nodes:
+            # This case is reached if find_face is on but the node count is not 3 or 4.
+            self.report({'WARNING'}, "Select 3 or 4 nodes to find a face.")
+            return {'CANCELLED'}
 
         # Perform Scrolling
         if line_num is not None:
@@ -1199,13 +1238,10 @@ class JBEAM_EDITOR_OT_reload_jbeam_from_disk(bpy.types.Operator):
             return {'CANCELLED'}
 
         # 1. Read from disk
-        file_content = utils.read_file(jbeam_filepath)
-        if file_content is None:
-            self.report({'ERROR'}, f"Could not read file from disk: {jbeam_filepath}")
-            return {'CANCELLED'}
-
-        # 2. Update internal text
-        text_editor.write_int_file(jbeam_filepath, file_content)
+        # 2. Update internal text (combined in write_from_ext_to_int_file)
+        if text_editor.write_from_ext_to_int_file(jbeam_filepath) is None:
+             self.report({'ERROR'}, f"Could not read file from disk: {jbeam_filepath}")
+             return {'CANCELLED'}
 
         # 3. Trigger reimport/refresh
         # We force a check on the specific file, triggering reimport and mesh regeneration.
@@ -1580,5 +1616,40 @@ class JBEAM_EDITOR_OT_reload_pc_file(bpy.types.Operator):
         # 3. Trigger filter update
         properties.update_pc_filters(context.scene, context)
         self.report({'INFO'}, f"Reloaded PC file: {Path(self.pc_file_path).name}")
+        return {'FINISHED'}
+# <<< END ADDED >>>
+
+# <<< ADDED: Operator for External File Change Dialog >>>
+class JBEAM_EDITOR_OT_external_file_changed_dialog(bpy.types.Operator):
+    """Asks the user if they want to reload a file modified externally."""
+    bl_idname = "jbeam_editor.external_file_changed_dialog"
+    bl_label = "External File Modified"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    filepath: bpy.props.StringProperty()
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=400)
+
+    def draw(self, context):
+        layout = self.layout
+        filename = os.path.basename(self.filepath)
+        layout.label(text=f"The file '{filename}' has been modified externally.")
+        layout.label(text="Do you want to reload it from disk?")
+        layout.label(text="(Unsaved changes in Blender will be lost)")
+
+    def execute(self, context):
+        # Reload the file
+        if text_editor.write_from_ext_to_int_file(self.filepath) is None:
+            self.report({'ERROR'}, f"Failed to reload file: {self.filepath}")
+            return {'CANCELLED'}
+        
+        # Trigger reimport/refresh
+        try:
+            text_editor.check_int_files_for_changes(context, [self.filepath], undoing_redoing=True, reimport=True, regenerate_mesh=True)
+            self.report({'INFO'}, f"Reloaded: {os.path.basename(self.filepath)}")
+        except Exception as e:
+            self.report({'ERROR'}, f"Error refreshing after reload: {e}")
+            return {'CANCELLED'}
         return {'FINISHED'}
 # <<< END ADDED >>>

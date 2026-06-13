@@ -276,30 +276,29 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
             current_text_content = text_editor.read_int_file(active_jbeam_filepath)
 
             if current_text_content is not None:
-                # Access history stack directly from text_editor module
                 history_stack = text_editor.history_stack
-                # history_stack_idx is a global in text_editor, so we modify it directly
-
-                # When a new JBeam object is selected, its current state should always become
-                # the new top of the undo stack, effectively making the selection a new "action".
                 new_state_to_push = {internal_name: current_text_content}
 
-                text_editor.history_stack_idx += 1
-                # Insert the new state at the current index (which is now the new top)
-                history_stack.insert(text_editor.history_stack_idx, new_state_to_push)
-                # Truncate any "redo" history that might have existed beyond this new top
-                text_editor.history_stack = history_stack[:text_editor.history_stack_idx + 1]
+                # Only push a new state if it's different from the last one in history
+                # or if the history is empty. This prevents duplicate states.
+                if not history_stack or (text_editor.history_stack_idx < len(history_stack) and history_stack[text_editor.history_stack_idx] != new_state_to_push):
+                    text_editor.history_stack_idx += 1
+                    # Insert the new state at the current index
+                    history_stack.insert(text_editor.history_stack_idx, new_state_to_push)
+                    # Truncate any "redo" history that might have existed beyond this new point
+                    text_editor.history_stack = history_stack[:text_editor.history_stack_idx + 1]
 
-                # Limit history stack size
-                if len(history_stack) > text_editor.HISTORY_STACK_SIZE:
-                    history_stack.pop(0)
-                    # Adjust index if the first element was removed
-                    text_editor.history_stack_idx -= 1
+                    # Limit history stack size
+                    if len(history_stack) > text_editor.HISTORY_STACK_SIZE:
+                        history_stack.pop(0)
+                        # Adjust index if the first element was removed
+                        text_editor.history_stack_idx -= 1
 
                 # Update scene's previous text state to prevent immediate "change" detection by other handlers
                 if text_editor.SCENE_PREV_TEXTS not in scene:
                     scene[text_editor.SCENE_PREV_TEXTS] = {}
                 scene[text_editor.SCENE_PREV_TEXTS][internal_name] = current_text_content
+
     # --- End Undo Logic for Object Selection ---
 
     # <<< MODIFIED: Keep bmesh access even if not in EDIT mode for face hiding >>>
@@ -346,7 +345,13 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
                     # If the toggle is ON, do nothing here, allowing Blender's native hide/unhide to work.
                     if not ui_props.toggle_native_faces_vis:
                         needs_bm_update = False
+                        # Get face index layer to check if face is new
+                        face_idx_layer = bm.faces.layers.int.get(constants.FL_FACE_IDX)
+
                         for f_iter in bm.faces: # Use f_iter to avoid conflict if f is used elsewhere
+                            # If face is new (index is -1), don't hide it yet. It will be hidden on the next update.
+                            if face_idx_layer and f_iter[face_idx_layer] == -1:
+                                continue
                             if not f_iter.hide: # If face is currently visible
                                 f_iter.hide = True
                                 needs_bm_update = True
@@ -695,6 +700,18 @@ def check_files_for_changes_timer():
         changed = text_editor.check_open_int_file_for_changes(context)
         if changed:
             refresh_curr_vdata(True)
+        
+        # <<< ADDED: Check for external file changes >>>
+        if context.scene.ui_properties.monitor_external_changes:
+            changed_file = text_editor.check_external_file_changes(context)
+            if changed_file:
+                # Invoke the dialog operator
+                # We use a try-except block because invoking dialogs from timers can sometimes fail context checks
+                try:
+                    bpy.ops.jbeam_editor.external_file_changed_dialog('INVOKE_DEFAULT', filepath=changed_file)
+                except Exception:
+                    print(f"Warning: Detected external change for {changed_file} but could not open dialog.", file=sys.stderr)
+        # <<< END ADDED >>>
     except Exception as e:
         print(f"Error checking files for changes: {e}", file=sys.stderr)
     return check_file_interval

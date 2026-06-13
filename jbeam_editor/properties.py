@@ -281,9 +281,53 @@ def _update_search_element_id(self, context):
 
 # <<< Update function for dynamic coloring properties (defined here) >>>
 def _update_dynamic_beam_coloring(self, context):
-    """Sets the render dirty flag when dynamic beam coloring settings change."""
+    """
+    Sets the render dirty flag when dynamic beam coloring settings change.
+    Also, if a beam is currently highlighted, it re-calculates and updates its color.
+    """
     context.scene.jbeam_editor_veh_render_dirty = True
     setattr(drawing, 'veh_render_dirty', True)
+
+    # If a beam is highlighted, update its color based on the new setting
+    if jb_globals.highlighted_element_type == 'beam':
+        # Re-calculate the color for the highlighted beam
+        ui_props = context.scene.ui_properties
+        new_color = None
+        
+        # Find the beam data for the highlighted beam
+        found_beam_data = None
+        if jb_globals.curr_vdata and 'beams' in jb_globals.curr_vdata and jb_globals.highlighted_element_ordered_node_ids:
+            target_id1, target_id2 = jb_globals.highlighted_element_ordered_node_ids[0], jb_globals.highlighted_element_ordered_node_ids[1]
+            active_obj = context.active_object
+            target_part_origin = active_obj.data.get(constants.MESH_JBEAM_PART) if active_obj and active_obj.data else None
+
+            if target_part_origin:
+                for beam_data in jb_globals.curr_vdata['beams']:
+                    if isinstance(beam_data, dict) and beam_data.get('partOrigin') == target_part_origin:
+                        b_id1, b_id2 = beam_data.get('id1:'), beam_data.get('id2:')
+                        if (b_id1 == target_id1 and b_id2 == target_id2) or (b_id1 == target_id2 and b_id2 == target_id1):
+                            found_beam_data = beam_data
+                            break
+
+        if self.use_dynamic_beam_coloring and found_beam_data:
+            # Calculate dynamic color
+            param_name = self.dynamic_coloring_parameter
+            param_value_raw = found_beam_data.get(param_name)
+            if param_value_raw is not None:
+                low_thresh = drawing.auto_beam_min_val if self.use_auto_thresholds and drawing.auto_beam_thresholds_valid else self.dynamic_color_threshold_low
+                high_thresh = drawing.auto_beam_max_val if self.use_auto_thresholds and drawing.auto_beam_thresholds_valid else self.dynamic_color_threshold_high
+                new_color = drawing._calculate_dynamic_color(param_value_raw, low_thresh, high_thresh, 'beam')
+        elif found_beam_data:
+            # Calculate static color
+            beam_type = found_beam_data.get('beamType', '|NORMAL')
+            if beam_type == '|ANISOTROPIC': new_color = ui_props.anisotropic_beam_color
+            elif beam_type == '|SUPPORT': new_color = ui_props.support_beam_color
+            # ... add other static beam types if needed ...
+            else: new_color = ui_props.beam_color # Default to normal beam color
+
+        if new_color:
+            jb_globals.highlighted_element_color = new_color
+            setattr(drawing, '_highlight_dirty', True) # Mark highlight for redraw
 
 # <<< MODIFIED: Update function for dynamic node coloring >>>
 def _update_dynamic_node_coloring(self, context):
@@ -566,6 +610,12 @@ class UIProperties(bpy.types.PropertyGroup):
     find_jump_to_rail_on_2_nodes: bpy.props.BoolProperty(
         name="Find Rail on 2 Nodes",
         description="When 'Find and Jump to' is used with 2 selected nodes, search for a rail definition instead of a beam",
+        default=False,
+        # No update function needed here, its value is read by the operator
+    )
+    find_jump_to_face_on_3_4_nodes: bpy.props.BoolProperty(
+        name="Find Face on 3/4 Nodes",
+        description="When 'Find and Jump to' is used with 3 or 4 selected nodes, search for a triangle/quad definition instead of adding one",
         default=False,
         # No update function needed here, its value is read by the operator
     )
@@ -1238,6 +1288,12 @@ class UIProperties(bpy.types.PropertyGroup):
         description="Show console messages for debugging, such as when a JBeam element's referenced node cannot be found for drawing, a JBeam variable is unresolved, or an expression contains an unsupported operation.",
         default=False,
         update=_update_show_console_warnings_missing_nodes # <<< MODIFIED: Use new update function
+    )
+
+    monitor_external_changes: bpy.props.BoolProperty(
+        name="Monitor External Changes",
+        description="Automatically check if JBeam files are modified externally and ask to reload",
+        default=True
     )
     # <<< ADDED: Collection for Node Weight Variables >>>
     node_weight_variables: bpy.props.CollectionProperty(

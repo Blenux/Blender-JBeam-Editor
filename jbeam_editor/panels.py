@@ -136,13 +136,16 @@ class JBEAM_EDITOR_PT_jbeam_panel(bpy.types.Panel):
             # Only enable if exactly one node or one beam is selected
             # <<< MODIFIED: Separate rail search condition from beam selection >>>
             row = col.row()
-            is_rail_search_enabled = len_selected_verts == 2 and ui_props.find_jump_to_rail_on_2_nodes
+            is_rail_search_enabled = len_selected_verts == 2 and ui_props.find_jump_to_rail_on_2_nodes # noqa: F841
+            is_face_search_enabled = len_selected_verts in (3, 4) and ui_props.find_jump_to_face_on_3_4_nodes
             # Enable if one node is selected, or one beam is selected (and not doing a rail search), or if rail search is active.
-            row.enabled = len_selected_verts == 1 or (len_selected_beams == 1 and not is_rail_search_enabled) or is_rail_search_enabled
+            row.enabled = len_selected_verts == 1 or (len_selected_beams == 1 and not is_rail_search_enabled) or is_rail_search_enabled or is_face_search_enabled
             # <<< END MODIFIED >>>
             row.operator(JBEAM_EDITOR_OT_scroll_to_definition.bl_idname, text=" Find and Jump to (Text Editor)", icon='FOLDER_REDIRECT')
             # Add the new toggle for rail finding
             col.row().prop(ui_props, 'find_jump_to_rail_on_2_nodes')
+            # Add the new toggle for face finding
+            col.row().prop(ui_props, 'find_jump_to_face_on_3_4_nodes')
             col.separator() # Add separator after the button
 
             if len_selected_verts == 1:
@@ -750,6 +753,7 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
             console_warnings_box = layout.box()
             console_warnings_col = console_warnings_box.column(align=True)
             console_warnings_col.prop(ui_props, 'show_console_warnings_missing_nodes', text="Show Console Messages (debug)")
+            console_warnings_col.prop(ui_props, 'monitor_external_changes') # <<< ADDED
 
 # <<< ADDED: Panel for PC Filtering >>>
 class JBEAM_EDITOR_PT_pc_filter(bpy.types.Panel):

@@ -22,7 +22,7 @@ bl_info = {
     "name": "Blender JBeam Editor (unofficial)",
     "description": "Modify BeamNG JBeam files in a 3D editor!",
     "author": "BeamNG + Tomsteel", # <<< Keep author info
-    "version": (0, 2, 68), # Keep incremented version
+    "version": (0, 2, 69), # Keep incremented version
     "blender": (5, 0, 0), # Keep blender version info
     "location": "File > Import > JBeam File / File > Export > JBeam File",
     "warning": "",
