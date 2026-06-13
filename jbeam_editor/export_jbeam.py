@@ -50,7 +50,7 @@ def export_new_jbeam(context, obj, obj_data, bm, init_node_id_layer, node_id_lay
     for i in range(len(bm.verts)):
         v = bm.verts[i]
         node_id = v[node_id_layer].decode('utf-8')
-        pos_str = (to_float_str(v.co.x), to_float_str(v.co.y), to_float_str(v.co.z))
+        pos_str = (utils.to_float_str(v.co.x), utils.to_float_str(v.co.y), utils.to_float_str(v.co.z))
         abs_pos_str = (pos_str[0].replace('-','',1), pos_str[1].replace('-','',1), pos_str[2].replace('-','',1))
         pos_strs.append(pos_str)
         abs_pos_strs.append(abs_pos_str)
@@ -147,6 +147,8 @@ def export_existing_jbeam(obj: bpy.types.Object):
 
     except:
         traceback.print_exc()
+    finally:
+        export_utils.end_export_cycle() # Ensure cleanup happens
 
 
 def auto_export(obj: bpy.types.Object):
