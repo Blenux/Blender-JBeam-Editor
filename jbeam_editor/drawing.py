@@ -1536,33 +1536,28 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                 if prev_highlight_type is not None: _highlight_dirty = True
                 return False # Cannot highlight if rail nodes not found
 
-            # <<< START: Combined check for slidenode_node_id AND rail nodes in main 'nodes' section >>>
-            nodes_section_valid = jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata
-            slidenode_id_valid = nodes_section_valid and slidenode_node_id in jb_globals.curr_vdata['nodes']
-            rail_node1_valid = nodes_section_valid and rail_node_id1 in jb_globals.curr_vdata['nodes']
-            rail_node2_valid = nodes_section_valid and rail_node_id2 in jb_globals.curr_vdata['nodes']
+            # <<< START: MODIFIED CHECK - Use all_nodes_cache >>>
+            # Check if the slidenode's own node and the rail nodes exist in the global cache
+            slidenode_id_valid = slidenode_node_id in all_nodes_cache
+            rail_node1_valid = rail_node_id1 in all_nodes_cache
+            rail_node2_valid = rail_node_id2 in all_nodes_cache
 
-            if not nodes_section_valid:
-                print(f"Warning: Cannot validate slidenode '{slidenode_node_id}' - 'nodes' section missing from JBeam data.")
-                _tag_redraw_3d_views(context)
-                if prev_highlight_type is not None: _highlight_dirty = True
-                return False
             if not slidenode_id_valid:
-                print(f"Warning: Slidenode's own node ID '{slidenode_node_id}' not found in main 'nodes' section.")
+                print(f"Warning: Slidenode's own node ID '{slidenode_node_id}' not found in node cache.")
                 _tag_redraw_3d_views(context)
                 if prev_highlight_type is not None: _highlight_dirty = True
                 return False
             if not rail_node1_valid:
-                print(f"Warning: Rail node '{rail_node_id1}' (for slidenode '{slidenode_node_id}') not found in main 'nodes' section.")
+                print(f"Warning: Rail node '{rail_node_id1}' (for slidenode '{slidenode_node_id}') not found in node cache.")
                 _tag_redraw_3d_views(context)
                 if prev_highlight_type is not None: _highlight_dirty = True
                 return False
             if not rail_node2_valid:
-                print(f"Warning: Rail node '{rail_node_id2}' (for slidenode '{slidenode_node_id}') not found in main 'nodes' section.")
+                print(f"Warning: Rail node '{rail_node_id2}' (for slidenode '{slidenode_node_id}') not found in node cache.")
                 _tag_redraw_3d_views(context)
                 if prev_highlight_type is not None: _highlight_dirty = True
                 return False
-            # <<< END: Combined check >>>
+            # <<< END: MODIFIED CHECK >>>
 
             # Now find positions for slidenode_node_id, rail_node_id1, rail_node_id2
             node_ids_to_find = [slidenode_node_id, rail_node_id1, rail_node_id2]
@@ -1571,21 +1566,21 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
             for node_id in node_ids_to_find:
                 wp = None
                 pos_data = temp_node_map.get(node_id)
-                cache_data = all_nodes_cache.get(node_id)
+                cache_data = all_nodes_cache.get(node_id) # Use the cache directly
                 if pos_data:
                     wp = pos_data[1] @ pos_data[0]
                 elif cache_data:
-                    wp = cache_data[0]
+                    wp = cache_data[0] # Get position from cache
 
                 if wp is None:
-                    # This check should ideally not be hit if the checks above passed,
+                    # This check should ideally not be hit if the cache checks above passed,
                     # but keep it as a fallback for geometry/cache issues.
                     missing_nodes.append(node_id)
                 slidenode_world_positions[node_id] = wp
 
             if missing_nodes:
-                # Print a different warning if nodes were found in data but not in geometry/cache
-                print(f"Warning: Could not find geometry/cache position for slidenode nodes: {missing_nodes}")
+                # Print a different warning if nodes were found in cache but not in geometry
+                print(f"Warning: Could not find geometry position for slidenode nodes: {missing_nodes}")
                 _tag_redraw_3d_views(context) # Always tag redraw for highlight update
                 # <<< ADDED: Mark highlight dirty if it was previously active >>>
                 if prev_highlight_type is not None: _highlight_dirty = True
@@ -1999,12 +1994,9 @@ def draw_callback_px(context: bpy.types.Context):
                             draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color)
                         # <<< MODIFICATION END >>>
 
-    # --- Cross-Part Node ID Drawing ---
-    # ... (existing logic, no changes needed here as dynamic color doesn't apply to cross-part nodes) ...
-    if ui_props.toggle_node_ids_text and all_nodes_cache:
-        # ... (target_other_part_node_ids population) ...
-        # ... (iterate through all_nodes_cache) ...
-        cross_part_color = ui_props.cross_part_beam_color
+    # --- Cross-Part Node ID Drawing --- <<< MODIFIED SECTION START >>>
+    if ui_props.toggle_node_ids_text and ui_props.toggle_cross_part_node_ids_vis and all_nodes_cache:
+        cross_part_color = ui_props.cross_part_beam_color # Use the same color as cross-part beams for now
         target_other_part_node_ids = set()
         active_part_name = active_obj_data.get(constants.MESH_JBEAM_PART)
         active_filepath = active_obj_data.get(constants.MESH_JBEAM_FILE_PATH)
@@ -2021,7 +2013,7 @@ def draw_callback_px(context: bpy.types.Context):
                     part_data = full_file_data[active_part_name]
 
             if isinstance(part_data, dict):
-                # Check Beams, Torsionbars, Rails... (as before)
+                # Check Beams
                 if 'beams' in part_data and isinstance(part_data['beams'], list):
                     for beam in part_data['beams']:
                         id1, id2 = None, None
@@ -2032,7 +2024,7 @@ def draw_callback_px(context: bpy.types.Context):
                             node2_cache_data = all_nodes_cache.get(id2)
                             if node1_cache_data and node1_cache_data[2] != active_part_name: target_other_part_node_ids.add(id1)
                             if node2_cache_data and node2_cache_data[2] != active_part_name: target_other_part_node_ids.add(id2)
-                # ... (Check Torsionbars, Rails as before) ...
+                # Check Torsionbars
                 if 'torsionbars' in part_data and isinstance(part_data['torsionbars'], list):
                     for tb in part_data['torsionbars']:
                         tb_node_ids = []
@@ -2042,6 +2034,7 @@ def draw_callback_px(context: bpy.types.Context):
                             for node_id in tb_node_ids:
                                 cache_data = all_nodes_cache.get(node_id)
                                 if cache_data and cache_data[2] != active_part_name: target_other_part_node_ids.add(node_id)
+                # Check Rails
                 if 'rails' in part_data and isinstance(part_data['rails'], dict):
                     for rail_name, rail_info in part_data['rails'].items():
                         rail_node_ids = None
@@ -2063,6 +2056,7 @@ def draw_callback_px(context: bpy.types.Context):
                     if node_id in highlighted_nodes:
                         text_color = highlighted_cross_part_color
                     draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color)
+    # --- Cross-Part Node ID Drawing --- <<< MODIFIED SECTION END >>>
 
 
     # --- Tooltip Positioning & Drawing ---

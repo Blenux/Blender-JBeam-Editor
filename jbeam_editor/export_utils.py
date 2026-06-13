@@ -29,6 +29,7 @@ import bpy
 import bmesh
 
 from . import constants
+# <<< MODIFIED: Import ASTNode from sjsonast directly >>>
 from .sjsonast import ASTNode, parse as sjsonast_parse, stringify_nodes as sjsonast_stringify_nodes
 from .utils import Metadata, is_number, to_c_float, to_float_str, get_float_precision
 from . import text_editor
@@ -54,6 +55,9 @@ class PartNodesActions:
         self.nodes_to_delete = set()
         self.nodes_to_rename = {}
         self.nodes_to_move = {}
+        # <<< ADDED: Dictionary for symmetrical additions >>>
+        # Format: {new_node_id: (mirrored_node_id, position_tuple)}
+        self.nodes_to_add_symmetrically = {}
 
 
 def print_ast_nodes(ast_nodes, start_idx, size, bidirectional, file=None):
@@ -164,6 +168,10 @@ def add_jbeam_setup(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 
 # Add jbeam nodes to end of JBeam section from list of nodes to add (this is called on node section list end character)
 def add_jbeam_nodes(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, nodes_to_add: dict):
+    # <<< This function now only handles nodes NOT added symmetrically >>>
+    if not nodes_to_add: # <<< ADDED: Early exit if nothing to add >>>
+        return jbeam_section_end_node_idx
+
     i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx)
 
     # <<< START ADDED COMMENT LOGIC >>>
@@ -231,6 +239,10 @@ def add_jbeam_nodes(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 
 # Add jbeam beams to end of JBeam section from list of beams to add (this is called on beam section list end character)
 def add_jbeam_beams(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, beams_to_add: list):
+    # <<< ADDED: Early exit if nothing to add >>>
+    if not beams_to_add:
+        return jbeam_section_end_node_idx
+
     i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx)
 
     # Check if "//ADDED BEAMS BY EDITOR" comment exists within the current beam section
@@ -293,6 +305,10 @@ def add_jbeam_beams(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 
 # Add jbeam triangles to end of JBeam section from list of triangles to add (this is called on triangle section list end character)
 def add_jbeam_triangles(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, tris_to_add: list):
+    # <<< ADDED: Early exit if nothing to add >>>
+    if not tris_to_add:
+        return jbeam_section_end_node_idx
+
     i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx)
 
     # Insert new tris at bottom of triangles section
@@ -317,7 +333,11 @@ def add_jbeam_triangles(ast_nodes: list, jbeam_section_start_node_idx: int, jbea
 
     # Add modified original last WSCS back to end of section
     if node_2_after_entry:
-        ast_nodes[i - 1].value += node_2_after_entry.value
+        # <<< MODIFIED: Check if last node is WSC before appending >>>
+        if i > 0 and ast_nodes[i - 1].data_type == 'wsc':
+            ast_nodes[i - 1].value += node_2_after_entry.value
+        elif node_after_entry: # Handle case where no tris were added but whitespace was modified
+            node_after_entry.value += node_2_after_entry.value
 
     #print_ast_nodes(ast_nodes, i, 10, True)
     return i
@@ -325,6 +345,10 @@ def add_jbeam_triangles(ast_nodes: list, jbeam_section_start_node_idx: int, jbea
 
 # Add jbeam quads to end of JBeam section from list of quads to add (this is called on triangle section list end character)
 def add_jbeam_quads(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, quads_to_add: list):
+    # <<< ADDED: Early exit if nothing to add >>>
+    if not quads_to_add:
+        return jbeam_section_end_node_idx
+
     i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx)
 
     # Insert new quads at bottom of quads section
@@ -351,7 +375,11 @@ def add_jbeam_quads(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 
     # Add modified original last WSCS back to end of section
     if node_2_after_entry:
-        ast_nodes[i - 1].value += node_2_after_entry.value
+        # <<< MODIFIED: Check if last node is WSC before appending >>>
+        if i > 0 and ast_nodes[i - 1].data_type == 'wsc':
+            ast_nodes[i - 1].value += node_2_after_entry.value
+        elif node_after_entry: # Handle case where no quads were added but whitespace was modified
+            node_after_entry.value += node_2_after_entry.value
 
     #print_ast_nodes(ast_nodes, i, 50, True)
     return i
@@ -563,6 +591,7 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
             # --- MIRROR CHECK ---
             mirrored_node_found = False
             base_name_from_mirror = None
+            mirrored_node_id = None # <<< ADDED: Store the ID of the mirrored node
             # <<< MODIFIED: Only perform mirror check if prefixes are enabled >>>
             if use_prefixes:
                 for other_node_id, other_node_data in init_nodes_data.items():
@@ -579,6 +608,7 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
                             abs(pos.z - other_init_pos[2]) < MIRROR_CHECK_TOLERANCE and
                             abs(pos.x + other_init_pos[0]) < MIRROR_CHECK_TOLERANCE):
                             mirrored_node_found = True
+                            mirrored_node_id = other_node_id # <<< STORE mirrored node ID
                             # <<< MODIFIED: Pass ui_props to helper >>>
                             base_name_from_mirror = get_base_node_name(other_node_id, ui_props)
                             break
@@ -628,13 +658,26 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
                 # <<< MODIFIED: Use potentially modified mirrored_name/uuid_name >>>
                 display_name_for_dialog = mirrored_name if mirrored_name else uuid_name
                 print(f"Overlap detected: New node '{display_name_for_dialog}' at {pos.to_tuple()} overlaps with '{collided_with_id}'. Queued for deletion confirmation.", file=sys.stderr)
-                uuid_name_bytes = bytes(uuid_name, 'utf-8')
+                # <<< MODIFIED: Always use UUID name for internal tracking if collision >>>
+                final_node_id_collision = uuid_name # This is the UUID-based name
+                final_node_id_bytes = bytes(final_node_id_collision, 'utf-8')
                 # <<< END MODIFICATION >>>
-                v[node_id_layer] = uuid_name_bytes
-                v[init_node_id_layer] = uuid_name_bytes # Update init ID as well
-                nodes_requiring_confirmation.append((uuid_name, display_name_for_dialog, pos.to_tuple()))
-                continue
-            else:
+                v[node_id_layer] = final_node_id_bytes
+                v[init_node_id_layer] = final_node_id_bytes # Update init ID as well
+                nodes_requiring_confirmation.append((final_node_id_collision, display_name_for_dialog, pos.to_tuple()))
+
+                # <<< *** MODIFIED PLACEMENT LOGIC *** >>>
+                part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
+                if mirrored_node_found and mirrored_node_id is not None:
+                    # If it HAS a mirror, add to symmetrical list even though it collided
+                    part_actions.nodes_to_add_symmetrically[final_node_id_collision] = (mirrored_node_id, pos.to_tuple())
+                else:
+                    # If it has NO mirror, add to normal list
+                    part_actions.nodes_to_add[final_node_id_collision] = pos.to_tuple()
+                # <<< *** END MODIFIED PLACEMENT LOGIC *** >>>
+
+                continue # Go to next vertex
+            else: # No collision
                 # <<< MODIFIED: Use potentially modified mirrored_name/uuid_name >>>
                 final_node_id_no_collision = mirrored_name if mirrored_name else uuid_name
                 final_node_id_bytes = bytes(final_node_id_no_collision, 'utf-8')
@@ -644,7 +687,14 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
                 init_node_id = final_node_id_no_collision
                 node_id = final_node_id_no_collision
                 part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
-                part_actions.nodes_to_add[node_id] = pos.to_tuple() # Store tuple
+
+                # <<< MODIFIED: Add to symmetrical list if mirror found, else normal list >>>
+                if mirrored_node_found and mirrored_node_id is not None:
+                    part_actions.nodes_to_add_symmetrically[node_id] = (mirrored_node_id, pos.to_tuple())
+                else:
+                    part_actions.nodes_to_add[node_id] = pos.to_tuple() # Store tuple
+                # <<< END MODIFIED >>>
+
                 rounded_pos = tuple(round(coord, 6) for coord in pos)
                 processed_new_node_positions.add(rounded_pos)
                 init_node_data_placeholder = {
@@ -658,17 +708,63 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
         # --- Handle existing nodes ---
         init_node_data = init_nodes_data.get(init_node_id)
         if init_node_data is None:
-            # This case should ideally not happen for non-TEMP nodes if logic is correct,
-            # but handle it as an addition just in case.
+            # This node wasn't in the original JBeam data.
+            # It could be a newly added node (TEMP_ handled above),
+            # OR it could be a node kept after a cancelled deletion confirmation.
+
             part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
-            part_actions.nodes_to_add[node_id] = pos.to_tuple() # Store tuple
-            # Calculate position considering expressions for SJSON update
+
+            # <<< *** NEW LOGIC for init_node_data is None *** >>>
+            # Perform mirror check based on current position to see if it *should* be symmetrical
+            # This covers the case where a node was kept after cancellation.
+            # We need to re-do the mirror check logic here, similar to TEMP_ nodes.
+
+            # Assume it's not mirrored initially
+            is_potentially_symmetrical = False
+            mirrored_node_id_for_kept_node = None
+
+            # <<< ADDED: Check if prefixing is enabled >>>
+            use_prefixes_for_kept = ui_props.use_node_naming_prefixes
+            # <<< END ADDED >>>
+
+            # <<< MODIFIED: Only perform mirror check if prefixes are enabled >>>
+            if use_prefixes_for_kept:
+                for other_node_id, other_node_data in init_nodes_data.items():
+                    # Skip if the other node is marked for deletion in this cycle
+                    is_marked_for_delete = False
+                    for actions in parts_actions.values():
+                        if other_node_id in actions.nodes_to_delete:
+                            is_marked_for_delete = True; break
+                    if is_marked_for_delete: continue
+
+                    other_init_pos = other_node_data.get('pos')
+                    if other_init_pos and len(other_init_pos) == 3:
+                        if (abs(pos.y - other_init_pos[1]) < MIRROR_CHECK_TOLERANCE and
+                            abs(pos.z - other_init_pos[2]) < MIRROR_CHECK_TOLERANCE and
+                            abs(pos.x + other_init_pos[0]) < MIRROR_CHECK_TOLERANCE):
+                            is_potentially_symmetrical = True
+                            mirrored_node_id_for_kept_node = other_node_id
+                            break
+            # <<< END MODIFIED >>>
+
+            if is_potentially_symmetrical and mirrored_node_id_for_kept_node is not None:
+                 # If it finds a mirror now, add it to the symmetrical list
+                 # Use the current node_id (which might be the UUID from the previous cycle)
+                 part_actions.nodes_to_add_symmetrically[node_id] = (mirrored_node_id_for_kept_node, pos.to_tuple())
+            else:
+                 # Otherwise, add to the normal list (original behavior for truly new/non-mirrored nodes)
+                 part_actions.nodes_to_add[node_id] = pos.to_tuple() # Store tuple
+
+            # Calculate position considering expressions for SJSON update (remains the same)
             init_node_data_placeholder = {
                 'posNoOffset': pos.to_tuple(), 'pos': pos.to_tuple(), Metadata: Metadata()
             }
             new_pos_tup_for_sjson = undo_node_move_offset_and_apply_translation_to_expr(init_node_data_placeholder, pos)
+            # Use init_node_id (UUID or original if somehow not TEMP) as the key here,
+            # as that's what the rest of the export process expects for blender_nodes mapping.
             blender_nodes[init_node_id] = {'curr_node_id': node_id, 'pos': new_pos_tup_for_sjson, 'partOrigin': node_part_origin}
-            continue
+            # <<< *** END NEW LOGIC *** >>>
+            continue # Go to next vertex
 
         # Check for movement
         init_pos = init_node_data['pos']
@@ -1082,7 +1178,7 @@ def set_key_visited(ast_nodes: list, keys_visited, stack: list, curr_key: str, n
 
 
 def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbeam_file_data_modified: dict, jbeam_part: str, affect_node_references: bool,
-                     nodes_to_add: dict, nodes_to_delete: set,
+                     nodes_to_add: dict, nodes_to_delete: set, nodes_to_add_symmetrically: dict, # <<< ADDED nodes_to_add_symmetrically
                      beams_to_add: set, beams_to_delete: set,
                      tris_to_add: set, tris_to_delete: set,
                      quads_to_add: set, quads_to_delete: set):
@@ -1112,6 +1208,9 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
     add_beams_flag = len(beams_to_add) > 0
     add_tris_flag = len(tris_to_add) > 0
     add_quads_flag = len(quads_to_add) > 0
+
+    # <<< Make a mutable copy for symmetrical nodes >>>
+    nodes_to_add_symmetrically_copy = nodes_to_add_symmetrically.copy()
 
     i = 0
     while i < len(ast_nodes):
@@ -1269,6 +1368,94 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
                             #     print('\n-------------After-------------')
                             #     print_ast_nodes(ast_nodes, i, 50, True, sys.stdout)
                             jbeam_def_deleted = True
+                        # <<< MODIFIED: Symmetrical Node Insertion Logic >>>
+                        elif not jbeam_def_deleted and nodes_to_add_symmetrically_copy:
+                            nodes_to_insert_here = []
+                            # Find all symmetrical nodes that mirror the current node
+                            for new_node_id, (mirrored_id, pos_tuple) in list(nodes_to_add_symmetrically_copy.items()): # Iterate over a copy
+                                if mirrored_id == jbeam_node_id:
+                                    nodes_to_insert_here.append((new_node_id, pos_tuple))
+                                    del nodes_to_add_symmetrically_copy[new_node_id] # Remove from dict
+
+                            if nodes_to_insert_here:
+                                insert_idx = jbeam_entry_end_node_idx + 1
+                                node_after_mirrored = ast_nodes[insert_idx] if insert_idx < len(ast_nodes) else None
+
+                                # Defaults
+                                comma_wsc_for_mirrored = ASTNode('wsc', ',')
+                                indent_wsc_for_new = ASTNode('wsc', NL_TWO_INDENT)
+                                trailing_wsc_after_insertion = ''
+
+                                # Check the node immediately following the mirrored node's ']'
+                                if node_after_mirrored and node_after_mirrored.data_type == 'wsc':
+                                    wsc_value = node_after_mirrored.value
+                                    nl_pos = wsc_value.find('\n')
+
+                                    if nl_pos != -1: # Found a newline
+                                        comma_wsc_for_mirrored.value = wsc_value[:nl_pos]
+                                        trailing_wsc_after_insertion = wsc_value[nl_pos:]
+                                    else: # No newline, just whitespace (e.g., ', ')
+                                        comma_wsc_for_mirrored.value = wsc_value
+
+                                    del ast_nodes[insert_idx]
+
+                                # Insert the comma for the mirrored node
+                                ast_nodes.insert(insert_idx, comma_wsc_for_mirrored)
+                                insert_idx += 1
+
+                                # --- Insert the new symmetrical nodes ---
+                                for k, (new_node_id, node_pos) in enumerate(nodes_to_insert_here):
+                                    # Insert the indentation
+                                    ast_nodes.insert(insert_idx, indent_wsc_for_new)
+                                    insert_idx += 1
+
+                                    # --- Copy and Modify Mirrored Node Entry ---
+                                    num_node_idx = 0 # Track which position number we are on
+                                    id_node_found = False
+                                    # Iterate through the original mirrored node's AST nodes
+                                    for node_idx in range(jbeam_entry_start_node_idx, jbeam_entry_end_node_idx + 1):
+                                        original_node = ast_nodes[node_idx]
+                                        # Create a copy of the node
+                                        copied_node = ASTNode(original_node.data_type, original_node.value,
+                                                              precision=original_node.precision,
+                                                              prefix_plus=original_node.prefix_plus,
+                                                              add_post_fix_dot=original_node.add_post_fix_dot)
+
+                                        # Modify the ID node
+                                        if copied_node.data_type == '"' and not id_node_found:
+                                            copied_node.value = new_node_id
+                                            id_node_found = True
+
+                                        # Modify the position number nodes
+                                        elif copied_node.data_type == 'number':
+                                            if num_node_idx < 3: # Only modify the first 3 numbers (X, Y, Z)
+                                                copied_node.value = node_pos[num_node_idx]
+                                                copied_node.precision = get_float_precision(node_pos[num_node_idx])
+                                                # Reset flags that might not apply to the new number
+                                                copied_node.prefix_plus = False
+                                                copied_node.add_post_fix_dot = False
+                                            num_node_idx += 1
+
+                                        # Insert the copied/modified node
+                                        ast_nodes.insert(insert_idx, copied_node)
+                                        insert_idx += 1
+                                    # --- End Copy and Modify ---
+
+                                    # Insert the comma for the newly added node
+                                    ast_nodes.insert(insert_idx, ASTNode('wsc', ','))
+                                    insert_idx += 1
+                                # --- End node insertion loop ---
+
+                                # Insert the original trailing whitespace
+                                if trailing_wsc_after_insertion:
+                                    if insert_idx > 0 and ast_nodes[insert_idx - 1].data_type == 'wsc' and ast_nodes[insert_idx - 1].value == ',':
+                                        ast_nodes[insert_idx - 1].value += trailing_wsc_after_insertion
+                                    else:
+                                        ast_nodes.insert(insert_idx, ASTNode('wsc', trailing_wsc_after_insertion))
+                                        insert_idx += 1
+
+                                i = insert_idx - 1 # Adjust the main loop index
+                        # <<< END MODIFIED Symmetrical Node Insertion Logic >>>
 
                 elif stack_head[0] == 'beams':
                     # If current jbeam beam is part of delete list, remove the beam definition
@@ -1312,7 +1499,7 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
                 assert jbeam_section_start_node_idx < jbeam_section_end_node_idx
 
                 if prev_stack_head_key == 'nodes' and nodes_to_add:
-                    # Add nodes to add to end of nodes section
+                    # Add nodes to add to end of nodes section (non-symmetrical ones)
                     # if constants.DEBUG:
                     #     print('Adding node...')
                     #     print('-------------Before-------------')
@@ -1440,6 +1627,8 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
              global_actions.nodes_to_delete.update(actions.nodes_to_delete)
              global_actions.nodes_to_rename.update(actions.nodes_to_rename)
              global_actions.nodes_to_move.update(actions.nodes_to_move)
+             # <<< ADDED: Merge symmetrical nodes >>>
+             global_actions.nodes_to_add_symmetrically.update(actions.nodes_to_add_symmetrically)
         blender_nodes.update(part_blender_nodes)
 
         # --- Check if confirmation was triggered ---
@@ -1449,8 +1638,12 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
         # --- Get actions specific to this part for storage ---
         part_actions: PartNodesActions | None = parts_nodes_actions.get(jbeam_part)
         nodes_to_add, nodes_to_delete, node_renames = {}, set(), {}
+        # <<< ADDED: Get symmetrical nodes >>>
+        nodes_to_add_symmetrically = {}
         if part_actions is not None:
             nodes_to_add, nodes_to_delete, node_renames = part_actions.nodes_to_add, part_actions.nodes_to_delete, part_actions.nodes_to_rename
+            # <<< ADDED: Get symmetrical nodes >>>
+            nodes_to_add_symmetrically = part_actions.nodes_to_add_symmetrically
 
         # Add "all parts" actions also (if applicable)
         part_nodes_actions_all: PartNodesActions | None = parts_nodes_actions.get(True)
@@ -1458,6 +1651,8 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
              nodes_to_add.update(part_nodes_actions_all.nodes_to_add)
              nodes_to_delete.update(part_nodes_actions_all.nodes_to_delete)
              node_renames.update(part_nodes_actions_all.nodes_to_rename)
+             # <<< ADDED: Merge symmetrical nodes from 'all parts' >>>
+             nodes_to_add_symmetrically.update(part_nodes_actions_all.nodes_to_add_symmetrically)
 
         # --- Get beam/face actions ---
         init_beams_data = data.get('beams')
@@ -1476,16 +1671,24 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
 
         # --- Store actions for this part ---
         all_parts_actions_in_file[jbeam_part] = {
-            'nodes_to_add': nodes_to_add.copy(), 'nodes_to_delete': nodes_to_delete.copy(),
-            'beams_to_add': beams_to_add.copy(), 'beams_to_delete': beams_to_delete.copy(),
-            'tris_to_add': tris_to_add.copy(), 'tris_to_delete': tris_to_delete.copy(),
-            'quads_to_add': quads_to_add.copy(), 'quads_to_delete': quads_to_delete.copy(),
+            'nodes_to_add': nodes_to_add.copy(),
+            'nodes_to_delete': nodes_to_delete.copy(),
+            # <<< ADDED: Store symmetrical nodes >>>
+            'nodes_to_add_symmetrically': nodes_to_add_symmetrically.copy(),
+            'beams_to_add': beams_to_add.copy(),
+            'beams_to_delete': beams_to_delete.copy(),
+            'tris_to_add': tris_to_add.copy(),
+            'tris_to_delete': tris_to_delete.copy(),
+            'quads_to_add': quads_to_add.copy(),
+            'quads_to_delete': quads_to_delete.copy(),
         }
 
         # --- Calculate reimport_needed ---
         if not reimport_needed:
             reimport_needed = (
                 len(nodes_to_add) > 0 or len(nodes_to_delete) > 0 or len(node_renames) > 0 or
+                # <<< ADDED: Check symmetrical nodes for reimport need >>>
+                len(nodes_to_add_symmetrically) > 0 or
                 len(beams_to_add) > 0 or len(beams_to_delete) > 0 or
                 len(tris_to_add) > 0 or len(tris_to_delete) > 0 or len(tris_flipped) > 0 or
                 len(quads_to_add) > 0 or len(quads_to_delete) > 0 or len(quads_flipped) > 0
@@ -1532,6 +1735,8 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
         # Call update_ast_nodes with the stored actions
         update_ast_nodes(ast_nodes, jbeam_file_data, jbeam_file_data_modified, jbeam_part, affect_node_references,
                          part_actions['nodes_to_add'], part_actions['nodes_to_delete'],
+                         # <<< ADDED: Pass symmetrical nodes >>>
+                         part_actions['nodes_to_add_symmetrically'],
                          part_actions['beams_to_add'], part_actions['beams_to_delete'],
                          part_actions['tris_to_add'], part_actions['tris_to_delete'],
                          part_actions['quads_to_add'], part_actions['quads_to_delete'])

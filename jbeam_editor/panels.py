@@ -32,9 +32,8 @@ from .operators import ( # Import operators used in panels
     JBEAM_EDITOR_OT_scroll_to_definition,
     JBEAM_EDITOR_OT_find_node,
     JBEAM_EDITOR_OT_batch_node_renaming,
-    JBEAM_EDITOR_OT_open_text_editor_split, # <<< ADD THIS IMPORT
+    JBEAM_EDITOR_OT_open_text_editor_split,
 )
-# <<< ADDED: Import resolve_jbeam_variable_value >>>
 from .drawing import resolve_jbeam_variable_value
 
 class JBEAM_EDITOR_PT_transform_panel_ext(bpy.types.Panel):
@@ -153,9 +152,8 @@ class JBEAM_EDITOR_PT_find_node(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'JBeam'
-    # <<< MODIFIED LINE >>>
     bl_label = 'Find Node by ID (3D Viewport)'
-    bl_icon = 'VIEWZOOM' # <<< ADDED ICON >>>
+    bl_icon = 'VIEWZOOM'
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
@@ -189,9 +187,8 @@ class JBEAM_EDITOR_PT_jbeam_properties_panel(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'JBeam'
-    # <<< MODIFIED LINE >>>
     bl_label = 'Properties'
-    bl_icon = 'PROPERTIES' # <<< ADDED ICON >>>
+    bl_icon = 'PROPERTIES'
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
@@ -230,7 +227,6 @@ class JBEAM_EDITOR_PT_jbeam_properties_panel(bpy.types.Panel):
                     for k in sorted(node.keys(), key=lambda x: str(x)):
                         if k == 'pos' or k == Metadata or k == 'posNoOffset': continue
                         val = node[k]
-                        # <<< MODIFIED: Resolve/Evaluate and display >>>
                         # Pass the global cache explicitly
                         resolved_val = resolve_jbeam_variable_value(val, jb_globals.jbeam_variables_cache)
                         display_val = repr(resolved_val)
@@ -240,7 +236,6 @@ class JBEAM_EDITOR_PT_jbeam_properties_panel(bpy.types.Panel):
                                 display_val += f" (from {val})" # Show original expression
                             else:
                                 display_val += " (unresolved/failed)" # Indicate if evaluation failed
-                        # <<< END MODIFIED >>>
                         col.row().label(text=f'- {k}: {display_val}')
                 else: col.label(text=f"Node '{node_id}' not found in JBeam data.")
             else: col.label(text="'nodes' section not found.")
@@ -270,7 +265,6 @@ class JBEAM_EDITOR_PT_jbeam_properties_panel(bpy.types.Panel):
                     for k in sorted(beam.keys(), key=lambda x: str(x)):
                         if k in ('id1:', 'id2:', 'partOrigin') or k == Metadata: continue
                         val = beam[k]
-                        # <<< MODIFIED: Resolve/Evaluate and display >>>
                         # Pass the global cache explicitly
                         resolved_val = resolve_jbeam_variable_value(val, jb_globals.jbeam_variables_cache)
                         display_val = repr(resolved_val)
@@ -279,12 +273,10 @@ class JBEAM_EDITOR_PT_jbeam_properties_panel(bpy.types.Panel):
                                 display_val += f" (from {val})"
                             else:
                                 display_val += " (unresolved/failed)"
-                        # <<< END MODIFIED >>>
                         col.row().label(text=f'- {k}: {display_val}')
                 else: col.label(text=f"Beam index {beam_idx_in_part} not found in part '{part_origin}'.")
             else: col.label(text="'beams' section not found.")
 
-        # ... (face property display remains the same, less likely to use expressions) ...
         elif len(jb_globals.selected_tris_quads) == 1:
             # ... (face index finding logic remains the same) ...
             face_data = jb_globals.selected_tris_quads[0]; face_index = face_data[0]; face_idx_in_part = face_data[1]
@@ -310,13 +302,11 @@ class JBEAM_EDITOR_PT_jbeam_properties_panel(bpy.types.Panel):
                         if k.startswith('id') and k.endswith(':'): continue
                         if k == 'partOrigin': continue
                         val = face[k]
-                        # <<< MODIFIED: Resolve/Evaluate and display (though less common for faces) >>>
                         resolved_val = resolve_jbeam_variable_value(val, jb_globals.jbeam_variables_cache)
                         display_val = repr(resolved_val)
                         if isinstance(val, str) and val.startswith('=$'):
                             if resolved_val != val: display_val += f" (from {val})"
                             else: display_val += " (unresolved/failed)"
-                        # <<< END MODIFIED >>>
                         col.row().label(text=f'- {k}: {display_val}')
                 else: col.label(text=f"{face_type.capitalize()[:-1]} index {face_idx_in_part} not found in part '{part_origin}'.")
             elif face_type: col.label(text=f"'{face_type}' section not found.")
@@ -330,9 +320,8 @@ class JBEAM_EDITOR_PT_batch_node_renaming(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'JBeam'
-    # <<< MODIFIED LINE >>>
     bl_label = 'Batch Node Renaming'
-    bl_icon = 'FILE_FONT' # <<< ADDED ICON >>>
+    bl_icon = 'FILE_FONT'
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
@@ -365,7 +354,7 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = 'JBeam'
     bl_label = 'Settings'
-    bl_icon = 'SETTINGS' # <<< ADDED ICON >>>
+    bl_icon = 'SETTINGS'
 
     @classmethod
     def poll(cls, context):
@@ -373,19 +362,17 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
         return obj and obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None
 
     def draw(self, context):
-        # ... (existing setup code: obj, obj_data, editing_enabled, scene, ui_props, layout) ...
         obj = context.active_object
         if not obj: return
         obj_data = obj.data
         if not isinstance(obj_data, bpy.types.Mesh): return
-        editing_enabled = obj_data.get(constants.MESH_EDITING_ENABLED, False)
+        # editing_enabled = obj_data.get(constants.MESH_EDITING_ENABLED, False) # Not strictly needed for settings display
         scene = context.scene
         ui_props = scene.ui_properties
         layout = self.layout
 
         if obj_data.get(constants.MESH_JBEAM_PART) is not None:
-            # --- Node Creation Box ---
-            # ... (node naming box remains the same) ...
+            # --- Node Creation Box (Existing Structure) ---
             node_naming_box = layout.box()
             row = node_naming_box.row(align=True)
             row.prop(ui_props, "show_new_node_naming_panel", icon="TRIA_DOWN" if ui_props.show_new_node_naming_panel else "TRIA_RIGHT", icon_only=True, emboss=False)
@@ -406,17 +393,158 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
                 row = node_naming_col.row(); row.enabled = ui_props.use_node_naming_prefixes; row.alignment = 'CENTER'; row.label(text="Position:")
                 row = node_naming_col.row(align=True); row.enabled = ui_props.use_node_naming_prefixes; row.prop(ui_props, 'new_node_prefix_position', expand=True)
 
-            # --- Affect Node References Box ---
+            # --- Node Visualization Box (New Structure) ---
+            node_vis_box = layout.box()
+            row = node_vis_box.row(align=True)
+            # Use the property added in properties.py
+            row.prop(ui_props, "show_node_visualization_settings", icon="TRIA_DOWN" if ui_props.show_node_visualization_settings else "TRIA_RIGHT", icon_only=True, emboss=False)
+            row.label(text="Node Visualization", icon='OUTLINER_OB_POINTCLOUD')
+            if ui_props.show_node_visualization_settings:
+                # Content previously in JBEAM_EDITOR_PT_node_visualization.draw
+                node_vis_col = node_vis_box.column(align=True) # Content column
+
+                node_vis_col.prop(ui_props, 'toggle_node_ids_text', text="Show Node IDs Text")
+                row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_font_size', text="Font Size")
+                row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_outline_size', text="Outline Size")
+                row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_text_offset', text="Text Offset")
+
+                node_vis_col.prop(ui_props, 'toggle_cross_part_node_ids_vis')
+
+                # --- Dynamic Node Coloring Section ---
+                node_vis_col.separator()
+                node_vis_col.prop(ui_props, 'use_dynamic_node_coloring')
+                dyn_box = node_vis_col.box()
+                dyn_box.enabled = ui_props.use_dynamic_node_coloring
+                dyn_col = dyn_box.column(align=True)
+                dyn_col.label(text="Parameter: nodeWeight")
+                dyn_col.prop(ui_props, 'use_auto_node_thresholds', text="Auto Thresholds")
+                row_low = dyn_col.row(); row_low.enabled = not ui_props.use_auto_node_thresholds
+                row_low.prop(ui_props, 'dynamic_node_color_threshold_low', text="Low Threshold")
+                row_high = dyn_col.row(); row_high.enabled = not ui_props.use_auto_node_thresholds
+                row_high.prop(ui_props, 'dynamic_node_color_threshold_high', text="High Threshold")
+                # --- End Dynamic Node Coloring Section ---
+
+            # --- 3D Lines Box (New Structure) ---
+            line_vis_box = layout.box()
+            row = line_vis_box.row(align=True)
+            # Use the property added in properties.py
+            row.prop(ui_props, "show_line_visualization_settings", icon="TRIA_DOWN" if ui_props.show_line_visualization_settings else "TRIA_RIGHT", icon_only=True, emboss=False)
+            row.label(text="3D Lines", icon='MOD_WIREFRAME')
+            if ui_props.show_line_visualization_settings:
+                # Content previously in JBEAM_EDITOR_PT_line_visualization.draw
+                line_vis_col = line_vis_box.column(align=True) # Content column
+
+                line_vis_col.prop(ui_props, 'toggle_master_vis')
+                line_vis_col.separator()
+
+                # --- Beam Visualization (Collapsible Sub-Section) ---
+                # This sub-section keeps its own toggle logic as it's nested
+                beam_vis_box = line_vis_col.box()
+                row = beam_vis_box.row(align=True)
+                row.prop(ui_props, "show_beam_visualization_panel", icon="TRIA_DOWN" if ui_props.show_beam_visualization_panel else "TRIA_RIGHT", icon_only=True, emboss=False)
+                row.label(text="Beam Visualization", icon='MOD_BEVEL')
+
+                if ui_props.show_beam_visualization_panel:
+                    beam_vis_col = beam_vis_box.column(align=True)
+
+                    # Dynamic Coloring Section
+                    beam_vis_col.prop(ui_props, 'use_dynamic_beam_coloring')
+                    dyn_box = beam_vis_col.box()
+                    dyn_box.enabled = ui_props.use_dynamic_beam_coloring
+                    dyn_col = dyn_box.column(align=True)
+                    dyn_col.prop(ui_props, 'dynamic_coloring_parameter', text="Parameter")
+                    dyn_col.prop(ui_props, 'use_auto_thresholds', text="Auto Thresholds")
+                    row_low = dyn_col.row(); row_low.enabled = not ui_props.use_auto_thresholds
+                    row_low.prop(ui_props, 'dynamic_color_threshold_low', text="Low Threshold")
+                    row_high = dyn_col.row(); row_high.enabled = not ui_props.use_auto_thresholds
+                    row_high.prop(ui_props, 'dynamic_color_threshold_high', text="High Threshold")
+                    beam_vis_col.separator()
+
+                    # Individual Beam Type Settings
+                    is_dynamic = ui_props.use_dynamic_beam_coloring
+                    # Normal Beams
+                    beam_vis_col.prop(ui_props, 'toggle_beams_vis')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'beam_color')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic # <<< ADDED: Enable/disable width based on dynamic coloring
+                    row.prop(ui_props, 'beam_width')
+                    beam_vis_col.separator()
+                    # Anisotropic Beams
+                    beam_vis_col.prop(ui_props, 'toggle_anisotropic_beams_vis')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'anisotropic_beam_color')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'anisotropic_beam_width')
+                    beam_vis_col.separator()
+                    # Support Beams
+                    beam_vis_col.prop(ui_props, 'toggle_support_beams_vis')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'support_beam_color')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'support_beam_width')
+                    beam_vis_col.separator()
+                    # Hydro Beams
+                    beam_vis_col.prop(ui_props, 'toggle_hydro_beams_vis')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'hydro_beam_color')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'hydro_beam_width')
+                    beam_vis_col.separator()
+                    # Bounded Beams
+                    beam_vis_col.prop(ui_props, 'toggle_bounded_beams_vis')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'bounded_beam_color')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'bounded_beam_width')
+                    beam_vis_col.separator()
+                    # LBeams
+                    beam_vis_col.prop(ui_props, 'toggle_lbeam_beams_vis')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'lbeam_beam_color')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'lbeam_beam_width')
+                    beam_vis_col.separator()
+                    # Pressured Beams
+                    beam_vis_col.prop(ui_props, 'toggle_pressured_beams_vis')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'pressured_beam_color')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'pressured_beam_width')
+                    beam_vis_col.separator()
+                    # Cross-Part Beams
+                    beam_vis_col.prop(ui_props, 'toggle_cross_part_beams_vis')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'cross_part_beam_color')
+                    row = beam_vis_col.row(); row.enabled = not is_dynamic
+                    row.prop(ui_props, 'cross_part_beam_width')
+                    # --- End Beam Type Settings ---
+
+                # --- Torsionbar, Rail Visualization (Remain outside Beam Vis sub-section) ---
+                line_vis_col.separator()
+                # Torsionbars
+                line_vis_col.prop(ui_props, 'toggle_torsionbars_vis')
+                row = line_vis_col.row(); row.enabled = ui_props.toggle_torsionbars_vis
+                row.prop(ui_props, 'torsionbar_color')
+                row = line_vis_col.row(); row.enabled = ui_props.toggle_torsionbars_vis
+                row.prop(ui_props, 'torsionbar_mid_color')
+                row = line_vis_col.row(); row.enabled = ui_props.toggle_torsionbars_vis # <<< ADDED: Enable/disable width based on toggle
+                row.prop(ui_props, 'torsionbar_width')
+                line_vis_col.separator()
+                # Rails
+                line_vis_col.prop(ui_props, 'toggle_rails_vis')
+                row = line_vis_col.row(); row.enabled = ui_props.toggle_rails_vis
+                row.prop(ui_props, 'rail_color')
+                row = line_vis_col.row(); row.enabled = ui_props.toggle_rails_vis # <<< ADDED: Enable/disable width based on toggle
+                row.prop(ui_props, 'rail_width')
+                # --- End Torsionbar/Rail ---
+
+            # --- Affect Node References Box (Existing) ---
             box = layout.box()
             col = box.column(align=True)
             col.prop(ui_props, 'affect_node_references', text="Affect Node References")
 
-            # --- Main Settings Box ---
-            box = layout.box()
-            col = box.column(align=True)
-
-            # --- Tooltips Section ---
-            tooltips_box = col.box()
+            # --- Tooltips Section (Existing) ---
+            tooltips_box = layout.box() # <<< MOVED outside the main settings box for grouping
             row = tooltips_box.row(align=True)
             row.prop(ui_props, "show_tooltips_panel", icon="TRIA_DOWN" if ui_props.show_tooltips_panel else "TRIA_RIGHT", icon_only=True, emboss=False)
             row.label(text="Tooltips", icon='INFO')
@@ -432,172 +560,14 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
                 row = tooltips_col.row(align=True); row.enabled = ui_props.toggle_params_tooltip
                 split = row.split(factor=0.5, align=True); split.prop(ui_props, 'params_tooltip_color', text="Parameter"); split.prop(ui_props, 'params_value_tooltip_color', text="Value")
 
-            # --- Other General Settings ---
-            col.separator()
+            # --- Other General Settings (Existing) ---
+            other_box = layout.box() # <<< Grouped remaining settings
+            col = other_box.column(align=True)
             col.prop(ui_props, 'highlight_element_on_click', text="3D Highlight from Text")
             row = col.row(); row.enabled = ui_props.highlight_element_on_click
             row.prop(ui_props, 'highlight_thickness_multiplier', text="Highlight Thickness")
 
-            # Checkbox for selected beam outline
             col.separator()
             col.prop(ui_props, 'show_selected_beam_outline', text="Show Selected Beam Outline")
             row = col.row(); row.enabled = ui_props.show_selected_beam_outline
             row.prop(ui_props, 'selected_beam_thickness_multiplier', text="Selected Beam Multiplier")
-
-            # --- Node Visualization --- <<< MODIFIED SECTION START >>>
-            col.separator()
-            node_vis_box = col.box() # Put node settings in their own box
-            row = node_vis_box.row(align=True)
-            # <<< ADDED: Toggle for the whole node vis box >>>
-            row.prop(ui_props, "show_node_visualization_panel", icon="TRIA_DOWN" if ui_props.show_node_visualization_panel else "TRIA_RIGHT", icon_only=True, emboss=False)
-            row.label(text="Node Visualization", icon='OUTLINER_OB_POINTCLOUD') # Changed icon
-
-            if ui_props.show_node_visualization_panel: # Check the new toggle
-                node_vis_col = node_vis_box.column(align=True) # Use a new column inside the box
-
-                node_vis_col.prop(ui_props, 'toggle_node_ids_text', text="Show Node IDs Text")
-                row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_font_size', text="Font Size")
-                row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_outline_size', text="Outline Size")
-                row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_text_offset', text="Text Offset")
-
-                # --- Dynamic Node Coloring Section ---
-                node_vis_col.separator()
-                node_vis_col.prop(ui_props, 'use_dynamic_node_coloring')
-                dyn_box = node_vis_col.box()
-                # Enable box only if dynamic coloring is on
-                dyn_box.enabled = ui_props.use_dynamic_node_coloring
-                dyn_col = dyn_box.column(align=True)
-                # Parameter is fixed to nodeWeight, so no selection needed
-                dyn_col.label(text="Parameter: nodeWeight")
-                dyn_col.prop(ui_props, 'use_auto_node_thresholds', text="Auto Thresholds")
-                # Disable manual thresholds if auto is on
-                row_low = dyn_col.row(); row_low.enabled = not ui_props.use_auto_node_thresholds
-                row_low.prop(ui_props, 'dynamic_node_color_threshold_low', text="Low Threshold")
-                row_high = dyn_col.row(); row_high.enabled = not ui_props.use_auto_node_thresholds
-                row_high.prop(ui_props, 'dynamic_node_color_threshold_high', text="High Threshold")
-                # --- End Dynamic Node Coloring Section ---
-            # --- Node Visualization --- <<< MODIFIED SECTION END >>>
-
-            # --- 3D Lines Panel ---
-            col.separator()
-            line_vis_box = col.box()
-            row = line_vis_box.row(align=True)
-            row.prop(ui_props, "show_line_visualizations_panel", icon="TRIA_DOWN" if ui_props.show_line_visualizations_panel else "TRIA_RIGHT", icon_only=True, emboss=False)
-            row.label(text="3D Lines", icon='MOD_WIREFRAME')
-
-            if ui_props.show_line_visualizations_panel:
-                line_vis_col = line_vis_box.column(align=True)
-                line_vis_col.prop(ui_props, 'toggle_master_vis')
-                line_vis_col.separator()
-
-                # --- Beam Visualization (Collapsible) ---
-                beam_vis_box = line_vis_col.box()
-                row = beam_vis_box.row(align=True)
-                row.prop(ui_props, "show_beam_visualization_panel", icon="TRIA_DOWN" if ui_props.show_beam_visualization_panel else "TRIA_RIGHT", icon_only=True, emboss=False)
-                row.label(text="Beam Visualization", icon='MOD_BEVEL')
-
-                if ui_props.show_beam_visualization_panel:
-                    beam_vis_col = beam_vis_box.column(align=True)
-
-                    # <<< MODIFIED: Dynamic Coloring Section >>>
-                    beam_vis_col.prop(ui_props, 'use_dynamic_beam_coloring')
-                    dyn_box = beam_vis_col.box()
-                    # Enable box only if dynamic coloring is on
-                    dyn_box.enabled = ui_props.use_dynamic_beam_coloring
-                    dyn_col = dyn_box.column(align=True)
-                    dyn_col.prop(ui_props, 'dynamic_coloring_parameter', text="Parameter")
-                    dyn_col.prop(ui_props, 'use_auto_thresholds', text="Auto Thresholds")
-                    # Disable manual thresholds if auto is on
-                    row_low = dyn_col.row(); row_low.enabled = not ui_props.use_auto_thresholds
-                    row_low.prop(ui_props, 'dynamic_color_threshold_low', text="Low Threshold")
-                    row_high = dyn_col.row(); row_high.enabled = not ui_props.use_auto_thresholds
-                    row_high.prop(ui_props, 'dynamic_color_threshold_high', text="High Threshold")
-                    beam_vis_col.separator()
-                    # <<< END MODIFIED >>>
-
-                    # --- Individual Beam Type Settings ---
-                    # <<< MODIFIED: Disable color/width props when dynamic coloring is ON >>>
-                    is_dynamic = ui_props.use_dynamic_beam_coloring
-
-                    # Normal Beams
-                    beam_vis_col.prop(ui_props, 'toggle_beams_vis')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # Disable color if dynamic
-                    row.prop(ui_props, 'beam_color')
-                    # Keep main beam_width enabled, it controls dynamic width
-                    beam_vis_col.prop(ui_props, 'beam_width')
-                    beam_vis_col.separator()
-
-                    # Anisotropic Beams
-                    beam_vis_col.prop(ui_props, 'toggle_anisotropic_beams_vis')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # Disable color if dynamic
-                    row.prop(ui_props, 'anisotropic_beam_color')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # Disable width if dynamic
-                    row.prop(ui_props, 'anisotropic_beam_width')
-                    beam_vis_col.separator()
-
-                    # Support Beams
-                    beam_vis_col.prop(ui_props, 'toggle_support_beams_vis')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # Disable color if dynamic
-                    row.prop(ui_props, 'support_beam_color')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # Disable width if dynamic
-                    row.prop(ui_props, 'support_beam_width')
-                    beam_vis_col.separator()
-
-                    # Hydro Beams
-                    beam_vis_col.prop(ui_props, 'toggle_hydro_beams_vis')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # Disable color if dynamic
-                    row.prop(ui_props, 'hydro_beam_color')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # Disable width if dynamic
-                    row.prop(ui_props, 'hydro_beam_width')
-                    beam_vis_col.separator()
-
-                    # Bounded Beams
-                    beam_vis_col.prop(ui_props, 'toggle_bounded_beams_vis')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # Disable color if dynamic
-                    row.prop(ui_props, 'bounded_beam_color')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # Disable width if dynamic
-                    row.prop(ui_props, 'bounded_beam_width')
-                    beam_vis_col.separator()
-
-                    # LBeams
-                    beam_vis_col.prop(ui_props, 'toggle_lbeam_beams_vis')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # Disable color if dynamic
-                    row.prop(ui_props, 'lbeam_beam_color')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # Disable width if dynamic
-                    row.prop(ui_props, 'lbeam_beam_width')
-                    beam_vis_col.separator()
-
-                    # Pressured Beams
-                    beam_vis_col.prop(ui_props, 'toggle_pressured_beams_vis')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # Disable color if dynamic
-                    row.prop(ui_props, 'pressured_beam_color')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # Disable width if dynamic
-                    row.prop(ui_props, 'pressured_beam_width')
-                    beam_vis_col.separator() # <<< ADDED separator before cross-part >>>
-                    # <<< END MODIFIED >>>
-
-                    # --- Cross-Part Beams (MOVED HERE) ---
-                    # <<< MODIFIED: Disable Cross-Part color/width when dynamic coloring is ON >>>
-                    is_dynamic = ui_props.use_dynamic_beam_coloring
-                    beam_vis_col.prop(ui_props, 'toggle_cross_part_beams_vis')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # Disable color if dynamic
-                    row.prop(ui_props, 'cross_part_beam_color')
-                    row = beam_vis_col.row(); row.enabled = not is_dynamic # Disable width if dynamic
-                    row.prop(ui_props, 'cross_part_beam_width')
-                    # <<< END MODIFIED >>>
-
-                # --- Torsionbar, Rail Visualization (Remain outside Beam Vis) ---
-                line_vis_col.separator()
-                # Torsionbars (remain separate)
-                line_vis_col.prop(ui_props, 'toggle_torsionbars_vis')
-                row = line_vis_col.row(); row.enabled = ui_props.toggle_torsionbars_vis
-                row.prop(ui_props, 'torsionbar_color')
-                row = line_vis_col.row(); row.enabled = ui_props.toggle_torsionbars_vis
-                row.prop(ui_props, 'torsionbar_mid_color')
-                line_vis_col.prop(ui_props, 'torsionbar_width')
-                line_vis_col.separator()
-                # Rails (remain separate)
-                line_vis_col.prop(ui_props, 'toggle_rails_vis')
-                row = line_vis_col.row(); row.enabled = ui_props.toggle_rails_vis
-                row.prop(ui_props, 'rail_color')
-                line_vis_col.prop(ui_props, 'rail_width')

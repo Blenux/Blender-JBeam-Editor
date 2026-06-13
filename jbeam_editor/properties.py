@@ -31,7 +31,12 @@ from . import drawing
 # Import the update function from drawing.py after it's defined there
 # This avoids circular import if drawing needs properties
 # <<< MODIFIED: Removed _update_dynamic_beam_coloring from this import >>>
-from .drawing import _update_toggle_cross_part_beams_vis, veh_render_dirty
+# <<< MODIFIED: Added _tag_redraw_3d_views >>>
+from .drawing import (
+    _update_toggle_cross_part_beams_vis,
+    veh_render_dirty,
+    _tag_redraw_3d_views, # <<< ADDED
+)
 
 # <<< ADDED: Import the helper function >>>
 from .operators import _find_and_select_node_id_logic
@@ -178,6 +183,12 @@ def _update_width_property(self, context):
         setattr(drawing, '_highlight_dirty', True)
 # <<< END ADDED >>>
 
+# <<< ADDED: Update function for cross-part node ID visibility >>>
+def _update_cross_part_node_ids_vis(self, context):
+    """Tags 3D views for redraw when cross-part node ID visibility changes."""
+    drawing._tag_redraw_3d_views(context)
+# <<< END ADDED >>>
+
 
 class UIProperties(bpy.types.PropertyGroup):
     input_node_id: bpy.props.StringProperty(
@@ -208,13 +219,13 @@ class UIProperties(bpy.types.PropertyGroup):
         min=1
     )
 
-    # <<< ADDED: Panel Toggle for Node Visualization >>>
-    show_node_visualization_panel: bpy.props.BoolProperty(
-        name="Node Visualization",
+    # <<< RENAMED/ENSURED: Panel Toggle for Node Visualization >>>
+    show_node_visualization_settings: bpy.props.BoolProperty(
+        name="Node Visualization Settings",
         description="Expand to see node visualization options",
         default=False, # Start collapsed
     )
-    # <<< END ADDED >>>
+    # <<< END RENAMED/ENSURED >>>
 
     # --- Node Visualization Properties (Existing and New) ---
     toggle_node_ids_text: bpy.props.BoolProperty(
@@ -286,6 +297,15 @@ class UIProperties(bpy.types.PropertyGroup):
         # Allow higher max for node weights
         max=10000.0,
         update=_update_dynamic_node_coloring # Ensure this update function is assigned
+    )
+    # <<< END ADDED >>>
+
+    # <<< ADDED: Cross-Part Node ID Visibility Toggle >>>
+    toggle_cross_part_node_ids_vis: bpy.props.BoolProperty(
+        name="Show Cross-Part Node IDs",
+        description="Toggles the visibility of node IDs defined in other parts but referenced by the active part",
+        default=True,
+        update=_update_cross_part_node_ids_vis # Use the new update function
     )
     # <<< END ADDED >>>
 
@@ -361,13 +381,13 @@ class UIProperties(bpy.types.PropertyGroup):
         default=False
     )
 
-    # <<< ADDED: New Panel Toggle >>>
-    show_line_visualizations_panel: bpy.props.BoolProperty(
-        name="Line Visualizations",
+    # <<< RENAMED/ENSURED: Panel Toggle for Line Visualization >>>
+    show_line_visualization_settings: bpy.props.BoolProperty(
+        name="Line Visualization Settings",
         description="Expand to see visualization options for beams, rails, torsionbars, etc.",
         default=False, # Start collapsed
     )
-    # <<< END ADDED >>>
+    # <<< END RENAMED/ENSURED >>>
 
     # --- Master Visualization Toggle --- <<< MOVED HERE (Inside UIProperties, but will be drawn in the new panel) >>>
     toggle_master_vis: bpy.props.BoolProperty(

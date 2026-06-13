@@ -36,10 +36,8 @@ from .operators import (
     JBEAM_EDITOR_OT_scroll_to_definition,
     JBEAM_EDITOR_OT_open_text_editor_split,
     JBEAM_EDITOR_OT_confirm_node_deletion,
-    # <<< ADD NEW OPERATORS >>>
     JBEAM_EDITOR_OT_warn_native_undo,
     JBEAM_EDITOR_OT_warn_native_redo,
-    # <<< END ADD >>>
 )
 from .panels import (
     JBEAM_EDITOR_PT_transform_panel_ext,
@@ -48,14 +46,18 @@ from .panels import (
     JBEAM_EDITOR_PT_jbeam_properties_panel,
     JBEAM_EDITOR_PT_batch_node_renaming,
     JBEAM_EDITOR_PT_jbeam_settings,
+    # <<< REMOVE PANEL IMPORTS >>>
+    # JBEAM_EDITOR_PT_node_visualization,
+    # JBEAM_EDITOR_PT_line_visualization,
+    # <<< END REMOVE >>>
 )
 from .handlers import (
     depsgraph_update_post_handler,
     check_files_for_changes_timer,
     poll_active_operators_timer,
     on_post_register_handler,
-    draw_callback_text_editor, # <<< Import the new handler
-    load_post_handler, # <<< Import the new handler
+    draw_callback_text_editor,
+    load_post_handler,
     check_file_interval,
     poll_active_ops_interval,
 )
@@ -78,16 +80,18 @@ classes = (
     JBEAM_EDITOR_OT_scroll_to_definition,
     JBEAM_EDITOR_OT_open_text_editor_split,
     JBEAM_EDITOR_OT_confirm_node_deletion,
-    # <<< ADD NEW OPERATORS TO LIST >>>
     JBEAM_EDITOR_OT_warn_native_undo,
     JBEAM_EDITOR_OT_warn_native_redo,
-    # <<< END ADD >>>
     JBEAM_EDITOR_PT_transform_panel_ext,
     JBEAM_EDITOR_PT_jbeam_panel,
     JBEAM_EDITOR_PT_find_node,
     JBEAM_EDITOR_PT_jbeam_properties_panel,
     JBEAM_EDITOR_PT_batch_node_renaming,
     JBEAM_EDITOR_PT_jbeam_settings,
+    # <<< REMOVE PANELS FROM LIST >>>
+    # JBEAM_EDITOR_PT_node_visualization,
+    # JBEAM_EDITOR_PT_line_visualization,
+    # <<< END REMOVE >>>
     import_jbeam.JBEAM_EDITOR_OT_import_jbeam,
     import_jbeam.JBEAM_EDITOR_OT_choose_jbeam,
     export_jbeam.JBEAM_EDITOR_OT_export_jbeam,
@@ -101,7 +105,7 @@ custom_keymaps = []
 # Draw handle storage (managed here)
 draw_handle = None
 draw_handle2 = None
-text_draw_handle = None # <<< Add handle for text editor
+text_draw_handle = None
 
 # Menu functions
 def menu_func_import(self, context):
@@ -123,22 +127,15 @@ def init_keymaps():
     keymaps_added = []
 
     # --- Addon-specific Undo/Redo ---
-    # <<< Use this existing Window keymap for native interception too >>>
     km_window = kc.keymaps.new(name="Window", space_type='EMPTY')
     kmi_undo = km_window.keymap_items.new("jbeam_editor.undo", 'LEFT_BRACKET', 'PRESS', ctrl=True)
     kmi_redo = km_window.keymap_items.new("jbeam_editor.redo", 'RIGHT_BRACKET', 'PRESS', ctrl=True)
     keymaps_added.extend([(km_window, kmi_undo), (km_window, kmi_redo)])
 
     # <<< MODIFIED: Add the native interceptors to the 'Window' keymap >>>
-    # Map Ctrl+Z to our warning operator in the Window context
     kmi_native_undo = km_window.keymap_items.new(JBEAM_EDITOR_OT_warn_native_undo.bl_idname, 'Z', 'PRESS', ctrl=True)
-    # Map Ctrl+Shift+Z to our warning operator in the Window context
     kmi_native_redo = km_window.keymap_items.new(JBEAM_EDITOR_OT_warn_native_redo.bl_idname, 'Z', 'PRESS', ctrl=True, shift=True)
-    # <<< END MODIFICATION >>>
-
-    # <<< MODIFIED: Add the new keymap items to the list to be tracked/unregistered >>>
     keymaps_added.extend([(km_window, kmi_native_undo), (km_window, kmi_native_redo)])
-    # <<< END MODIFICATION >>>
 
     return keymaps_added # Return the list of tuples
 
@@ -152,15 +149,13 @@ def find_layer_collection_recursive(find, col):
 
 # Main registration function
 def register():
-    global classes, custom_keymaps, draw_handle, draw_handle2, text_draw_handle # <<< Add text_draw_handle
+    global classes, custom_keymaps, draw_handle, draw_handle2, text_draw_handle
 
     for c in classes:
         bpy.utils.register_class(c)
 
     if not bpy.app.background:
-        # <<< MODIFIED: Use the list returned by init_keymaps >>>
         custom_keymaps = init_keymaps()
-        # <<< END MODIFIED >>>
 
     bpy.types.Scene.ui_properties = bpy.props.PointerProperty(type=UIProperties)
     bpy.types.Scene.jbeam_editor_veh_render_dirty = bpy.props.BoolProperty(default=False)
@@ -178,11 +173,9 @@ def register():
         bpy.app.handlers.depsgraph_update_post.remove(depsgraph_update_post_handler)
     bpy.app.handlers.depsgraph_update_post.append(depsgraph_update_post_handler)
 
-    # <<< ADDED: Register load_post handler >>>
     while load_post_handler in bpy.app.handlers.load_post:
          bpy.app.handlers.load_post.remove(load_post_handler)
     bpy.app.handlers.load_post.append(load_post_handler)
-    # <<< END ADDED >>>
 
     try:
         # Register draw handlers via on_post_register_handler timer
@@ -198,7 +191,7 @@ def register():
 
 # Main unregistration function
 def unregister():
-    global classes, custom_keymaps, draw_handle, draw_handle2, text_draw_handle # <<< Add text_draw_handle
+    global classes, custom_keymaps, draw_handle, draw_handle2, text_draw_handle
 
     if bpy.app.timers.is_registered(on_post_register_handler): bpy.app.timers.unregister(on_post_register_handler)
     if bpy.app.timers.is_registered(check_files_for_changes_timer): bpy.app.timers.unregister(check_files_for_changes_timer)
@@ -213,7 +206,6 @@ def unregister():
         try: bpy.types.SpaceView3D.draw_handler_remove(draw_handle2, 'WINDOW')
         except ValueError: pass
         draw_handle2 = None
-    # <<< Unregister text editor draw handler >>>
     if text_draw_handle:
         try: bpy.types.SpaceTextEditor.draw_handler_remove(text_draw_handle, 'WINDOW')
         except ValueError: pass
@@ -223,10 +215,8 @@ def unregister():
     if depsgraph_update_post_handler in bpy.app.handlers.depsgraph_update_post:
          bpy.app.handlers.depsgraph_update_post.remove(depsgraph_update_post_handler)
 
-    # <<< ADDED: Unregister load_post handler >>>
     if load_post_handler in bpy.app.handlers.load_post:
          bpy.app.handlers.load_post.remove(load_post_handler)
-    # <<< END ADDED >>>
 
     try:
         bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
@@ -238,7 +228,6 @@ def unregister():
         try: bpy.utils.unregister_class(c)
         except RuntimeError: print(f"Could not unregister class {c.__name__}", file=sys.stderr)
 
-    # <<< MODIFIED: Use the stored list of tuples >>>
     for km, kmi in custom_keymaps:
         try:
             if kmi and km: # Check if both are valid
@@ -247,7 +236,6 @@ def unregister():
             # Report error but continue unregistering other items
             print(f"Error removing keymap item '{kmi.idname if kmi else 'N/A'}': {e}", file=sys.stderr)
     custom_keymaps.clear()
-    # <<< END MODIFIED >>>
 
     try:
         if hasattr(bpy.types.Scene, 'ui_properties'): del bpy.types.Scene.ui_properties
