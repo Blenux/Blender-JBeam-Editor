@@ -22,6 +22,7 @@ import base64
 from pathlib import Path
 import pickle
 import traceback
+import sys # Added for printing warnings
 
 import bpy
 import bmesh
@@ -257,6 +258,55 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
         if regenerate_mesh:
             vertices, edges, tris, quads, node_ids = get_vertices_edges_faces(part_data)
 
+            # --- BEGIN MODIFICATION: Store hidden edge AND VERTEX states ---
+            hidden_edges_state = {}
+            hidden_verts_state = {} # <<< ADDED
+            temp_bm = None
+            try:
+                if obj.mode == 'EDIT':
+                    # Get bmesh from edit mesh *before* clearing
+                    temp_bm = bmesh.from_edit_mesh(obj_data)
+                else:
+                    # Get bmesh from object data *before* clearing
+                    temp_bm = bmesh.new()
+                    temp_bm.from_mesh(obj_data)
+
+                # --- Store Edge Hidden State (Existing) ---
+                beam_indices_layer = temp_bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
+                beam_origin_layer = temp_bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
+                if beam_indices_layer and beam_origin_layer:
+                    temp_bm.edges.ensure_lookup_table()
+                    for edge in temp_bm.edges:
+                        indices_str = edge[beam_indices_layer].decode('utf-8')
+                        # Only store for existing JBeam beams (not newly added Blender edges)
+                        if indices_str and indices_str != '-1':
+                            try:
+                                first_index = int(indices_str.split(',')[0])
+                                part_origin = edge[beam_origin_layer].decode('utf-8')
+                                # Use part_origin from the edge layer itself for the key
+                                hidden_edges_state[(part_origin, first_index)] = edge.hide
+                            except (ValueError, IndexError):
+                                print(f"Warning: Could not parse beam index for storing hidden state: {indices_str}", file=sys.stderr)
+
+                # --- ADDED: Store Vertex Hidden State ---
+                node_id_layer = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
+                is_fake_layer = temp_bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+                if node_id_layer and is_fake_layer:
+                    temp_bm.verts.ensure_lookup_table()
+                    for vert in temp_bm.verts:
+                        if vert[is_fake_layer] == 0: # Only store real nodes
+                            node_id = vert[node_id_layer].decode('utf-8')
+                            hidden_verts_state[node_id] = vert.hide
+                # --- END ADDED ---
+
+            except Exception as e:
+                 print(f"Error storing hidden states: {e}", file=sys.stderr) # Combined error message
+            finally:
+                if temp_bm and obj.mode != 'EDIT': # Free temp bmesh if it wasn't the edit mesh
+                    temp_bm.free()
+            # --- END MODIFICATION: Store hidden states ---
+
+            # Now get the main bm and clear it
             if obj.mode == 'EDIT':
                 bm = bmesh.from_edit_mesh(obj_data)
                 bm.clear()
@@ -265,44 +315,80 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
                 bm.from_mesh(obj_data)
                 bm.clear()
 
+            # Generate the new mesh content
             generate_part_mesh(obj, obj_data, bm, part_data, chosen_part, jbeam_file_path, vertices, edges, tris, quads, node_ids)
+
+            # --- BEGIN MODIFICATION: Apply hidden edge AND VERTEX states ---
+            # --- Apply Edge Hidden State (Existing) ---
+            beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
+            beam_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
+            if beam_indices_layer and beam_origin_layer and hidden_edges_state:
+                bm.edges.ensure_lookup_table()
+                for edge in bm.edges:
+                    indices_str = edge[beam_indices_layer].decode('utf-8')
+                    if indices_str and indices_str != '-1':
+                        try:
+                            first_index = int(indices_str.split(',')[0])
+                            part_origin = edge[beam_origin_layer].decode('utf-8')
+                            # Use part_origin from the edge layer itself for lookup
+                            if (part_origin, first_index) in hidden_edges_state:
+                                edge.hide = hidden_edges_state[(part_origin, first_index)]
+                        except (ValueError, IndexError):
+                            # Should not happen often if storing worked, but good practice
+                            print(f"Warning: Could not parse beam index for applying hidden state: {indices_str}", file=sys.stderr)
+
+            # --- ADDED: Apply Vertex Hidden State ---
+            node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
+            is_fake_layer = bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+            if node_id_layer and is_fake_layer and hidden_verts_state:
+                bm.verts.ensure_lookup_table()
+                for vert in bm.verts:
+                    if vert[is_fake_layer] == 0: # Only apply to real nodes
+                        node_id = vert[node_id_layer].decode('utf-8')
+                        if node_id in hidden_verts_state:
+                            vert.hide = hidden_verts_state[node_id]
+            # --- END ADDED ---
+            # --- END MODIFICATION ---
+
             bm.normal_update()
 
+            # Write bmesh back to Blender mesh
             if obj.mode == 'EDIT':
                 bmesh.update_edit_mesh(obj_data)
             else:
                 bm.to_mesh(obj_data)
-            bm.free()
+            bm.free() # Free the bmesh used for generation/modification
             obj_data.update()
 
+        # Update the stored JBeam data regardless of mesh regeneration
         obj_data[constants.MESH_SINGLE_JBEAM_PART_DATA] = base64.b64encode(pickle.dumps(part_data, -1)).decode('ascii')
 
         context.scene['jbeam_editor_reimporting_jbeam'] = 1 # Prevents exporting jbeam
 
         print('Done reimporting JBeam.')
         return True
-    except:
+    except Exception as e: # Catch potential exceptions during the process
         # On error reimporting jbeam, remove mesh data
         traceback.print_exc()
 
-        if obj.mode == 'EDIT':
-            bm = bmesh.from_edit_mesh(obj_data)
-            bm.clear()
-        else:
-            bm = bmesh.new()
-            bm.from_mesh(obj_data)
-            bm.clear()
+        # Attempt to clear mesh data safely
+        try:
+            if obj.mode == 'EDIT':
+                bm = bmesh.from_edit_mesh(obj_data)
+                bm.clear()
+                bmesh.update_edit_mesh(obj_data) # Update edit mesh after clearing
+            else:
+                bm = bmesh.new()
+                bm.from_mesh(obj_data)
+                bm.clear()
+                bm.to_mesh(obj_data) # Write cleared mesh back
+            bm.free()
+            obj_data.update()
+        except Exception as clear_error:
+            print(f"Error clearing mesh data after reimport failure: {clear_error}", file=sys.stderr)
 
-        bm.normal_update()
 
-        if obj.mode == 'EDIT':
-            bmesh.update_edit_mesh(obj_data)
-        else:
-            bm.to_mesh(obj_data)
-        bm.free()
-        obj_data.update()
-
-        obj_data[constants.MESH_EDITING_ENABLED] = False
+        obj_data[constants.MESH_EDITING_ENABLED] = False # Disable editing on failure
 
         return False
 
