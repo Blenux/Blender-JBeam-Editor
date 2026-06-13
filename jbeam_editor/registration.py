@@ -38,6 +38,7 @@ from .operators import (
     JBEAM_EDITOR_OT_open_text_editor_split,
     JBEAM_EDITOR_OT_confirm_node_deletion,
     JBEAM_EDITOR_OT_warn_native_undo,
+    JBEAM_EDITOR_OT_connect_selected_nodes, # <<< ADDED: Import new operator
     JBEAM_EDITOR_OT_open_file_in_editor, # <<< ADDED: Import new operator
     JBEAM_EDITOR_OT_warn_native_redo,
     JBEAM_EDITOR_OT_save_pc_file_to_disk, # <<< ADDED: Import new operator
@@ -94,6 +95,7 @@ classes = (
     JBEAM_EDITOR_OT_scroll_to_definition,
     JBEAM_EDITOR_OT_open_text_editor_split,
     JBEAM_EDITOR_OT_confirm_node_deletion,
+    JBEAM_EDITOR_OT_connect_selected_nodes, # <<< ADDED: Add new operator to registration list
     JBEAM_EDITOR_OT_warn_native_undo,
     JBEAM_EDITOR_OT_open_file_in_editor, # <<< ADDED: Add new operator to registration list
     JBEAM_EDITOR_OT_warn_native_redo,

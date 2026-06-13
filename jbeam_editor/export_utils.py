@@ -193,6 +193,9 @@ def add_jbeam_setup(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 # Add jbeam nodes to end of JBeam section from list of nodes to add (this is called on node section list end character)
 def add_jbeam_nodes(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, nodes_to_add: dict):
     # <<< This function now only handles nodes NOT added symmetrically >>>
+    # <<< ADDED: Early exit if nothing to add >>>
+    if not nodes_to_add: # <<< ADDED: Early exit if nothing to add >>>
+        return jbeam_section_end_node_idx
     if not nodes_to_add: # <<< ADDED: Early exit if nothing to add >>>
         return jbeam_section_end_node_idx
 
@@ -333,6 +336,9 @@ def add_jbeam_beams(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 # Add jbeam triangles to end of JBeam section from list of triangles to add (this is called on triangle section list end character)
 def add_jbeam_triangles(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, tris_to_add: list):
     # <<< ADDED: Early exit if nothing to add >>>
+    if not tris_to_add: # <<< ADDED: Early exit if nothing to add >>>
+        return jbeam_section_end_node_idx
+
     if not tris_to_add:
         return jbeam_section_end_node_idx
 
@@ -373,6 +379,9 @@ def add_jbeam_triangles(ast_nodes: list, jbeam_section_start_node_idx: int, jbea
 # Add jbeam quads to end of JBeam section from list of quads to add (this is called on triangle section list end character)
 def add_jbeam_quads(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, quads_to_add: list):
     # <<< ADDED: Early exit if nothing to add >>>
+    if not quads_to_add: # <<< ADDED: Early exit if nothing to add >>>
+        return jbeam_section_end_node_idx
+
     if not quads_to_add:
         return jbeam_section_end_node_idx
 
@@ -536,12 +545,12 @@ def set_node_renames_positions(jbeam_file_data_modified: dict, jbeam_part: str, 
                     if row_node_id in node_renames:
                         row_data[0] = node_renames[row_node_id]
 
-                    if row_node_id in blender_nodes:
+                    if row_node_id in blender_nodes: # Check if original ID is in blender_nodes
                         pos = blender_nodes[row_node_id]['pos']
                         row_data[1], row_data[2], row_data[3] = pos[0], pos[1], pos[2]
 
         # Rename node references in all other sections
-        elif affect_node_references:
+        elif affect_node_references and node_renames: # If affect_node_references is true AND if there are any renames to apply
             rec_node_ref_rename(section_data, node_renames)
 
 
@@ -916,6 +925,60 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
         # --- End existing node handling ---
 
     # --- Invoke confirmation operator if needed ---
+    # After the main loop iterating through bm.verts and before returning
+    # Add an additional pass or integrate into the loop to ensure symmetrical renames are captured
+    # based on detected primary renames.
+
+    # Iterate through the renames already detected for primary nodes
+    # Need to collect all primary renames first before this block
+    # This is a simplified representation; the actual integration needs care
+    # to access the correct part_actions and blender_nodes.
+    # This block should ideally run after the main loop over bm.verts has populated
+    # initial renames and blender_nodes for all vertices.
+
+    # Create a temporary list of primary renames detected in the loop above
+    # to avoid modifying parts_actions while iterating it if done inside the loop.
+    # For simplicity, this example assumes we can iterate `parts_actions` after the main vert loop.
+    # A more robust way is to collect primary renames during the loop, then process them here.
+
+    # This logic is better placed *inside* the `for v in bm.verts:` loop,
+    # right after a primary rename for `v` is detected and registered.
+    # The following is a conceptual placement for clarity of the addition:
+
+    # (This block would be more effectively integrated into the main v in bm.verts loop)
+    # Example of integration point: Inside the loop, after a rename for 'v' is processed.
+    # if v_init_id != v_current_id_in_bmesh: # If vertex v was renamed
+    #     if ui_props.rename_symmetrical_counterpart:
+    #         original_primary_id = v_init_id
+    #         new_primary_id = v_current_id_in_bmesh
+    #         original_counterpart_id = get_symmetrical_node_id(original_primary_id, ui_props)
+    #         new_counterpart_id = get_symmetrical_node_id(new_primary_id, ui_props)
+
+    #         if original_counterpart_id and new_counterpart_id and original_counterpart_id != new_counterpart_id:
+    #             # Check if already registered to avoid double-processing if properties.py update stuck
+    #             already_registered_in_actions = False
+    #             for pa_check in parts_actions.values():
+    #                 if pa_check.nodes_to_rename.get(original_counterpart_id) == new_counterpart_id:
+    #                     already_registered_in_actions = True; break
+                
+    #             if not already_registered_in_actions:
+    #                 found_bm_counterpart_for_export = None
+    #                 for v_lookup in bm.verts: # Find the BMVert of the original counterpart
+    #                     if v_lookup[init_node_id_layer].decode('utf-8') == original_counterpart_id:
+    #                         found_bm_counterpart_for_export = v_lookup; break
+                        
+    #                 if found_bm_counterpart_for_export:
+    #                     counterpart_origin_export = found_bm_counterpart_for_export[part_origin_layer].decode('utf-8')
+    #                     affected_part_key_export = True if affect_node_references else counterpart_origin_export
+    #                     counterpart_actions_export: PartNodesActions = parts_actions.setdefault(affected_part_key_export, PartNodesActions())
+    #                     counterpart_actions_export.nodes_to_rename[original_counterpart_id] = new_counterpart_id
+    #                     # Ensure blender_nodes is also updated for the counterpart
+    #                     counterpart_pos_vec_export = obj.matrix_world @ found_bm_counterpart_for_export.co
+    #                     counterpart_init_data_export = init_nodes_data.get(original_counterpart_id)
+    #                     counterpart_pos_sjson_export = undo_node_move_offset_and_apply_translation_to_expr(counterpart_init_data_export, counterpart_pos_vec_export) if counterpart_init_data_export else counterpart_pos_vec_export.to_tuple()
+    #                     blender_nodes[original_counterpart_id] = {'curr_node_id': new_counterpart_id, 'pos': counterpart_pos_sjson_export, 'partOrigin': counterpart_origin_export}
+    #                     print(f"Export Utils: Symmetrically registered rename {original_counterpart_id} -> {new_counterpart_id}")
+
     if nodes_requiring_confirmation and not jb_globals.confirm_delete_pending:
         try:
             jb_globals.confirm_delete_pending = True
@@ -936,11 +999,55 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
             part_actions: PartNodesActions = parts_actions.setdefault(affected_part, PartNodesActions())
             part_actions.nodes_to_delete.add(init_node_id)
 
+    # After the main loop over bm.verts, iterate through detected primary renames to ensure symmetrical ones are also queued.
+    # This is a more robust location for this logic.
+    # We need to iterate over a copy of items if parts_actions is modified.
+    # A better approach is to collect primary renames and then process them.
+    
+    # Collect primary renames first
+    primary_renames_collected = [] # list of (original_id, new_id, part_origin_of_primary)
+    for v_check_rename in bm.verts:
+        if v_check_rename[node_is_fake_layer] == 1: continue
+        v_init_id_check = v_check_rename[init_node_id_layer].decode('utf-8')
+        v_current_id_check = v_check_rename[node_id_layer].decode('utf-8')
+        if v_init_id_check != v_current_id_check and not v_current_id_check.startswith('TEMP_'): # Is a primary rename
+            v_part_origin_check = v_check_rename[part_origin_layer].decode('utf-8')
+            primary_renames_collected.append({'original_id': v_init_id_check, 'new_id': v_current_id_check, 'part_origin': v_part_origin_check})
+
+    if ui_props.rename_symmetrical_counterpart:
+        for rename_info in primary_renames_collected:
+            original_primary_id = rename_info['original_id']
+            new_primary_id = rename_info['new_id']
+
+            original_counterpart_id = get_symmetrical_node_id(original_primary_id, ui_props)
+            new_counterpart_id = get_symmetrical_node_id(new_primary_id, ui_props)
+
+            if original_counterpart_id and new_counterpart_id and original_counterpart_id != new_counterpart_id:
+                # Check if this counterpart rename is already effectively registered
+                # (i.e. if its entry in blender_nodes already reflects the new_counterpart_id)
+                if not (blender_nodes.get(original_counterpart_id) and blender_nodes[original_counterpart_id]['curr_node_id'] == new_counterpart_id):
+                    found_bm_counterpart_for_export = None
+                    for v_lookup in bm.verts:
+                        if v_lookup[init_node_id_layer].decode('utf-8') == original_counterpart_id:
+                            found_bm_counterpart_for_export = v_lookup; break
+                    
+                    if found_bm_counterpart_for_export:
+                        counterpart_origin_export = found_bm_counterpart_for_export[part_origin_layer].decode('utf-8')
+                        affected_part_key_export = True if affect_node_references else counterpart_origin_export
+                        counterpart_actions_export: PartNodesActions = parts_actions.setdefault(affected_part_key_export, PartNodesActions())
+                        counterpart_actions_export.nodes_to_rename[original_counterpart_id] = new_counterpart_id
+                        
+                        counterpart_pos_vec_export = obj.matrix_world @ found_bm_counterpart_for_export.co
+                        counterpart_init_data_export = init_nodes_data.get(original_counterpart_id)
+                        counterpart_pos_sjson_export = undo_node_move_offset_and_apply_translation_to_expr(counterpart_init_data_export, counterpart_pos_vec_export) if counterpart_init_data_export else counterpart_pos_vec_export.to_tuple()
+                        blender_nodes[original_counterpart_id] = {'curr_node_id': new_counterpart_id, 'pos': counterpart_pos_sjson_export, 'partOrigin': counterpart_origin_export}
+                        print(f"Export Utils: Symmetrically registered rename {original_counterpart_id} -> {new_counterpart_id} for part {counterpart_origin_export}")
+
     return blender_nodes, parts_actions
 # <<< END REPLACED FUNCTION >>>
 
 
-def get_beams_add_remove(obj: bpy.types.Object, bm: bmesh.types.BMesh, init_beams_data: list, jbeam_file_data_modified: dict, jbeam_part: str, nodes_to_delete: set, affect_node_references: bool):
+def get_beams_add_remove(obj: bpy.types.Object, bm: bmesh.types.BMesh, init_beams_data: list, jbeam_part: str, nodes_to_delete: set, affect_node_references: bool):
     beams_to_add_tuples = set() # Store (id1, id2) tuples for adding
     beams_to_delete = set()
 
@@ -948,11 +1055,13 @@ def get_beams_add_remove(obj: bpy.types.Object, bm: bmesh.types.BMesh, init_beam
     init_node_id_layer = bm.verts.layers.string.get(constants.VL_INIT_NODE_ID)
     node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
     node_is_fake_layer = bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
-    node_part_origin_layer = bm.verts.layers.string.get(constants.VL_NODE_PART_ORIGIN) # To assign origin
+    # node_part_origin_layer = bm.verts.layers.string.get(constants.VL_NODE_PART_ORIGIN) # To assign origin - Not needed in this function
 
     beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
     # <<< Get beam origin layer >>>
     beam_part_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
+    # <<< ADDED: Get node part origin layer >>>
+    node_part_origin_layer = bm.verts.layers.string.get(constants.VL_NODE_PART_ORIGIN)
 
     # <<< Check if all required layers exist >>>
     if not all([init_node_id_layer, node_id_layer, node_is_fake_layer, node_part_origin_layer, beam_indices_layer, beam_part_origin_layer]):
@@ -976,20 +1085,24 @@ def get_beams_add_remove(obj: bpy.types.Object, bm: bmesh.types.BMesh, init_beam
                     if key not in init_beams_map:
                         init_beams_map[key] = set()
                     init_beams_map[key].add(temp_beam_idx_in_part)
-    # --- End initial beam map ---
+    # --- End initial beam map (using original IDs) ---
 
     bm.edges.ensure_lookup_table()
     bm.verts.ensure_lookup_table() # <<< Ensure vertex table is ready >>>
-    e: bmesh.types.BMEdge
+    # --- Iterate through edges in Blender mesh to find added/existing beams ---
     for i, e in enumerate(bm.edges):
         beam_indices_str = e[beam_indices_layer].decode('utf-8')
 
         v1, v2 = e.verts[0], e.verts[1]
+        # <<< Get node layers needed to check if vertices are valid JBeam nodes >>> # Keep this comment
 
         # --- Robust Node Validity Check ---
         # Check if vertices are non-fake and have received final (non-TEMP) IDs
         v1_node_id_bytes = v1[node_id_layer]
+        v1_init_node_id_bytes = v1[init_node_id_layer] # <<< Get init ID bytes
         v2_node_id_bytes = v2[node_id_layer]
+        v2_init_node_id_bytes = v2[init_node_id_layer] # <<< Get init ID bytes
+
         v1_node_id = v1_node_id_bytes.decode('utf-8')
         v2_node_id = v2_node_id_bytes.decode('utf-8')
 
@@ -997,6 +1110,11 @@ def get_beams_add_remove(obj: bpy.types.Object, bm: bmesh.types.BMesh, init_beam
                              v1_node_id_bytes and not v1_node_id.startswith('TEMP_'))
         v2_is_valid_jbeam = (v2[node_is_fake_layer] == 0 and
                              v2_node_id_bytes and not v2_node_id.startswith('TEMP_'))
+        # <<< ADDED: Check if original IDs are valid (not TEMP_) >>>
+        v1_init_id = v1_init_node_id_bytes.decode('utf-8')
+        v2_init_id = v2_init_node_id_bytes.decode('utf-8')
+        v1_init_id_valid = v1_init_node_id_bytes and not v1_init_id.startswith('TEMP_')
+        v2_init_id_valid = v2_init_node_id_bytes and not v2_init_id.startswith('TEMP_')
 
         if not v1_is_valid_jbeam or not v2_is_valid_jbeam:
             # print(f"Debug: Skipping edge {i} - Invalid nodes: v1={v1_is_valid_jbeam} ('{v1_node_id}'), v2={v2_is_valid_jbeam} ('{v2_node_id}')")
@@ -1013,23 +1131,16 @@ def get_beams_add_remove(obj: bpy.types.Object, bm: bmesh.types.BMesh, init_beam
         if final_v1_id == final_v2_id:
             # print(f"Debug: Skipping beam between same node after remapping: {final_v1_id}")
             continue
-        # --- End Node Remapping ---
+        # --- End Node Remapping --- # Keep this comment
 
-        current_beam_tuple = tuple(sorted((final_v1_id, final_v2_id))) # <<< Use remapped IDs
+        current_beam_tuple = tuple(sorted((final_v1_id, final_v2_id))) # <<< Define current_beam_tuple here
 
-        if beam_indices_str == '-1': # Standard case: Explicitly marked as new
+        # <<< ADDED: Get the tuple using ORIGINAL IDs for comparison with init_beams_map >>>
+        init_beam_tuple = tuple(sorted((v1_init_id, v2_init_id)))
+
+        # --- Logic for adding beams ---
+        if beam_indices_str == '-1' or beam_indices_str == '': # Case: Explicitly marked as new OR edge exists but has no JBeam data
             beams_to_add_tuples.add(current_beam_tuple)
-            continue # Don't add to blender_beams_indices
-
-        elif beam_indices_str == '': # Case: Edge exists but has no JBeam data (e.g., Symmetrize didn't copy/set layer)
-            # Treat as new IF nodes are valid (already checked above)
-            beams_to_add_tuples.add(current_beam_tuple)
-            # Mark it so it's handled correctly if export runs again
-            try:
-                e[beam_indices_layer] = b'-1'
-                e[beam_part_origin_layer] = bytes(jbeam_part, 'utf-8')
-            except Exception as layer_err:
-                print(f"Warning: Could not update layers for newly detected beam (empty index): {layer_err}", file=sys.stderr)
             continue # Don't add to blender_beams_indices
 
         else: # Case: Edge has existing JBeam indices (e.g., original beam or Symmetrize copied indices)
@@ -1055,9 +1166,10 @@ def get_beams_add_remove(obj: bpy.types.Object, bm: bmesh.types.BMesh, init_beam
                     continue # Don't add to blender_beams_indices
 
                 # Check if this beam (defined by current node IDs) exists in the initial data
-                if current_beam_tuple not in init_beams_map:
-                    # Beam exists in Blender with valid indices, but doesn't match any beam in the original data using CURRENT node IDs.
-                    # This is likely a new beam (e.g., from Symmetrize which copied indices, or nodes were renamed). Treat as new.
+                # <<< MODIFIED: Check using ORIGINAL node IDs >>>
+                if init_beam_tuple not in init_beams_map or not v1_init_id_valid or not v2_init_id_valid:
+                    # Beam exists in Blender with valid indices, but its ORIGINAL node IDs don't match any beam in the initial data.
+                    # This means it's a truly new beam (e.g., from Symmetrize copying an edge that wasn't a beam). Treat as new.
                     beams_to_add_tuples.add(current_beam_tuple)
                     # Mark it as new for future runs
                     try:
@@ -1067,7 +1179,8 @@ def get_beams_add_remove(obj: bpy.types.Object, bm: bmesh.types.BMesh, init_beam
                         print(f"Warning: Could not update layers for newly detected beam (copied index): {layer_err}", file=sys.stderr)
                     # Don't add its indices to blender_beams_indices, it's being added.
                 else:
-                    # Beam exists in Blender AND matches an initial beam. Add its indices for deletion check.
+                    # Beam exists in Blender AND its ORIGINAL node IDs match an initial beam.
+                    # This is an existing beam (potentially moved or nodes renamed). Add its indices for deletion check.
                     blender_beams_indices.update(indices_in_part)
 
             except ValueError:
@@ -1080,6 +1193,7 @@ def get_beams_add_remove(obj: bpy.types.Object, bm: bmesh.types.BMesh, init_beam
                     e[beam_part_origin_layer] = bytes(jbeam_part, 'utf-8')
                 except Exception as layer_err:
                     print(f"Warning: Could not update layers for beam with invalid indices: {layer_err}", file=sys.stderr)
+                # <<< END MODIFIED >>>
                 continue # Don't add to blender_beams_indices
 
     # --- Deletion Logic (largely the same, but uses blender_beams_indices) ---
@@ -1478,8 +1592,8 @@ def set_key_visited(ast_nodes: list, keys_visited, stack: list, curr_key: str, n
 def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbeam_file_data_modified: dict, jbeam_part: str, affect_node_references: bool,
                      nodes_to_add: dict, nodes_to_delete: set, nodes_to_add_symmetrically: dict, # <<< ADDED nodes_to_add_symmetrically
                      beams_to_add: set, beams_to_delete: set,
-                     tris_to_add: set, tris_to_delete: set,
-                     quads_to_add: set, quads_to_delete: set):
+                     tris_to_add: set, tris_to_delete: set, tris_flipped: set, # <<< ADDED tris_flipped
+                     quads_to_add: set, quads_to_delete: set, quads_flipped: set): # <<< ADDED quads_flipped
     # Traverse AST nodes and update them from SJSON data, add and delete jbeam definitions
 
     stack = []
@@ -1568,7 +1682,8 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
                     set_key_visited(ast_nodes, keys_visited, stack, dict_key, temp_key_val_start_node_idx, i)
 
                     # Ignore slots section and other parts
-                    if not (prev_stack_size > 1 and stack[1][0] == 'slots') and not prev_in_jbeam_part:
+                    # <<< MODIFIED: Remove condition 'and not prev_in_jbeam_part' >>>
+                    if not (prev_stack_size > 1 and stack[1][0] == 'slots'):
                         try:
                             changed = compare_and_set_value(current_jbeam_file_data, current_jbeam_file_data_modified, stack, dict_key, node)
                             if constants.DEBUG:
@@ -1604,6 +1719,7 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
 
             elif node_type not in ('}', ']'):
                 # Ignore slots section
+                # <<< MODIFIED: Remove condition 'and not prev_in_jbeam_part' >>>
                 if not (prev_stack_size > 1 and stack[1][0] == 'slots'):
                     # Value definition
                     try:
@@ -1620,11 +1736,6 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
 
         # After traversal
 
-        stack_size = len(stack)
-        stack_size_diff = stack_size - prev_stack_size # 1 = go down level, -1 = go up level, 0 = no change
-        stack_head = stack[-1] if stack_size > 0 else None
-        in_jbeam_part = stack_size > 0 and stack[0][0] == jbeam_part
-
         # if constants.DEBUG:
         #     prev_node = ast_nodes[0]
         #     for j in range(1, len(ast_nodes)):
@@ -1632,6 +1743,11 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
         #         if (curr_node.data_type == 'wsc' and prev_node.data_type == 'wsc'):
         #             print_ast_nodes(ast_nodes, j, 75, True, sys.stderr)
         #         prev_node = curr_node
+
+        stack_size = len(stack)
+        stack_size_diff = stack_size - prev_stack_size # 1 = go down level, -1 = go up level, 0 = no change
+        stack_head = stack[-1] if stack_size > 0 else None
+        in_jbeam_part = stack_size > 0 and stack[0][0] == jbeam_part # Keep this for add/delete logic scope
 
         if stack_size_diff == 1: # Went down level { or [
             if in_jbeam_part:
@@ -1901,6 +2017,20 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
                         if jbeam_section_row_def_idx in tris_to_delete:
                             i = delete_jbeam_entry(ast_nodes, jbeam_section_start_node_idx, jbeam_entry_start_node_idx, jbeam_entry_end_node_idx)
                             jbeam_def_deleted = True
+                        #elif jbeam_section_row_def_idx in tris_flipped: # MODIFIED: Removed this block
+                            # The flip is handled by modifying jbeam_file_data_modified in get_faces_add_remove,
+                            # and then compare_and_set_value will update the AST accordingly.
+                            # This prevents a double flip.
+                            # # Flip face in AST
+                            # id2_node_idx = get_next_non_wsc_node(ast_nodes, jbeam_entry_start_node_idx + 1)
+                            # id2_node_idx = get_next_non_wsc_node(ast_nodes, id2_node_idx + 1)
+                            # id2_node_idx = get_next_non_wsc_node(ast_nodes, id2_node_idx + 1)
+                            #
+                            # id3_node_idx = get_next_non_wsc_node(ast_nodes, id2_node_idx + 1)
+                            # id3_node_idx = get_next_non_wsc_node(ast_nodes, id3_node_idx + 1)
+                            #
+                            # ast_nodes[id2_node_idx].value, ast_nodes[id3_node_idx].value = ast_nodes[id3_node_idx].value, ast_nodes[id2_node_idx].value
+
 
                 elif stack_head[0] == 'quads':
                     # If current jbeam quad is part of delete list, remove the quad definition
@@ -1908,6 +2038,21 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
                         if jbeam_section_row_def_idx in quads_to_delete:
                             i = delete_jbeam_entry(ast_nodes, jbeam_section_start_node_idx, jbeam_entry_start_node_idx, jbeam_entry_end_node_idx)
                             jbeam_def_deleted = True
+                        #elif jbeam_section_row_def_idx in quads_flipped: # MODIFIED: Removed this block
+                            # The flip is handled by modifying jbeam_file_data_modified in get_faces_add_remove,
+                            # and then compare_and_set_value will update the AST accordingly.
+                            # This prevents a double flip.
+                            # # Flip face in AST
+                            # id2_node_idx = get_next_non_wsc_node(ast_nodes, jbeam_entry_start_node_idx + 1)
+                            # id2_node_idx = get_next_non_wsc_node(ast_nodes, id2_node_idx + 1)
+                            # id2_node_idx = get_next_non_wsc_node(ast_nodes, id2_node_idx + 1)
+                            #
+                            # id4_node_idx = get_next_non_wsc_node(ast_nodes, id2_node_idx + 1)
+                            # id4_node_idx = get_next_non_wsc_node(ast_nodes, id4_node_idx + 1)
+                            # id4_node_idx = get_next_non_wsc_node(ast_nodes, id4_node_idx + 1)
+                            # id4_node_idx = get_next_non_wsc_node(ast_nodes, id4_node_idx + 1)
+                            #
+                            # ast_nodes[id2_node_idx].value, ast_nodes[id4_node_idx].value = ast_nodes[id4_node_idx].value, ast_nodes[id2_node_idx].value
 
                 # Delete jbeam entries if referenced node is deleted
                 if not jbeam_def_deleted and affect_node_references:
@@ -2090,10 +2235,10 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
         # --- Get beam/face actions ---
         init_beams_data = data.get('beams')
         init_tris_data = data.get('triangles', [])
-        init_quads_data = data.get('quads', [])
+        init_quads_data = data.get('quads', []) # Keep init_quads_data
 
-        if init_beams_data is not None:
-            beams_to_add, beams_to_delete = get_beams_add_remove(obj, bm, init_beams_data, jbeam_file_data_modified, jbeam_part, nodes_to_delete, affect_node_references)
+        if init_beams_data is not None: # Check if beams section exists in original data
+            beams_to_add, beams_to_delete = get_beams_add_remove(obj, bm, init_beams_data, jbeam_part, nodes_to_delete, affect_node_references)
         else: beams_to_add, beams_to_delete = set(), set()
         tris_to_add, tris_to_delete, tris_flipped, quads_to_add, quads_to_delete, quads_flipped = get_faces_add_remove(obj, bm, init_tris_data, init_quads_data, jbeam_file_data_modified, jbeam_part, nodes_to_delete, affect_node_references)
 
@@ -2112,8 +2257,10 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
             'beams_to_delete': beams_to_delete.copy(),
             'tris_to_add': tris_to_add.copy(),
             'tris_to_delete': tris_to_delete.copy(),
+            'tris_flipped': tris_flipped.copy(), # <<< ADDED: Store flipped tris
             'quads_to_add': quads_to_add.copy(),
             'quads_to_delete': quads_to_delete.copy(),
+            'quads_flipped': quads_flipped.copy(), # <<< ADDED: Store flipped quads
         }
 
         # --- Calculate reimport_needed ---
@@ -2168,11 +2315,13 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
         # Call update_ast_nodes with the stored actions
         update_ast_nodes(ast_nodes, jbeam_file_data, jbeam_file_data_modified, jbeam_part, affect_node_references,
                          part_actions['nodes_to_add'], part_actions['nodes_to_delete'],
-                         # <<< ADDED: Pass symmetrical nodes >>>
+                         # <<< Pass symmetrical nodes >>>
                          part_actions['nodes_to_add_symmetrically'],
                          part_actions['beams_to_add'], part_actions['beams_to_delete'],
                          part_actions['tris_to_add'], part_actions['tris_to_delete'],
-                         part_actions['quads_to_add'], part_actions['quads_to_delete'])
+                         part_actions['tris_flipped'], # <<< Pass flipped tris
+                         part_actions['quads_to_add'], part_actions['quads_to_delete'],
+                         part_actions['quads_flipped']) # <<< Pass flipped quads
 
         processed_parts_in_ast.add(jbeam_part)
 
@@ -2189,6 +2338,7 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
 def end_export_cycle():
     """Clears temporary state after an export cycle."""
     jb_globals.node_overlap_remap.clear()
+    jb_globals._use_local_rename_toggle_for_next_export = False
 
 
 def export_file_to_disk(jbeam_filepath: str):

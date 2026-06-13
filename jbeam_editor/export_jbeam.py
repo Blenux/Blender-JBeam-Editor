@@ -34,6 +34,7 @@ from . import utils
 from . import export_utils
 from . import text_editor
 from . import sjsonast
+from . import globals as jb_globals # Import globals
 
 import timeit
 
@@ -95,6 +96,12 @@ def export_existing_jbeam(obj: bpy.types.Object):
         scene = context.scene
         ui_props = scene.ui_properties
         affect_node_references = ui_props.affect_node_references
+
+        # Check if the local rename toggle should override the global affect_node_references
+        if jb_globals._use_local_rename_toggle_for_next_export:
+            affect_node_references = ui_props.rename_selected_node_references
+            # This flag will be reset in end_export_cycle()
+            # jb_globals._use_local_rename_toggle_for_next_export = False # Reset after use
         obj_data = obj.data
 
         jbeam_filepath = obj_data[constants.MESH_JBEAM_FILE_PATH]

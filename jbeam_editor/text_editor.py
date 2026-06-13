@@ -175,26 +175,36 @@ def check_open_int_file_for_changes(context: bpy.types.Context, undoing_redoing=
         return False
 
     internal_name, curr_file_text = text.name, text.as_string() # text.name is the internal_name
-    last_file_text = scene[SCENE_PREV_TEXTS].get(internal_name, False)
-    if last_file_text == False:
-        # This might be the first time checking after load, store initial state
+
+    # --- Revised logic for last_file_text_for_history ---
+    _stored_last_text = scene[SCENE_PREV_TEXTS].get(internal_name) # Get raw value, could be None
+    if _stored_last_text is None or internal_name not in scene[SCENE_PREV_TEXTS]:
+        # This means it's the first check after load/init or prev state was None.
+        # The "state before change" for history is the current content.
+        last_file_text_for_history = curr_file_text
+        # For the *next* comparison, the "previous" will be this current text.
         scene[SCENE_PREV_TEXTS][internal_name] = curr_file_text
-        last_file_text = curr_file_text # Treat current as last for comparison below
+    else:
+        # A valid previous state exists.
+        last_file_text_for_history = _stored_last_text
+    # --- End Revised logic ---
 
     filename_full = scene[SCENE_SHORT_TO_FULL_FILENAME].get(internal_name) # Use internal_name as key
     if filename_full is None:
         return False
 
     file_changed = False
-
-    if curr_file_text != last_file_text:
+    # Compare current text with the determined "last state for history"
+    if curr_file_text != last_file_text_for_history:
         # File changed!
         if constants.DEBUG:
             print('file changed!', filename_full)
 
         # Store the state *before* the change for potential initial history push
 
-        scene[SCENE_PREV_TEXTS][internal_name] = curr_file_text # Use internal_name as key
+        # Update the scene's "previous text" store to the new current text *before* reimport/history.
+        # This is crucial so that if reimport itself triggers another check, it sees the correct "previous".
+        scene[SCENE_PREV_TEXTS][internal_name] = curr_file_text
 
         # <<< MOVED: Reimport BEFORE highlighting >>>
         import_vehicle.on_files_change(context, {filename_full: curr_file_text}, True)
@@ -222,9 +232,9 @@ def check_open_int_file_for_changes(context: bpy.types.Context, undoing_redoing=
         if not undoing_redoing:
             global history_stack, history_stack_idx
 
-            # If history is empty, push the state *before* this change as the initial state.
             if not history_stack:
-                history_stack.insert(0, {internal_name: last_file_text}) # Use internal_name as key
+                # Push the state *before* this change (last_file_text_for_history)
+                history_stack.insert(0, {internal_name: last_file_text_for_history})
                 history_stack_idx = 0
 
             # Now, push the *current* state (after the change)
@@ -288,17 +298,19 @@ def check_int_files_for_changes(context: bpy.types.Context, filenames: list, und
             continue
 
         curr_file_text = text.as_string()
-        last_file_text = scene[SCENE_PREV_TEXTS].get(internal_name, False) # <<< Use internal_name
-        if last_file_text == False:
-            # This might be the first time checking after load, store initial state
-            scene[SCENE_PREV_TEXTS][internal_name] = curr_file_text # <<< Use internal_name
-            last_file_text = curr_file_text # Treat current as last for comparison below
+        # --- Revised logic for last_file_text_for_history ---
+        _stored_last_text = scene[SCENE_PREV_TEXTS].get(internal_name)
+        if _stored_last_text is None or internal_name not in scene[SCENE_PREV_TEXTS]:
+            last_file_text_for_history = curr_file_text
+            scene[SCENE_PREV_TEXTS][internal_name] = curr_file_text # Update for next cycle
+        else:
+            last_file_text_for_history = _stored_last_text
+        # --- End Revised logic ---
 
         filename_full = scene[SCENE_SHORT_TO_FULL_FILENAME].get(internal_name) # <<< Use internal_name
         if filename_full is None:
             continue
-
-        if curr_file_text != last_file_text:
+        if curr_file_text != last_file_text_for_history:
             if not any_file_changed: # First change detected in this run
                 any_file_changed = True # Mark change
                 # <<< FIX: Initialize files_changed_short_names here >>>
@@ -312,9 +324,10 @@ def check_int_files_for_changes(context: bpy.types.Context, filenames: list, und
                 print('file changed!', filename_full)
 
             # Store the state *before* the change for history
-            states_before_change[internal_name] = last_file_text # <<< Use internal_name
+            states_before_change[internal_name] = last_file_text_for_history # Use the determined "before" state
 
-            scene[SCENE_PREV_TEXTS][internal_name] = curr_file_text # <<< Use internal_name
+            # Update the scene's "previous text" store to the new current text
+            scene[SCENE_PREV_TEXTS][internal_name] = curr_file_text
 
             # Check if this is the active file *before* reimporting
             active_text = None
@@ -482,12 +495,12 @@ def on_undo_redo(context: bpy.types.Context, undoing: bool):
             if file.as_string() != text_content:
                 curr_line, curr_char = file.current_line_index, file.current_character
                 file.clear()
-                file.write(text_content)
+                file.write(text_content if text_content is not None else "") # Ensure text_content is a string
                 file.cursor_set(curr_line, character=curr_char) # Restore cursor
 
             # Update the 'previous' text state to match the state we just restored
             # This prevents the next check_..._for_changes from thinking a change occurred
-            scene[SCENE_PREV_TEXTS][internal_name] = text_content # <<< IMPORTANT
+            scene[SCENE_PREV_TEXTS][internal_name] = text_content if text_content is not None else "" # Ensure string
 
             full_filepath = scene[SCENE_SHORT_TO_FULL_FILENAME].get(internal_name) # <<< Use internal_name
             if full_filepath:

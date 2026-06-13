@@ -218,8 +218,10 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
     if not is_jbeam_obj:
         jb_globals._selected_beam_line_info = None; jb_globals._selected_beam_params_info = None
         jb_globals._selected_node_params_info = None; jb_globals._selected_node_line_info = None
+        # Ensure bmesh is freed if it was created temporarily in a previous call
+        if 'bm' in locals() and bm and active_obj.mode != 'EDIT': bm.free()
         refresh_curr_vdata()
-        return
+        return # Exit if not a JBeam object
 
     refresh_curr_vdata()
 
@@ -227,11 +229,12 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
     if jbeam_filepath:
         text_editor.show_int_file(jbeam_filepath)
 
+    # <<< MODIFIED: Keep bmesh access even if not in EDIT mode for face hiding >>>
+    # The face hiding logic needs bmesh access.
+    # Only skip bmesh access if editing is disabled AND it's not a vehicle part (single part needs bmesh in object mode too)
     mesh_editing_enabled = active_obj_data.get(constants.MESH_EDITING_ENABLED, False)
-    if active_obj.mode != 'EDIT' or not mesh_editing_enabled:
-        jb_globals._selected_beam_line_info = None; jb_globals._selected_beam_params_info = None
-        jb_globals._selected_node_params_info = None; jb_globals._selected_node_line_info = None
-        return
+    collection = active_obj.users_collection[0] if active_obj.users_collection else None
+    is_vehicle_part = collection is not None and collection.get(constants.COLLECTION_VEHICLE_MODEL) is not None
 
     active_obj_eval: bpy.types.Object = active_obj.evaluated_get(depsgraph)
 
@@ -257,11 +260,43 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
     bm = None
     try:
         bm = bmesh.from_edit_mesh(active_obj_data)
+        # <<< ADDED: Face Hiding Logic >>>
+        # Only apply face hiding if in Edit Mode and editing is enabled
+        if active_obj.mode == 'EDIT' and mesh_editing_enabled:
+            try:
+                bm.faces.ensure_lookup_table()
+                bm.verts.ensure_lookup_table() # Ensure verts table for modification
+                bm.edges.ensure_lookup_table() # Ensure edges table for modification
+
+                # If the toggle is OFF, hide all faces that are not already hidden.
+                # If the toggle is ON, do nothing here, allowing Blender's native hide/unhide to work.
+                if not ui_props.toggle_native_faces_vis:
+                    needs_bm_update = False
+                    for f_iter in bm.faces: # Use f_iter to avoid conflict if f is used elsewhere
+                        if not f_iter.hide: # If face is currently visible
+                            f_iter.hide = True
+                            needs_bm_update = True
+                            # Also hide its vertices and edges
+                            for v_face in f_iter.verts:
+                                if not v_face.hide:
+                                    v_face.hide = True
+                            for e_face in f_iter.edges:
+                                if not e_face.hide:
+                                    e_face.hide = True
+                    if needs_bm_update:
+                        bmesh.update_edit_mesh(active_obj_data)
+            except Exception as e:
+                print(f"Error applying face visibility: {e}", file=sys.stderr)
+        # <<< END ADDED >>>
     except Exception as e:
         print(f"Error getting bmesh in depsgraph callback: {e}", file=sys.stderr)
+        # Clear tooltips on error
+        jb_globals._selected_beam_line_info = None; jb_globals._selected_beam_params_info = None
+        jb_globals._selected_node_params_info = None; jb_globals._selected_node_line_info = None
         return
 
     init_node_id_layer = bm.verts.layers.string.get(constants.VL_INIT_NODE_ID)
+    # ... (rest of layer checks) ...
     node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
     is_fake_layer = bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
     beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
@@ -303,6 +338,8 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
                 vert_to_rename[node_id_layer] = bytes(new_node_id, 'utf-8')
                 ui_props.batch_node_renaming_node_idx += 1
                 jb_globals._force_do_export = True
+                # Ensure batch renaming respects the local "Rename All References" toggle
+                jb_globals._use_local_rename_toggle_for_next_export = True
             else:
                  print(f"Warning: Batch rename scheme '{ui_props.batch_node_renaming_naming_scheme}' does not contain '#'. No rename performed.")
         except IndexError: print(f"Error: Could not find vertex with index {newly_selected_vert_index} for renaming.")
@@ -400,9 +437,20 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
         if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata and node_id in jb_globals.curr_vdata['nodes']:
             node_data = jb_globals.curr_vdata['nodes'][node_id]; params_list = []
             from .utils import Metadata # Local import for Metadata check
+            show_resolved = ui_props.tooltip_show_resolved_values
             for k in sorted(node_data.keys(), key=lambda x: str(x)):
                 if k == Metadata or k == 'pos' or k == 'posNoOffset': continue
-                params_list.append((k, repr(node_data[k])))
+                val = node_data[k]
+                if show_resolved:
+                    resolved_val = drawing.resolve_jbeam_variable_value(val, jb_globals.jbeam_variables_cache)
+                    display_val_str = repr(resolved_val)
+                    if isinstance(val, str) and val.startswith('=$'):
+                        if resolved_val != val: display_val_str += f" (from {val})"
+                        else: display_val_str += " (unresolved/failed)"
+                    params_list.append((k, display_val_str))
+                else:
+                    params_list.append((k, repr(val)))
+
             if params_list: jb_globals._selected_node_params_info = {'params_list': params_list, 'pos': node_world_pos}
             else: jb_globals._selected_node_params_info = {'params_list': [("(No properties)", "")], 'pos': node_world_pos}
 
@@ -442,10 +490,20 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
                             if current_part_beam_count == target_beam_idx_in_part: global_beam_idx = i; break
                     if global_beam_idx != -1 and global_beam_idx < len(jb_globals.curr_vdata['beams']):
                         beam_data = jb_globals.curr_vdata['beams'][global_beam_idx]; params_list = []
+                        show_resolved = ui_props.tooltip_show_resolved_values
                         from .utils import Metadata # Local import for Metadata check
                         for k in sorted(beam_data.keys(), key=lambda x: str(x)):
                             if k in ('id1:', 'id2:', 'partOrigin') or k == Metadata: continue
-                            params_list.append((k, repr(beam_data[k])))
+                            val = beam_data[k]
+                            if show_resolved:
+                                resolved_val = drawing.resolve_jbeam_variable_value(val, jb_globals.jbeam_variables_cache)
+                                display_val_str = repr(resolved_val)
+                                if isinstance(val, str) and val.startswith('=$'):
+                                    if resolved_val != val: display_val_str += f" (from {val})"
+                                    else: display_val_str += " (unresolved/failed)"
+                                params_list.append((k, display_val_str))
+                            else:
+                                params_list.append((k, repr(val)))
                         if params_list: jb_globals._selected_beam_params_info = {'params_list': params_list, 'midpoint': midpoint}
                         else: jb_globals._selected_beam_params_info = {'params_list': [("(No properties)", "")], 'midpoint': midpoint}
                     else: print(f"  Warning: Global beam index {global_beam_idx} not found or invalid for part '{target_part_origin}' for param lookup.")

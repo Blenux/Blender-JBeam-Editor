@@ -56,6 +56,7 @@ highlighted_element_type = None # 'node', 'beam', 'rail', 'torsionbar', 'cross_p
 # highlighted_element_coords is now managed in drawing.py
 highlighted_element_color = (1.0, 1.0, 1.0, 1.0) # Default white (outer color for torsionbar)
 highlighted_element_mid_color = (1.0, 0.0, 0.0, 1.0) # Default red (middle color for torsionbar)
+
 highlighted_node_ids = set() # For quick membership checks (e.g., text coloring)
 highlighted_element_ordered_node_ids = [] # <<< ADDED: Store IDs in order for drawing
 _populating_search_id_from_highlight = False # <<< ADDED: Flag for search update control
@@ -67,4 +68,7 @@ last_text_area_info = {'name': None, 'line_index': -1}
 # Stores found variables like: {'$varName': {'value': val, 'source_file': str, 'line_number': int}}
 jbeam_variables_cache: dict = {}
 jbeam_variables_cache_dirty: bool = True
+# <<< ADDED: Flag to indicate if the local rename references toggle should be used for the next export >>>
+_use_local_rename_toggle_for_next_export: bool = False
+
 # <<< END ADDED >>>

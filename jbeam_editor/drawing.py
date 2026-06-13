@@ -467,6 +467,266 @@ def find_node_line_number(jbeam_filepath: str, target_part_origin: str, target_n
         traceback.print_exc()
         return None
 
+# Helper function to find the line number of a torsionbar in the AST
+def find_torsionbar_line_number(jbeam_filepath: str, target_part_origin: str, target_ids: tuple[str, str, str, str]):
+    """
+    Finds the 1-based line number of a specific torsionbar definition in a JBeam file
+    by matching all four node IDs.
+    """
+    if any(nid.startswith('TEMP_') for nid in target_ids):
+        return None
+
+    file_content = text_editor.read_int_file(jbeam_filepath)
+    if not file_content: return None
+
+    try:
+        ast_data = sjsonast.parse(file_content)
+        if not ast_data: return None
+        ast_nodes = ast_data['ast']['nodes']
+        sjsonast.calculate_char_positions(ast_nodes)
+
+        stack = []
+        in_dict = True
+        pos_in_arr = 0
+        temp_dict_key = None
+        dict_key = None
+
+        i = 0
+        while i < len(ast_nodes):
+            node: sjsonast.ASTNode = ast_nodes[i]
+            node_type = node.data_type
+
+            if node_type == 'wsc':
+                i += 1
+                continue
+
+            in_target_part = len(stack) > 0 and stack[0][0] == target_part_origin
+            in_torsionbars_section = (
+                in_target_part and
+                len(stack) == 2 and
+                stack[1][0] == 'torsionbars' and
+                not in_dict # Inside the torsionbars array
+            )
+
+            if in_dict:
+                if node_type == '{':
+                    if dict_key is not None: stack.append((dict_key, True))
+                    dict_key = None; temp_dict_key = None; in_dict = True
+                elif node_type == '[':
+                    if dict_key is not None: stack.append((dict_key, True))
+                    dict_key = None; temp_dict_key = None; in_dict = False
+                elif node_type == '}':
+                    if stack: _, in_dict = stack.pop()
+                    else: in_dict = None
+                else:
+                    if temp_dict_key is None and node_type == '"': temp_dict_key = node.value
+                    elif node_type == ':': dict_key = temp_dict_key
+                    elif dict_key is not None: dict_key = None; temp_dict_key = None
+            else: # In array
+                if node_type == '[': # Start of a torsionbar definition array
+                    entry_start_node = node
+                    stack.append((pos_in_arr, False))
+                    pos_in_arr = 0; # Reset for inner array
+
+                    if in_torsionbars_section:
+                        parsed_ids = []
+                        k = i + 1
+                        while k < len(ast_nodes):
+                            inner_node = ast_nodes[k]
+                            if inner_node.data_type == ']': break
+                            if inner_node.data_type == '"': parsed_ids.append(inner_node.value)
+                            k += 1
+
+                        if len(parsed_ids) == 4 and tuple(parsed_ids) == target_ids:
+                            start_char_pos = entry_start_node.start_pos
+                            line_number = file_content[:start_char_pos].count('\n') + 1
+                            return line_number
+                elif node_type == '{':
+                    stack.append((pos_in_arr, False)); pos_in_arr = 0; in_dict = True
+                elif node_type == ']':
+                    if stack:
+                        prev_idx, prev_in_dict = stack.pop()
+                        in_dict = prev_in_dict
+                        pos_in_arr = prev_idx + 1 if not prev_in_dict else 0
+                    else: in_dict = None
+                else: # Value node
+                    pos_in_arr +=1
+            i += 1
+        return None
+    except Exception: # pylint: disable=broad-except-clause
+        # print(f"Error finding torsionbar line number: {e}", file=sys.stderr)
+        # traceback.print_exc()
+        return None
+
+# Helper function to find the line number of a rail definition in the AST
+def find_rail_line_number(jbeam_filepath: str, target_part_origin: str, target_rail_name: str):
+    """
+    Finds the 1-based line number of a specific rail definition (the key) in a JBeam file.
+    """
+    file_content = text_editor.read_int_file(jbeam_filepath)
+    if not file_content: return None
+
+    try:
+        ast_data = sjsonast.parse(file_content)
+        if not ast_data: return None
+        ast_nodes = ast_data['ast']['nodes']
+        sjsonast.calculate_char_positions(ast_nodes)
+
+        stack = []
+        in_dict = True
+        pos_in_arr = 0 # Not used for dict key search but part of traversal state
+        temp_dict_key = None
+        dict_key = None
+
+        i = 0
+        while i < len(ast_nodes):
+            node: sjsonast.ASTNode = ast_nodes[i]
+            node_type = node.data_type
+
+            if node_type == 'wsc':
+                i += 1
+                continue
+
+            in_target_part = len(stack) > 0 and stack[0][0] == target_part_origin
+            in_rails_dict_level = ( # True if we are at the level where rail names are keys
+                in_target_part and
+                len(stack) == 2 and
+                stack[1][0] == 'rails' and
+                in_dict
+            )
+
+            if in_dict:
+                if node_type == '{':
+                    if dict_key is not None: stack.append((dict_key, True))
+                    dict_key = None; temp_dict_key = None; in_dict = True
+                elif node_type == '[':
+                    if dict_key is not None: stack.append((dict_key, True))
+                    dict_key = None; temp_dict_key = None; in_dict = False
+                elif node_type == '}':
+                    if stack: _, in_dict = stack.pop()
+                    else: in_dict = None
+                else: # Key or value
+                    if temp_dict_key is None and node_type == '"':
+                        if in_rails_dict_level and node.value == target_rail_name:
+                            start_char_pos = node.start_pos
+                            line_number = file_content[:start_char_pos].count('\n') + 1
+                            return line_number
+                        temp_dict_key = node.value
+                    elif node_type == ':': dict_key = temp_dict_key
+                    elif dict_key is not None: # Value processed, reset
+                        dict_key = None; temp_dict_key = None
+            else: # In array
+                if node_type == '[':
+                    stack.append((pos_in_arr, False)); pos_in_arr = 0; in_dict = False
+                elif node_type == '{':
+                    stack.append((pos_in_arr, False)); pos_in_arr = 0; in_dict = True
+                elif node_type == ']':
+                    if stack:
+                        prev_idx, prev_in_dict = stack.pop()
+                        in_dict = prev_in_dict
+                        pos_in_arr = prev_idx + 1 if not prev_in_dict else 0
+                    else: in_dict = None
+                else: pos_in_arr +=1
+            i += 1
+        return None
+    except Exception: # pylint: disable=broad-except-clause
+        # print(f"Error finding rail line number: {e}", file=sys.stderr)
+        # traceback.print_exc()
+        return None
+
+# Helper function to find the line number of a slidenode in the AST
+def find_slidenode_line_number(jbeam_filepath: str, target_part_origin: str, target_node_id: str):
+    """
+    Finds the 1-based line number of a specific slidenode definition in a JBeam file
+    by matching the first node ID in the slidenode entry.
+    """
+    if target_node_id.startswith('TEMP_'):
+        return None
+
+    file_content = text_editor.read_int_file(jbeam_filepath)
+    if not file_content: return None
+
+    try:
+        ast_data = sjsonast.parse(file_content)
+        if not ast_data: return None
+        ast_nodes = ast_data['ast']['nodes']
+        sjsonast.calculate_char_positions(ast_nodes)
+
+        stack = []
+        in_dict = True
+        pos_in_arr = 0
+        temp_dict_key = None
+        dict_key = None
+
+        i = 0
+        while i < len(ast_nodes):
+            node: sjsonast.ASTNode = ast_nodes[i]
+            node_type = node.data_type
+
+            if node_type == 'wsc':
+                i += 1
+                continue
+
+            in_target_part = len(stack) > 0 and stack[0][0] == target_part_origin
+            in_slidenodes_section = (
+                in_target_part and
+                len(stack) == 2 and
+                stack[1][0] == 'slidenodes' and
+                not in_dict # Inside the slidenodes array
+            )
+
+            if in_dict:
+                if node_type == '{':
+                    if dict_key is not None: stack.append((dict_key, True))
+                    dict_key = None; temp_dict_key = None; in_dict = True
+                elif node_type == '[':
+                    if dict_key is not None: stack.append((dict_key, True))
+                    dict_key = None; temp_dict_key = None; in_dict = False
+                elif node_type == '}':
+                    if stack: _, in_dict = stack.pop()
+                    else: in_dict = None
+                else:
+                    if temp_dict_key is None and node_type == '"': temp_dict_key = node.value
+                    elif node_type == ':': dict_key = temp_dict_key
+                    elif dict_key is not None: dict_key = None; temp_dict_key = None
+            else: # In array
+                if node_type == '[': # Start of a slidenode definition array
+                    entry_start_node = node
+                    stack.append((pos_in_arr, False))
+                    pos_in_arr = 0 # Reset for inner array
+
+                    if in_slidenodes_section:
+                        first_id_in_entry = None
+                        k = i + 1
+                        while k < len(ast_nodes): # Find first string (node ID)
+                            inner_node = ast_nodes[k]
+                            if inner_node.data_type == ']': break
+                            if inner_node.data_type == '"':
+                                first_id_in_entry = inner_node.value
+                                break
+                            k += 1
+
+                        if first_id_in_entry == target_node_id:
+                            start_char_pos = entry_start_node.start_pos
+                            line_number = file_content[:start_char_pos].count('\n') + 1
+                            return line_number
+                elif node_type == '{':
+                    stack.append((pos_in_arr, False)); pos_in_arr = 0; in_dict = True
+                elif node_type == ']':
+                    if stack:
+                        prev_idx, prev_in_dict = stack.pop()
+                        in_dict = prev_in_dict
+                        pos_in_arr = prev_idx + 1 if not prev_in_dict else 0
+                    else: in_dict = None
+                else: # Value node
+                    pos_in_arr +=1
+            i += 1
+        return None
+    except Exception: # pylint: disable=broad-except-clause
+        # print(f"Error finding slidenode line number: {e}", file=sys.stderr)
+        # traceback.print_exc()
+        return None
+
 # Helper function to scroll Text Editor
 def _scroll_editor_to_line(context: bpy.types.Context, filepath: str, line: int):
     """Scrolls the Text Editor to the specified file and line."""
@@ -1518,70 +1778,80 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                                 rail_node_id1, rail_node_id2 = links[0], links[1]
 
                 if rail_node_id1 is None or rail_node_id2 is None:
-                    print(f"Warning: Could not find rail definition for '{slidenode_rail_name}' referenced by slidenode '{slidenode_node_id}'.") # <<< Added slidenode_node_id for context
-                    _tag_redraw_3d_views(context) # Always tag redraw for highlight update
-                    # <<< ADDED: Mark highlight dirty if it was previously active >>>
+                    line_num_str = ""
+                    if full_filepath and current_part_name:
+                        line_num = find_slidenode_line_number(full_filepath, current_part_name, slidenode_node_id)
+                        if line_num is not None:
+                            line_num_str = f" (Slidenode Line: {line_num})"
+                    print(f"Warning: Could not find rail definition for '{slidenode_rail_name}' referenced by slidenode '{slidenode_node_id}'.")
+                    print(f"  (Slidenode definition in {full_filepath or '?'} [Part: {current_part_name or '?'}]{line_num_str})", file=sys.stderr)
+                    _tag_redraw_3d_views(context)
                     if prev_highlight_type is not None: _highlight_dirty = True
-                    return False # Cannot highlight if rail nodes not found
+                    return False
 
-                # <<< START: MODIFIED CHECK - Use all_nodes_cache >>>
-                # Check if the slidenode's own node and the rail nodes exist in the global cache
                 slidenode_id_valid = slidenode_node_id in all_nodes_cache
                 rail_node1_valid = rail_node_id1 in all_nodes_cache
                 rail_node2_valid = rail_node_id2 in all_nodes_cache
 
                 if not slidenode_id_valid:
-                    print(f"Warning: Slidenode's own node ID '{slidenode_node_id}' not found in node cache.")
+                    line_num_str = ""
+                    if full_filepath and current_part_name:
+                        line_num = find_slidenode_line_number(full_filepath, current_part_name, slidenode_node_id)
+                        if line_num is not None: line_num_str = f" (Slidenode Line: {line_num})"
+                    print(f"Warning: Slidenode's own node ID '{slidenode_node_id}' not found in node cache (defined in {full_filepath or '?'} [Part: {current_part_name or '?'}]{line_num_str}).")
                     _tag_redraw_3d_views(context)
                     if prev_highlight_type is not None: _highlight_dirty = True
                     return False
                 if not rail_node1_valid:
-                    print(f"Warning: Rail node '{rail_node_id1}' (for slidenode '{slidenode_node_id}') not found in node cache.")
+                    line_num_str = ""
+                    if full_filepath and current_part_name:
+                        line_num = find_rail_line_number(full_filepath, current_part_name, slidenode_rail_name)
+                        if line_num is not None: line_num_str = f" (Rail Line: {line_num})"
+                    print(f"Warning: Rail node '{rail_node_id1}' (for slidenode '{slidenode_node_id}') not found in node cache (Rail '{slidenode_rail_name}' defined in {full_filepath or '?'} [Part: {current_part_name or '?'}]{line_num_str}).")
                     _tag_redraw_3d_views(context)
                     if prev_highlight_type is not None: _highlight_dirty = True
                     return False
                 if not rail_node2_valid:
-                    print(f"Warning: Rail node '{rail_node_id2}' (for slidenode '{slidenode_node_id}') not found in node cache.")
+                    line_num_str = ""
+                    if full_filepath and current_part_name:
+                        line_num = find_rail_line_number(full_filepath, current_part_name, slidenode_rail_name)
+                        if line_num is not None: line_num_str = f" (Rail Line: {line_num})"
+                    print(f"Warning: Rail node '{rail_node_id2}' (for slidenode '{slidenode_node_id}') not found in node cache (Rail '{slidenode_rail_name}' defined in {full_filepath or '?'} [Part: {current_part_name or '?'}]{line_num_str}).")
                     _tag_redraw_3d_views(context)
                     if prev_highlight_type is not None: _highlight_dirty = True
                     return False
-                # <<< END: MODIFIED CHECK >>>
 
-                # Now find positions for slidenode_node_id, rail_node_id1, rail_node_id2
                 node_ids_to_find = [slidenode_node_id, rail_node_id1, rail_node_id2]
-                slidenode_world_positions = {} # Use a dict for slidenode specific positions
+                slidenode_world_positions = {}
 
                 for node_id in node_ids_to_find:
                     wp = None
                     pos_data = temp_node_map.get(node_id)
-                    cache_data = all_nodes_cache.get(node_id) # Use the cache directly
+                    cache_data = all_nodes_cache.get(node_id)
                     if pos_data:
                         wp = pos_data[1] @ pos_data[0]
                     elif cache_data:
-                        wp = cache_data[0] # Get position from cache
+                        wp = cache_data[0]
 
                     if wp is None:
-                        # This check should ideally not be hit if the cache checks above passed,
-                        # but keep it as a fallback for geometry/cache issues.
                         missing_nodes.append(node_id)
                     slidenode_world_positions[node_id] = wp
 
                 if missing_nodes:
-                    # Print a different warning if nodes were found in cache but not in geometry
-                    print(f"Warning: Could not find geometry position for slidenode nodes: {missing_nodes}")
-                    _tag_redraw_3d_views(context) # Always tag redraw for highlight update
-                    # <<< ADDED: Mark highlight dirty if it was previously active >>>
+                    line_num_str = ""
+                    if full_filepath and current_part_name:
+                        line_num = find_slidenode_line_number(full_filepath, current_part_name, slidenode_node_id)
+                        if line_num is not None: line_num_str = f" (Slidenode Line: {line_num})"
+                    print(f"Warning: Could not find geometry position for slidenode nodes: {missing_nodes} (Slidenode '{slidenode_node_id}' defined in {full_filepath or '?'} [Part: {current_part_name or '?'}]{line_num_str})")
+                    _tag_redraw_3d_views(context)
                     if prev_highlight_type is not None: _highlight_dirty = True
                     return False
 
-                # Populate highlight data for slidenode
                 jb_globals.highlighted_element_type = 'slidenode'
-                jb_globals.highlighted_node_ids.add(slidenode_node_id) # Add only the slidenode's ID for text coloring
-                # Store the rail node IDs for highlight coordinate population during rebuild
+                jb_globals.highlighted_node_ids.add(slidenode_node_id)
                 jb_globals.highlighted_element_ordered_node_ids = [rail_node_id1, rail_node_id2]
-                # Add rail segment coordinates
                 highlight_coords.extend([slidenode_world_positions[rail_node_id1], slidenode_world_positions[rail_node_id2]])
-                jb_globals.highlighted_element_color = original_color # Use rail color set earlier
+                jb_globals.highlighted_element_color = original_color
                 highlight_set = True
             # <<< END ADDED: Slidenode specific position finding >>>
             else: # Logic for beams, rails, torsionbars
@@ -1609,8 +1879,18 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                     world_positions.append(wp)
 
                 if missing_nodes:
-                    _tag_redraw_3d_views(context) # Always tag redraw for highlight update
-                    # <<< ADDED: Mark highlight dirty if it was previously active >>>
+                    line_num_str = ""
+                    if full_filepath and current_part_name and element_type:
+                        if element_type == 'beam': line_num = find_beam_line_number(full_filepath, current_part_name, node_ids[0], node_ids[1])
+                        elif element_type == 'rail':
+                            # Use the current_rail_name captured during AST traversal
+                            line_num = find_rail_line_number(full_filepath, current_part_name, current_rail_name if current_rail_name else "unknown_rail_name")
+                        elif element_type == 'torsionbar': line_num = find_torsionbar_line_number(full_filepath, current_part_name, tuple(node_ids))
+                        if line_num is not None: line_num_str = f" (Line: {line_num})"
+                    # <<< MODIFIED: Check console warning toggle >>>
+                    if ui_props.show_console_warnings_missing_nodes:
+                        print(f"Warning: Could not find geometry position for {element_type} nodes: {missing_nodes} (defined in {full_filepath or '?'} [Part: {current_part_name or '?'}]{line_num_str})", file=sys.stderr)
+                    _tag_redraw_3d_views(context)
                     if prev_highlight_type is not None: _highlight_dirty = True
                     return False
 
@@ -1627,17 +1907,14 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                     id2_in_active_geom = node_ids[1] in temp_node_map
 
                     if is_cross_part_candidate and id1_in_active_geom and id2_in_active_geom:
-                         # Use correct normal color based on beamType (determined earlier)
-                         # The original_color/width are already set correctly for the beam type
                          highlight_coords.extend([world_positions[0], world_positions[1]])
                          highlight_set = True
                     elif is_cross_part_candidate:
-                        element_type = 'cross_part_beam' # Reclassify for drawing
-                        original_color = ui_props.cross_part_beam_color # Use cross-part color
+                        element_type = 'cross_part_beam'
+                        original_color = ui_props.cross_part_beam_color
                         highlight_coords.extend([world_positions[0], world_positions[1]])
                         highlight_set = True
-                    else: # Normal beam within the same part
-                        # Use the color/width determined earlier based on beamType
+                    else:
                         highlight_coords.extend([world_positions[0], world_positions[1]])
                         highlight_set = True
 
@@ -1646,10 +1923,8 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                     highlight_torsionbar_mid_coords.extend([world_positions[1], world_positions[2]])
                     highlight_torsionbar_outer_coords.extend([world_positions[2], world_positions[3]])
                     highlight_set = True
-                    # Colors/width already set
 
                 elif element_type == 'rail':
-                     # Cross-part check for rails
                      is_cross_part_candidate = False
                      if len(node_origins) == 2:
                          origin1 = node_origins.get(node_ids[0], '?')
@@ -1661,18 +1936,15 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                      id2_in_active_geom = node_ids[1] in temp_node_map
 
                      if is_cross_part_candidate and id1_in_active_geom and id2_in_active_geom:
-                         # Still a rail, just happens to use nodes from different parts' geometry
-                         original_color = ui_props.rail_color # Use rail color
+                         original_color = ui_props.rail_color
                          highlight_coords.extend([world_positions[0], world_positions[1]])
                          highlight_set = True
                      elif is_cross_part_candidate:
-                          element_type = 'cross_part_beam' # Reclassify for drawing as cross-part
-                          # original_color = ui_props.cross_part_beam_color
-                          original_color = ui_props.rail_color # Use rail color
+                          element_type = 'cross_part_beam'
+                          original_color = ui_props.rail_color
                           highlight_coords.extend([world_positions[0], world_positions[1]])
                           highlight_set = True
-                     else: # Normal rail within the same part
-                         # Colors/width already set
+                     else:
                          highlight_coords.extend([world_positions[0], world_positions[1]])
                          highlight_set = True
 
@@ -1681,19 +1953,15 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                 jb_globals.highlighted_element_type = element_type
                 jb_globals.highlighted_element_color = original_color
                 jb_globals.highlighted_element_mid_color = original_mid_color
-                # Only add node IDs for non-slidenode types here, slidenode handled above
                 if element_type != 'slidenode':
-                    jb_globals.highlighted_node_ids.update(node_ids) # Use the parsed node_ids list
+                    jb_globals.highlighted_node_ids.update(node_ids)
                     jb_globals.highlighted_element_ordered_node_ids = node_ids
-                _tag_redraw_3d_views(context) # Always tag redraw for highlight update
-                # <<< ADDED: Mark highlight dirty >>>
+                _tag_redraw_3d_views(context)
                 _highlight_dirty = True
             else:
-                 _tag_redraw_3d_views(context) # Always tag redraw for highlight update
-                 # <<< ADDED: Mark highlight dirty if it was previously active >>>
+                 _tag_redraw_3d_views(context)
                  if prev_highlight_type is not None: _highlight_dirty = True
 
-        # <<< CORRECTED PLACEMENT for UI Search Box Update >>>
         if highlight_set:
             if element_type == 'node' and len(node_ids) == 1:
                 single_node_id = node_ids[0]
@@ -1704,26 +1972,20 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                 beam_id_str = f"{node_ids[0]}-{node_ids[1]}"
                 if hasattr(ui_props, 'search_node_id'):
                     if ui_props.search_node_id != beam_id_str:
-                        # Set the flag *before* assigning the value
                         jb_globals._populating_search_id_from_highlight = True
-                        # Assign the value (this will trigger the update callback)
                         ui_props.search_node_id = beam_id_str
-        # <<< END CORRECTED PLACEMENT >>>
-
         return highlight_set
 
     except Exception as e:
         print(f"EXCEPTION in find_and_highlight_element_for_line: {e}", file=sys.stderr)
         traceback.print_exc()
-        # Clear highlight on exception
         highlight_coords.clear()
         highlight_torsionbar_outer_coords.clear()
         highlight_torsionbar_mid_coords.clear()
         jb_globals.highlighted_node_ids.clear()
         jb_globals.highlighted_element_ordered_node_ids.clear()
-        jb_globals.highlighted_element_type = None # <<< Ensure type is cleared
-        _tag_redraw_3d_views(context) # Always tag redraw for highlight update
-        # <<< ADDED: Mark highlight dirty if it was previously active >>>
+        jb_globals.highlighted_element_type = None
+        _tag_redraw_3d_views(context)
         if prev_highlight_type is not None: _highlight_dirty = True
         return False
 # <<< END MODIFIED FUNCTION find_and_highlight_element_for_line >>>
@@ -1757,6 +2019,48 @@ def draw_callback_px(context: bpy.types.Context):
     should_draw = is_valid_jbeam_obj and is_selected # Allow drawing even if editing disabled for tooltips/IDs
     if not should_draw: return
     active_obj_data = active_obj.data
+
+    # --- MODIFIED: Sanitize tooltip info globals if in Edit Mode ---
+    # This ensures tooltips reflect the latest selection state during a full refresh.
+    if active_obj and active_obj.mode == 'EDIT' and active_obj.data: # Removed veh_render_dirty check
+        temp_bm_sel_update_px = None
+        try:
+            if isinstance(active_obj.data, bpy.types.Mesh):
+                temp_bm_sel_update_px = bmesh.from_edit_mesh(active_obj.data)
+                temp_bm_sel_update_px.verts.ensure_lookup_table()
+                temp_bm_sel_update_px.edges.ensure_lookup_table()
+
+                freshly_selected_node_count = 0
+                node_is_fake_layer_temp_px = temp_bm_sel_update_px.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+                if node_is_fake_layer_temp_px:
+                    for v_temp_sel_px in temp_bm_sel_update_px.verts:
+                        if not v_temp_sel_px[node_is_fake_layer_temp_px] and v_temp_sel_px.select:
+                            freshly_selected_node_count += 1
+
+                freshly_selected_beam_count = 0
+                beam_indices_layer_temp_px = temp_bm_sel_update_px.edges.layers.string.get(constants.EL_BEAM_INDICES)
+                if beam_indices_layer_temp_px:
+                    for e_temp_px in temp_bm_sel_update_px.edges:
+                        if e_temp_px[beam_indices_layer_temp_px].decode('utf-8') != '' and e_temp_px.select:
+                            freshly_selected_beam_count += 1
+
+                # Sanitize node tooltip info
+                if freshly_selected_node_count != 1 and jb_globals._selected_node_params_info is not None:
+                    jb_globals._selected_node_params_info = None
+                    jb_globals._selected_node_line_info = None
+                    # print("DEBUG: Cleared node tooltip info in draw_callback_px due to selection mismatch")
+
+                # Sanitize beam tooltip info
+                if freshly_selected_beam_count != 1 and jb_globals._selected_beam_params_info is not None:
+                    jb_globals._selected_beam_params_info = None
+                    jb_globals._selected_beam_line_info = None
+                    # print("DEBUG: Cleared beam tooltip info in draw_callback_px due to selection mismatch")
+
+        except RuntimeError as e_bm_get_px:
+            print(f"Info: Could not get bmesh for tooltip sanitization in draw_callback_px: {e_bm_get_px}", file=sys.stderr)
+        except Exception as e_sel_update_px:
+            print(f"Error sanitizing tooltip info in draw_callback_px: {e_sel_update_px}", file=sys.stderr)
+    # --- END ADDED ---
 
     collection = active_obj.users_collection[0] if active_obj.users_collection else None
     is_vehicle_part = collection is not None and collection.get(constants.COLLECTION_VEHICLE_MODEL) is not None
@@ -1845,14 +2149,14 @@ def draw_callback_px(context: bpy.types.Context):
                     if obj_iter.data and obj_iter.data.get(constants.MESH_JBEAM_PART):
                         part_name_to_obj[obj_iter.data[constants.MESH_JBEAM_PART]] = obj_iter
             # ... (loop through part_name_to_obj) ...
-            for part_name, obj in part_name_to_obj.items():
+            for part_name, obj_iter_local in part_name_to_obj.items(): # Renamed obj to obj_iter_local
                 # ... (visibility check, bmesh setup/cleanup) ...
                 # ... (layer checks) ...
-                if not obj.visible_get(): continue
-                part_bm = None; obj_data = obj.data
+                if not obj_iter_local.visible_get(): continue # Use obj_iter_local
+                part_bm = None; obj_data = obj_iter_local.data # Use obj_iter_local
                 try:
                     # ... (bmesh acquisition) ...
-                    if obj == active_obj and active_obj.mode == 'EDIT': bm = bmesh.from_edit_mesh(obj_data)
+                    if obj_iter_local == active_obj and active_obj.mode == 'EDIT': bm = bmesh.from_edit_mesh(obj_data) # Use obj_iter_local
                     else: bm = bmesh.new(); bm.from_mesh(obj_data)
 
                     node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
@@ -1867,11 +2171,11 @@ def draw_callback_px(context: bpy.types.Context):
 
                     for v in bm.verts:
                         if v[is_fake_layer] == 1 or v.hide: continue
-                        coord = obj.matrix_world @ v.co
+                        coord = obj_iter_local.matrix_world @ v.co # Use obj_iter_local
                         node_id = v[node_id_layer].decode('utf-8')
                         node_origin = v[node_origin_layer].decode('utf-8') # <<< Get node origin
 
-                        if obj == active_obj:
+                        if obj_iter_local == active_obj: # Use obj_iter_local
                             active_object_defined_node_ids.add(node_id)
 
                         pos_text = location_3d_to_region_2d(ctxRegion, ctxRegionData, coord)
@@ -1901,7 +2205,7 @@ def draw_callback_px(context: bpy.types.Context):
                             should_draw_node = True # Assume we should draw unless calculation fails
                             # <<< MODIFICATION END >>>
                             text_color = default_color # Start with default
-                            is_selected_in_viewport = obj == active_obj and is_editing_enabled and v.index in selected_indices_set
+                            is_selected_in_viewport = obj_iter_local == active_obj and is_editing_enabled and v.index in selected_indices_set # Use obj_iter_local
                             is_highlighted_by_text = node_id in highlighted_nodes
                             is_slidenode_highlight = jb_globals.highlighted_element_type == 'slidenode' and is_highlighted_by_text
 
@@ -1969,9 +2273,9 @@ def draw_callback_px(context: bpy.types.Context):
                                 # --- END ADDED ---
                                 draw_text_with_outline(font_id, node_id_display_string, pos_text[0], pos_text[1], text_color)
                             # <<< MODIFICATION END >>>
-                except Exception as e: print(f"Error processing part {obj.name} for drawing: {e}", file=sys.stderr)
+                except Exception as e: print(f"Error processing part {obj_iter_local.name} for drawing: {e}", file=sys.stderr) # Use obj_iter_local
                 finally:
-                     if bm and not (obj == active_obj and active_obj.mode == 'EDIT'): bm.free() # Corrected cleanup check
+                     if bm and not (obj_iter_local == active_obj and active_obj.mode == 'EDIT'): bm.free() # Use obj_iter_local
 
         # --- Single Part Iteration ---
         elif bm: # bm is guaranteed to be for the active object here
@@ -2086,9 +2390,9 @@ def draw_callback_px(context: bpy.types.Context):
         # Logic to populate target_other_part_node_ids remains the same
         if active_part_name and active_filepath:
             part_data = None
-            if jb_globals.curr_vdata and active_part_name in jb_globals.curr_vdata:
+            if jb_globals.curr_vdata and active_part_name in jb_globals.curr_vdata: # Check if active_part_name is a key
                 part_data = jb_globals.curr_vdata[active_part_name]
-            else:
+            else: # Fallback to parsing the file if not in curr_vdata (e.g. single part import)
                 full_file_data, _ = jbeam_io.get_jbeam(active_filepath, True, False)
                 if full_file_data and active_part_name in full_file_data:
                     part_data = full_file_data[active_part_name]
@@ -2562,6 +2866,66 @@ def draw_callback_view(context: bpy.types.Context):
 
     # --- Rebuild Logic (Main Beams/Nodes) ---
     if veh_render_dirty:
+        warned_missing_nodes_this_rebuild.clear()
+        _reported_missing_vars_this_rebuild.clear() # Clear this set as well
+        _reported_unsupported_ops_this_rebuild.clear() # Clear this set
+
+        # --- ADDED: Force update of selection globals if in edit mode ---
+        # This ensures that jb_globals.selected_beam_edge_indices (and others)
+        # are up-to-date before populating coordinate lists for drawing.
+        if active_obj and active_obj.mode == 'EDIT' and active_obj.data:
+            temp_bm_sel_update = None
+            try:
+                if isinstance(active_obj.data, bpy.types.Mesh): # Ensure it's a mesh
+                    temp_bm_sel_update = bmesh.from_edit_mesh(active_obj.data)
+                    temp_bm_sel_update.verts.ensure_lookup_table()
+                    temp_bm_sel_update.edges.ensure_lookup_table()
+                    temp_bm_sel_update.faces.ensure_lookup_table()
+
+                    # Update jb_globals.selected_nodes
+                    current_selected_node_indices_temp = set()
+                    node_is_fake_layer_temp = temp_bm_sel_update.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+                    node_init_id_layer_temp = temp_bm_sel_update.verts.layers.string.get(constants.VL_INIT_NODE_ID)
+                    if node_is_fake_layer_temp and node_init_id_layer_temp:
+                        for v_temp_sel in temp_bm_sel_update.verts:
+                            if not v_temp_sel[node_is_fake_layer_temp] and v_temp_sel.select:
+                                current_selected_node_indices_temp.add(v_temp_sel.index)
+                        if current_selected_node_indices_temp != jb_globals.previous_selected_indices:
+                            jb_globals.selected_nodes.clear()
+                            for idx_temp_sel in current_selected_node_indices_temp:
+                                try: jb_globals.selected_nodes.append((idx_temp_sel, temp_bm_sel_update.verts[idx_temp_sel][node_init_id_layer_temp].decode('utf-8')))
+                                except (IndexError, KeyError, ReferenceError): pass
+                            jb_globals.previous_selected_indices = current_selected_node_indices_temp.copy()
+
+                    # Update jb_globals.selected_beam_edge_indices & jb_globals.selected_beams
+                    current_selected_beam_indices_temp = set()
+                    beam_indices_layer_temp = temp_bm_sel_update.edges.layers.string.get(constants.EL_BEAM_INDICES)
+                    if beam_indices_layer_temp:
+                        for e_temp in temp_bm_sel_update.edges:
+                            if e_temp[beam_indices_layer_temp].decode('utf-8') != '' and e_temp.select:
+                                current_selected_beam_indices_temp.add(e_temp.index)
+                        if current_selected_beam_indices_temp != jb_globals.selected_beam_edge_indices:
+                            jb_globals.selected_beam_edge_indices = current_selected_beam_indices_temp.copy()
+                            jb_globals.selected_beams.clear()
+                            for edge_idx_temp in jb_globals.selected_beam_edge_indices:
+                                try: jb_globals.selected_beams.append((edge_idx_temp, temp_bm_sel_update.edges[edge_idx_temp][beam_indices_layer_temp].decode('utf-8')))
+                                except (IndexError, ReferenceError): pass
+
+                    # Update jb_globals.selected_tris_quads
+                    jb_globals.selected_tris_quads.clear()
+                    face_idx_layer_temp = temp_bm_sel_update.faces.layers.int.get(constants.FL_FACE_IDX)
+                    if face_idx_layer_temp:
+                        for f_temp_sel in temp_bm_sel_update.faces:
+                            face_idx_val_temp = f_temp_sel[face_idx_layer_temp]
+                            if face_idx_val_temp != 0 and f_temp_sel.select:
+                                jb_globals.selected_tris_quads.append((f_temp_sel.index, face_idx_val_temp))
+            except RuntimeError as e_bm_get: # Catch error if bmesh.from_edit_mesh fails
+                print(f"Info: Could not get bmesh for selection update in draw_callback_view (possibly due to ongoing operation): {e_bm_get}", file=sys.stderr)
+            except Exception as e_sel_update:
+                print(f"Error updating selection globals in draw_callback_view: {e_sel_update}", file=sys.stderr)
+                traceback.print_exc()
+        # --- END ADDED ---
+
         # --- 1. Clear all coordinate lists and batches ---
         dynamic_beam_coords_colors.clear()
         beam_coords.clear(); anisotropic_beam_coords.clear(); support_beam_coords.clear()
@@ -2594,6 +2958,7 @@ def draw_callback_view(context: bpy.types.Context):
         collection = active_obj.users_collection[0] if active_obj.users_collection else None
         is_vehicle_part = collection is not None and collection.get(constants.COLLECTION_VEHICLE_MODEL) is not None
         current_part_name = active_obj_data.get(constants.MESH_JBEAM_PART)
+        active_filepath = active_obj_data.get(constants.MESH_JBEAM_FILE_PATH) # Get active file path
 
         # --- 3. Build node maps & Calculate Auto Node Thresholds ---
         node_id_to_hide_status: dict[str, bool] = {}
@@ -2605,12 +2970,12 @@ def draw_callback_view(context: bpy.types.Context):
                     if obj_iter.data and obj_iter.data.get(constants.MESH_JBEAM_PART):
                         part_name_to_obj[obj_iter.data[constants.MESH_JBEAM_PART]] = obj_iter
 
-            for obj_iter in collection.all_objects:
-                if obj_iter.visible_get() and obj_iter.data and obj_iter.data.get(constants.MESH_JBEAM_PART) is not None:
-                    obj_iter_data = obj_iter.data; part_name = obj_iter_data.get(constants.MESH_JBEAM_PART)
+            for obj_iter_local in part_name_to_obj.values(): # Use .values() for direct iteration
+                if obj_iter_local.visible_get() and obj_iter_local.data and obj_iter_local.data.get(constants.MESH_JBEAM_PART) is not None:
+                    obj_iter_data = obj_iter_local.data; part_name = obj_iter_data.get(constants.MESH_JBEAM_PART)
                     bm = None
                     try:
-                        if obj_iter == active_obj and active_obj.mode == 'EDIT': bm = bmesh.from_edit_mesh(obj_iter_data)
+                        if obj_iter_local == active_obj and active_obj.mode == 'EDIT': bm = bmesh.from_edit_mesh(obj_iter_data)
                         else: bm = bmesh.new(); bm.from_mesh(obj_iter_data)
 
                         node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
@@ -2618,7 +2983,7 @@ def draw_callback_view(context: bpy.types.Context):
 
                         if node_id_layer and is_fake_layer:
                             bm.verts.ensure_lookup_table()
-                            obj_matrix_copy = obj_iter.matrix_world.copy()
+                            obj_matrix_copy = obj_iter_local.matrix_world.copy()
                             for v in bm.verts:
                                 if v[is_fake_layer] == 0:
                                     node_id = v[node_id_layer].decode('utf-8')
@@ -2644,15 +3009,12 @@ def draw_callback_view(context: bpy.types.Context):
 
                                         if passes_group_filter:
                                             # Determine dot color based on selection/highlight state
-                                            is_selected_vp = obj_iter == active_obj and v.index in (jb_globals.selected_nodes[i][0] for i in range(len(jb_globals.selected_nodes)))
+                                            is_selected_vp = obj_iter_local == active_obj and v.index in (jb_globals.selected_nodes[i][0] for i in range(len(jb_globals.selected_nodes)))
                                             is_highlighted_txt = node_id in jb_globals.highlighted_node_ids
                                             is_slidenode_hl_dot = jb_globals.highlighted_element_type == 'slidenode' and is_highlighted_txt
                                             dot_color = WHITE_COLOR # Default
-                                            if is_selected_vp and is_slidenode_hl_dot: dot_color = (1.0, 0.5, 0.0, 1.0) # Orange
-                                            elif is_slidenode_hl_dot: dot_color = (1.0, 0.7, 0.7, 1.0) # Light Pink
-                                            elif is_selected_vp and is_highlighted_txt: dot_color = (1.0, 0.5, 0.0, 1.0) # Orange
-                                            elif is_highlighted_txt: dot_color = (0.0, 1.0, 0.0, 0.9) # Green
-                                            elif is_selected_vp: dot_color = (1.0, 1.0, 0.0, 0.9) # Yellow
+                                            if is_selected_vp: # If selected in viewport, color it yellow
+                                                dot_color = (1.0, 1.0, 0.0, 0.9) # Yellow
                                             node_dots_coords_colors.append((obj_matrix_copy @ v.co.copy(), dot_color))
                                     node_id_to_pos_matrix_map[node_id] = (v.co.copy(), obj_matrix_copy)
 
@@ -2676,9 +3038,9 @@ def draw_callback_view(context: bpy.types.Context):
                                                             auto_node_weight_max = max(auto_node_weight_max, numeric_value)
                                                             auto_node_thresholds_valid = True
                                                     except (ValueError, TypeError): pass
-                    except Exception as e: print(f"Error getting node geometry data from {obj_iter.name}: {e}", file=sys.stderr)
+                    except Exception as e: print(f"Error getting node geometry data from {obj_iter_local.name}: {e}", file=sys.stderr)
                     finally:
-                        if bm and not (obj_iter == active_obj and active_obj.mode == 'EDIT'): bm.free()
+                        if bm and not (obj_iter_local == active_obj and active_obj.mode == 'EDIT'): bm.free()
         else: # Single Part
             if active_obj.visible_get():
                 part_name = active_obj_data.get(constants.MESH_JBEAM_PART)
@@ -2721,11 +3083,8 @@ def draw_callback_view(context: bpy.types.Context):
                                         is_highlighted_txt = node_id in jb_globals.highlighted_node_ids
                                         is_slidenode_hl_dot = jb_globals.highlighted_element_type == 'slidenode' and is_highlighted_txt
                                         dot_color = WHITE_COLOR # Default
-                                        if is_selected_vp and is_slidenode_hl_dot: dot_color = (1.0, 0.5, 0.0, 1.0) # Orange
-                                        elif is_slidenode_hl_dot: dot_color = (1.0, 0.7, 0.7, 1.0) # Light Pink
-                                        elif is_selected_vp and is_highlighted_txt: dot_color = (1.0, 0.5, 0.0, 1.0) # Orange
-                                        elif is_highlighted_txt: dot_color = (0.0, 1.0, 0.0, 0.9) # Green
-                                        elif is_selected_vp: dot_color = (1.0, 1.0, 0.0, 0.9) # Yellow
+                                        if is_selected_vp: # If selected in viewport, color it yellow
+                                            dot_color = (1.0, 1.0, 0.0, 0.9) # Yellow
                                         node_dots_coords_colors.append((obj_matrix_copy @ v.co.copy(), dot_color))
                                 node_id_to_pos_matrix_map[node_id] = (v.co.copy(), obj_matrix_copy)
 
@@ -2801,8 +3160,8 @@ def draw_callback_view(context: bpy.types.Context):
                         is_cross_part = False
                         cache1_data = all_nodes_cache.get(id1)
                         cache2_data = all_nodes_cache.get(id2)
-                        origin1 = cache1_data[2] if cache1_data else '?'
-                        origin2 = cache2_data[2] if cache2_data else '?'
+                        origin1 = cache1_data[2] if cache1_data else '?';
+                        origin2 = cache2_data[2] if cache2_data else '?';
                         if origin1 != origin2 and '?' not in {origin1, origin2}:
                             is_cross_part = True
 
@@ -2823,23 +3182,14 @@ def draw_callback_view(context: bpy.types.Context):
                                         auto_thresholds_valid = True
                                 except (ValueError, TypeError): pass
 
-        # <<< DEBUG PRINT START >>>
-        # <<< REMOVED CONSOLE PRINTS >>>
-        # if ui_props.use_dynamic_beam_coloring and ui_props.use_auto_thresholds:
-        #     print(f"Beam Auto Thresholds: Valid={auto_thresholds_valid}, Min={auto_min_val}, Max={auto_max_val}")
-        # if ui_props.use_dynamic_node_coloring and ui_props.use_auto_node_thresholds:
-        #     print(f"Node Auto Thresholds: Valid={auto_node_thresholds_valid}, Min={auto_node_weight_min}, Max={auto_node_weight_max}")
-        # <<< DEBUG PRINT END >>>
-
-
         # --- 6. Populate Coordinate Lists (using finalized thresholds) ---
         if is_vehicle_part:
-            for obj_iter in collection.all_objects:
-                if obj_iter.visible_get() and obj_iter.data and obj_iter.data.get(constants.MESH_JBEAM_PART) is not None:
-                    obj_iter_data = obj_iter.data; part_name = obj_iter_data.get(constants.MESH_JBEAM_PART)
+            for obj_iter_local in part_name_to_obj.values(): # Use .values()
+                if obj_iter_local.visible_get() and obj_iter_local.data and obj_iter_local.data.get(constants.MESH_JBEAM_PART) is not None:
+                    obj_iter_data = obj_iter_local.data; part_name = obj_iter_data.get(constants.MESH_JBEAM_PART)
                     bm = None
                     try:
-                        if obj_iter == active_obj and active_obj.mode == 'EDIT': bm = bmesh.from_edit_mesh(obj_iter_data)
+                        if obj_iter_local == active_obj and active_obj.mode == 'EDIT': bm = bmesh.from_edit_mesh(obj_iter_data)
                         else: bm = bmesh.new(); bm.from_mesh(obj_iter_data)
 
                         beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
@@ -2867,7 +3217,7 @@ def draw_callback_view(context: bpy.types.Context):
                                         if not type_visible: continue
 
                                         v1, v2 = e.verts[0], e.verts[1]
-                                        world_pos1 = obj_iter.matrix_world @ v1.co; world_pos2 = obj_iter.matrix_world @ v2.co
+                                        world_pos1 = obj_iter_local.matrix_world @ v1.co; world_pos2 = obj_iter_local.matrix_world @ v2.co
                                         original_width = ui_props.beam_width
                                         if beam_type == '|ANISOTROPIC': original_width = ui_props.anisotropic_beam_width
                                         elif beam_type == '|SUPPORT': original_width = ui_props.support_beam_width
@@ -2901,9 +3251,9 @@ def draw_callback_view(context: bpy.types.Context):
                                             selected_beam_coords_colors.append((world_pos1, world_pos2, WHITE_COLOR))
                                             selected_beam_max_original_width = max(selected_beam_max_original_width, original_width)
                                     except (ValueError, IndexError) as parse_err: pass
-                    except Exception as e: print(f"Error getting beam geometry data from {obj_iter.name}: {e}", file=sys.stderr)
+                    except Exception as e: print(f"Error getting beam geometry data from {obj_iter_local.name}: {e}", file=sys.stderr)
                     finally:
-                        if bm and not (obj_iter == active_obj and active_obj.mode == 'EDIT'): bm.free()
+                        if bm and not (obj_iter_local == active_obj and active_obj.mode == 'EDIT'): bm.free()
 
             # Torsionbar, Rail, Cross-Part Population (Vehicle)
             if ui_props.toggle_torsionbars_vis and jb_globals.curr_vdata and 'torsionbars' in jb_globals.curr_vdata and isinstance(jb_globals.curr_vdata['torsionbars'], list):
@@ -2924,7 +3274,15 @@ def draw_callback_view(context: bpy.types.Context):
                         world_pos[i] = wp
                     if not all_nodes_found:
                         if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes):
-                            print(f"Warning: Could not find position data for torsionbar nodes {missing_nodes}", file=sys.stderr)
+                            if ui_props.show_console_warnings_missing_nodes: # <<< ADDED CHECK
+                                line_num_str = ""
+                                tb_part_origin = tb.get('partOrigin', current_part_name)
+                                tb_filepath = jbeam_io.get_filepath_from_part_origin(tb_part_origin, collection) or active_filepath
+                                if tb_filepath:
+                                    line_num = find_torsionbar_line_number(tb_filepath, tb_part_origin, tuple(ids))
+                                    if line_num is not None:
+                                        line_num_str = f" (Line: {line_num})"
+                                print(f"Warning: Could not find position data for torsionbar nodes {missing_nodes} (defined in {tb_filepath or '?'} [Part: {tb_part_origin}]{line_num_str})", file=sys.stderr)
                             warned_missing_nodes_this_rebuild.update(missing_nodes)
                         continue
                     torsionbar_coords.extend([world_pos[0], world_pos[1]])
@@ -2951,8 +3309,16 @@ def draw_callback_view(context: bpy.types.Context):
                             world_pos[i] = wp
                         if all_nodes_found: rail_coords.extend(world_pos)
                         elif ui_props.toggle_rails_vis:
-                            if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes):
-                                print(f"Warning: Could not find position data for rail nodes {missing_nodes}", file=sys.stderr)
+                            if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes): # <<< ADDED CHECK
+                                if ui_props.show_console_warnings_missing_nodes:
+                                    line_num_str = ""
+                                    rail_part_origin = rail_info.get('partOrigin', current_part_name) if isinstance(rail_info, dict) else current_part_name
+                                    rail_filepath = jbeam_io.get_filepath_from_part_origin(rail_part_origin, collection) or active_filepath
+                                    if rail_filepath:
+                                        line_num = find_rail_line_number(rail_filepath, rail_part_origin, rail_name)
+                                        if line_num is not None:
+                                            line_num_str = f" (Line: {line_num})"
+                                    print(f"Warning: Could not find position data for rail '{rail_name}' nodes {missing_nodes} (defined in {rail_filepath or '?'} [Part: {rail_part_origin}]{line_num_str})", file=sys.stderr)
                                 warned_missing_nodes_this_rebuild.update(missing_nodes)
 
             if ui_props.toggle_cross_part_beams_vis and jb_globals.curr_vdata and 'beams' in jb_globals.curr_vdata:
@@ -2980,8 +3346,15 @@ def draw_callback_view(context: bpy.types.Context):
                         else: missing_nodes.append(id2)
 
                         if missing_nodes:
-                            if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes):
-                                print(f"Warning: Could not find position data for cross-part beam nodes {missing_nodes}", file=sys.stderr)
+                            if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes): # <<< ADDED CHECK
+                                if ui_props.show_console_warnings_missing_nodes:
+                                    line_num_str = ""
+                                    beam_part_origin = beam_data.get('partOrigin', current_part_name)
+                                    beam_filepath = jbeam_io.get_filepath_from_part_origin(beam_part_origin, collection) or active_filepath
+                                    if beam_filepath:
+                                        line_num = find_beam_line_number(beam_filepath, beam_part_origin, id1, id2)
+                                        if line_num is not None: line_num_str = f" (Line: {line_num})"
+                                    print(f"Warning: Could not find position data for cross-part beam nodes {missing_nodes} (Beam: {id1}-{id2}, defined in {beam_filepath or '?'} [Part: {beam_part_origin}]{line_num_str})", file=sys.stderr)
                                 warned_missing_nodes_this_rebuild.update(missing_nodes)
                             continue
 
@@ -3086,7 +3459,14 @@ def draw_callback_view(context: bpy.types.Context):
                                 world_pos[i] = wp
                             if not all_nodes_found:
                                 if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes):
-                                    print(f"Warning: Could not find position data for torsionbar nodes {missing_nodes}", file=sys.stderr)
+                                    if ui_props.show_console_warnings_missing_nodes: # <<< ADDED CHECK
+                                        line_num_str = ""
+                                        tb_part_origin = tb.get('partOrigin', current_part_name)
+                                        # For single part, active_filepath is the source
+                                        if active_filepath:
+                                            line_num = find_torsionbar_line_number(active_filepath, tb_part_origin, tuple(ids))
+                                            if line_num is not None: line_num_str = f" (Line: {line_num})"
+                                        print(f"Warning: Could not find position data for torsionbar nodes {missing_nodes} (defined in {active_filepath or '?'} [Part: {tb_part_origin}]{line_num_str})", file=sys.stderr)
                                     warned_missing_nodes_this_rebuild.update(missing_nodes)
                                 continue
                             torsionbar_coords.extend([world_pos[0], world_pos[1]])
@@ -3113,8 +3493,16 @@ def draw_callback_view(context: bpy.types.Context):
                                     world_pos[i] = wp
                                 if all_nodes_found: rail_coords.extend(world_pos)
                                 elif ui_props.toggle_rails_vis:
-                                    if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes):
-                                        print(f"Warning: Could not find position data for rail nodes {missing_nodes}", file=sys.stderr)
+                                    if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes): # <<< ADDED CHECK
+                                        if ui_props.show_console_warnings_missing_nodes:
+                                            line_num_str = ""
+                                            rail_part_origin = rail_info.get('partOrigin', current_part_name) if isinstance(rail_info, dict) else current_part_name
+                                            # For single part, active_filepath is the source
+                                            if active_filepath:
+                                                line_num = find_rail_line_number(active_filepath, rail_part_origin, rail_name)
+                                                if line_num is not None:
+                                                    line_num_str = f" (Line: {line_num})"
+                                            print(f"Warning: Could not find position data for rail '{rail_name}' nodes {missing_nodes} (defined in {active_filepath or '?'} [Part: {rail_part_origin}]{line_num_str})", file=sys.stderr)
                                         warned_missing_nodes_this_rebuild.update(missing_nodes)
 
                     if ui_props.toggle_cross_part_beams_vis and jb_globals.curr_vdata and 'beams' in jb_globals.curr_vdata:
@@ -3143,8 +3531,15 @@ def draw_callback_view(context: bpy.types.Context):
                                 else: missing_nodes.append(id2)
 
                                 if missing_nodes:
-                                    if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes):
-                                        print(f"Warning: Could not find position data for cross-part beam nodes {missing_nodes}", file=sys.stderr)
+                                    if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes): # <<< ADDED CHECK
+                                        if ui_props.show_console_warnings_missing_nodes:
+                                            line_num_str = ""
+                                            beam_part_origin = beam_data.get('partOrigin', current_part_name)
+                                            # For single part, active_filepath is the source
+                                            if active_filepath:
+                                                line_num = find_beam_line_number(active_filepath, beam_part_origin, id1, id2)
+                                                if line_num is not None: line_num_str = f" (Line: {line_num})"
+                                            print(f"Warning: Could not find position data for cross-part beam nodes {missing_nodes} (Beam: {id1}-{id2}, defined in {active_filepath or '?'} [Part: {beam_part_origin}]{line_num_str})", file=sys.stderr)
                                         warned_missing_nodes_this_rebuild.update(missing_nodes)
                                     continue
 
@@ -3182,8 +3577,9 @@ def draw_callback_view(context: bpy.types.Context):
                 highlight_world_positions.append(wp)
 
             if not all_highlight_nodes_found:
-                if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_highlight_nodes):
-                    print(f"Warning: Could not find position data for highlighted nodes {missing_highlight_nodes}", file=sys.stderr)
+                if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_highlight_nodes): # <<< ADDED CHECK
+                    if ui_props.show_console_warnings_missing_nodes:
+                        print(f"Warning: Could not find position data for highlighted nodes {missing_highlight_nodes}", file=sys.stderr)
                     warned_missing_nodes_this_rebuild.update(missing_highlight_nodes)
                 jb_globals.highlighted_element_type = None
                 jb_globals.highlighted_node_ids.clear()
@@ -3373,8 +3769,8 @@ def draw_callback_view(context: bpy.types.Context):
         if jb_globals.curr_vdata and 'beams' in jb_globals.curr_vdata and jb_globals.highlighted_element_ordered_node_ids:
             target_id1 = jb_globals.highlighted_element_ordered_node_ids[0]
             target_id2 = jb_globals.highlighted_element_ordered_node_ids[1]
-            active_obj = context.active_object
-            target_part_origin = active_obj.data.get(constants.MESH_JBEAM_PART) if active_obj and active_obj.data else None
+            active_obj_local = context.active_object # Use local var
+            target_part_origin = active_obj_local.data.get(constants.MESH_JBEAM_PART) if active_obj_local and active_obj_local.data else None
             if target_part_origin:
                 for beam_data in jb_globals.curr_vdata['beams']:
                     if isinstance(beam_data, dict) and beam_data.get('partOrigin') == target_part_origin:

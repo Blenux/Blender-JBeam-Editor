@@ -38,6 +38,7 @@ from .operators import ( # Import operators used in panels
     JBEAM_EDITOR_OT_reload_jbeam_from_disk, # <<< ADDED: Import new operator
     JBEAM_EDITOR_OT_delete_all_unused_texts, # <<< ADDED: Import new operator
     JBEAM_EDITOR_OT_toggle_pc_filter, # <<< ADDED: Import filter operators
+    JBEAM_EDITOR_OT_connect_selected_nodes, # <<< ADDED: Import new operator
     JBEAM_EDITOR_OT_open_file_in_editor, # <<< ADDED: Import new operator
     JBEAM_EDITOR_OT_reload_pc_file, # <<< ADDED: Import PC reload operator
     JBEAM_EDITOR_OT_save_pc_file_to_disk, # <<< ADDED: Import PC save operator
@@ -151,6 +152,15 @@ class JBEAM_EDITOR_PT_jbeam_panel(bpy.types.Panel):
                 else:
                     label = 'Add Quad'
                 col.row().operator(JBEAM_EDITOR_OT_add_beam_tri_quad.bl_idname, text=label)
+
+            # Add the new toggle for renaming references of the selected node
+            col.row().prop(ui_props, 'rename_selected_node_references')
+            # Add the new toggle for renaming the symmetrical counterpart
+            col.row().prop(ui_props, 'rename_symmetrical_counterpart')
+
+            # Add button for connecting all selected nodes
+            if len_selected_verts >= 2:
+                col.row().operator(JBEAM_EDITOR_OT_connect_selected_nodes.bl_idname, text="Connect All Selected Nodes")
 
             if len_selected_faces > 0:
                 col.row().operator(JBEAM_EDITOR_OT_flip_jbeam_faces.bl_idname)
@@ -392,6 +402,11 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
         layout = self.layout
 
         if obj_data.get(constants.MESH_JBEAM_PART) is not None:
+            # --- Affect Node References Box (Moved Here) ---
+            affect_node_ref_box = layout.box() # Renamed variable for clarity
+            affect_node_ref_col = affect_node_ref_box.column(align=True) # Renamed variable
+            affect_node_ref_col.prop(ui_props, 'affect_node_references', text="Affect Node References")
+
             # --- Node Creation Box (Existing Structure) ---
             node_naming_box = layout.box()
             row = node_naming_box.row(align=True)
@@ -586,13 +601,22 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
                 row.prop(ui_props, 'rail_width')
                 # --- End Torsionbar/Rail ---
 
-            # --- Affect Node References Box (Existing) ---
-            box = layout.box()
-            col = box.column(align=True)
-            col.prop(ui_props, 'affect_node_references', text="Affect Node References")
+            # --- 3D Highlight from Text (Moved to its own box) ---
+            highlight_box = layout.box()
+            highlight_col = highlight_box.column(align=True)
+            highlight_col.prop(ui_props, 'highlight_element_on_click', text="3D Highlight from Text")
+            row = highlight_col.row(); row.enabled = ui_props.highlight_element_on_click
+            row.prop(ui_props, 'highlight_thickness_multiplier', text="Highlight Thickness")
+
+            # --- Show Selected Beam Outline (Moved to its own box) ---
+            selected_beam_box = layout.box()
+            selected_beam_col = selected_beam_box.column(align=True)
+            selected_beam_col.prop(ui_props, 'show_selected_beam_outline', text="Show Selected Beam Outline")
+            row = selected_beam_col.row(); row.enabled = ui_props.show_selected_beam_outline
+            row.prop(ui_props, 'selected_beam_thickness_multiplier', text="Selected Beam Multiplier")
 
             # --- Tooltips Section (Existing) ---
-            tooltips_box = layout.box() # <<< MOVED outside the main settings box for grouping
+            tooltips_box = layout.box()
             row = tooltips_box.row(align=True)
             row.prop(ui_props, "show_tooltips_panel", icon="TRIA_DOWN" if ui_props.show_tooltips_panel else "TRIA_RIGHT", icon_only=True, emboss=False)
             row.label(text="Tooltips", icon='INFO')
@@ -607,18 +631,18 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
                 row = tooltips_col.row(align=True); row.prop(ui_props, 'toggle_params_tooltip', text="Show Parameters")
                 row = tooltips_col.row(align=True); row.enabled = ui_props.toggle_params_tooltip
                 split = row.split(factor=0.5, align=True); split.prop(ui_props, 'params_tooltip_color', text="Parameter"); split.prop(ui_props, 'params_value_tooltip_color', text="Value")
+                tooltips_col.prop(ui_props, 'tooltip_show_resolved_values')
 
-            # --- Other General Settings (Existing) ---
-            other_box = layout.box() # <<< Grouped remaining settings
-            col = other_box.column(align=True)
-            col.prop(ui_props, 'highlight_element_on_click', text="3D Highlight from Text")
-            row = col.row(); row.enabled = ui_props.highlight_element_on_click
-            row.prop(ui_props, 'highlight_thickness_multiplier', text="Highlight Thickness")
+            # --- Native Faces Visibility Toggle (Moved to its own box) ---
+            if isinstance(obj_data, bpy.types.Mesh) and obj_data.get(constants.MESH_JBEAM_PART) is not None:
+                native_faces_box = layout.box()
+                native_faces_col = native_faces_box.column(align=True)
+                native_faces_col.prop(ui_props, 'toggle_native_faces_vis', text="Show Triangles/Quads (Edit Mode)")
 
-            col.separator()
-            col.prop(ui_props, 'show_selected_beam_outline', text="Show Selected Beam Outline")
-            row = col.row(); row.enabled = ui_props.show_selected_beam_outline
-            row.prop(ui_props, 'selected_beam_thickness_multiplier', text="Selected Beam Multiplier")
+            # --- Console Warnings Toggle (Moved to its own box) ---
+            console_warnings_box = layout.box()
+            console_warnings_col = console_warnings_box.column(align=True)
+            console_warnings_col.prop(ui_props, 'show_console_warnings_missing_nodes', text="Show Console Messages (debug)")
 
 # <<< ADDED: Panel for PC Filtering >>>
 class JBEAM_EDITOR_PT_pc_filter(bpy.types.Panel):

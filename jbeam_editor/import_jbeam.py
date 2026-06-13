@@ -321,6 +321,11 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
             hidden_edges_state = {} # <<< ADDED: Dictionary to store edge hidden states
             hidden_verts_state = {} # <<< ADDED
             hidden_faces_state = {} # <<< ADDED: Dictionary to store face hidden states
+            # <<< ADDED: Store selection states >>>
+            selected_node_ids_to_restore = set()
+            selected_beam_defining_node_ids_to_restore = set()
+            selected_face_defining_node_ids_to_restore = set()
+            was_in_edit_mode_and_active = obj.mode == 'EDIT' # Store if we were in edit mode for this specific object
             temp_bm = None
             try:
                 if obj.mode == 'EDIT':
@@ -328,9 +333,30 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
                     temp_bm = bmesh.from_edit_mesh(obj_data)
                 else:
                     # Get bmesh from object data *before* clearing
+                    # No selection to store if not in edit mode for this object
                     temp_bm = bmesh.new()
                     temp_bm.from_mesh(obj_data)
 
+                # --- Store Selection State (if in Edit Mode for this object) ---
+                if was_in_edit_mode_and_active:
+                    node_id_layer_sel_store = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
+                    if node_id_layer_sel_store:
+                        temp_bm.verts.ensure_lookup_table()
+                        for v_store in temp_bm.verts:
+                            if v_store.select:
+                                selected_node_ids_to_restore.add(v_store[node_id_layer_sel_store].decode('utf-8'))
+
+                        temp_bm.edges.ensure_lookup_table()
+                        for e_store in temp_bm.edges:
+                            if e_store.select and len(e_store.verts) == 2:
+                                v1_id = e_store.verts[0][node_id_layer_sel_store].decode('utf-8')
+                                v2_id = e_store.verts[1][node_id_layer_sel_store].decode('utf-8')
+                                selected_beam_defining_node_ids_to_restore.add(frozenset({v1_id, v2_id}))
+                        temp_bm.faces.ensure_lookup_table()
+                        for f_store in temp_bm.faces:
+                            if f_store.select:
+                                face_node_ids = frozenset({v[node_id_layer_sel_store].decode('utf-8') for v in f_store.verts})
+                                selected_face_defining_node_ids_to_restore.add(face_node_ids)
                 # --- Store Edge Hidden State (Revised) ---
                 node_id_layer_v_store = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
                 is_fake_layer_v_store = temp_bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
@@ -370,20 +396,31 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
                             hidden_verts_state[(part_origin, node_id)] = vert.hide
 
                 # Store Face Hidden State --- <<< ADDED >>>
-                face_idx_layer = temp_bm.faces.layers.int.get(constants.FL_FACE_IDX)
-                face_origin_layer = temp_bm.faces.layers.string.get(constants.FL_FACE_PART_ORIGIN)
-                if face_idx_layer and face_origin_layer:
+                face_origin_layer_store = temp_bm.faces.layers.string.get(constants.FL_FACE_PART_ORIGIN)
+                # Use the same node_id_layer and is_fake_layer as for vertices/edges for consistency
+                if face_origin_layer_store and node_id_layer_v_store and is_fake_layer_v_store:
                     temp_bm.faces.ensure_lookup_table()
+                    temp_bm.verts.ensure_lookup_table() # Ensure verts table for face.verts
                     for face in temp_bm.faces:
-                        face_idx_in_part = face[face_idx_layer]
-                        # Only store for existing JBeam faces (not newly added Blender faces)
-                        if face_idx_in_part > 0:
-                            try:
-                                part_origin = face[face_origin_layer].decode('utf-8')
-                                # Use part_origin and face index within part as the key
-                                hidden_faces_state[(part_origin, face_idx_in_part)] = face.hide
-                            except Exception as face_state_err:
-                                print(f"Warning: Could not store hidden state for face index {face_idx_in_part}: {face_state_err}", file=sys.stderr)
+                        try:
+                            part_origin = face[face_origin_layer_store].decode('utf-8')
+                            node_ids_for_face = []
+                            all_verts_real_and_valid = True
+                            for v_face in face.verts:
+                                if v_face[is_fake_layer_v_store] != 0:
+                                    all_verts_real_and_valid = False
+                                    break
+                                node_id_bytes = v_face[node_id_layer_v_store]
+                                if not node_id_bytes or node_id_bytes.decode('utf-8').startswith('TEMP_'): # Skip if TEMP_
+                                    all_verts_real_and_valid = False
+                                    break
+                                node_ids_for_face.append(node_id_bytes.decode('utf-8'))
+
+                            if all_verts_real_and_valid and len(node_ids_for_face) >= 3: # Faces must have at least 3 verts
+                                key = (part_origin, frozenset(node_ids_for_face))
+                                hidden_faces_state[key] = face.hide
+                        except Exception as face_state_err:
+                            print(f"Warning: Could not store hidden state for face defined by nodes {node_ids_for_face if 'node_ids_for_face' in locals() else '?'}: {face_state_err}", file=sys.stderr)
                 # --- End Store Face Hidden State --- <<< END ADDED >>>
 
             except Exception as e:
@@ -447,21 +484,58 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
                             vert.hide = hidden_verts_state[(part_origin, node_id)]
 
             # Apply Face Hidden State --- <<< ADDED >>>
-            face_idx_layer = bm.faces.layers.int.get(constants.FL_FACE_IDX)
-            face_origin_layer = bm.faces.layers.string.get(constants.FL_FACE_PART_ORIGIN)
-            if face_idx_layer and face_origin_layer and hidden_faces_state:
+            face_origin_layer_apply = bm.faces.layers.string.get(constants.FL_FACE_PART_ORIGIN)
+            # Use the same node_id_layer and is_fake_layer as for vertices/edges for consistency
+            if face_origin_layer_apply and node_id_layer and is_fake_layer and hidden_faces_state:
                 bm.faces.ensure_lookup_table()
+                bm.verts.ensure_lookup_table() # Ensure verts table for face.verts
                 for face in bm.faces:
-                    face_idx_in_part = face[face_idx_layer]
-                    if face_idx_in_part > 0: # Only apply to faces that existed in JBeam
-                        try:
-                            part_origin = face[face_origin_layer].decode('utf-8')
-                            if (part_origin, face_idx_in_part) in hidden_faces_state:
-                                face.hide = hidden_faces_state[(part_origin, face_idx_in_part)]
-                        except Exception as apply_face_state_err:
-                            # Should not happen often if storing worked, but good practice
-                            print(f"Warning: Could not apply hidden state for face index {face_idx_in_part}: {apply_face_state_err}", file=sys.stderr)
+                    try:
+                        part_origin = face[face_origin_layer_apply].decode('utf-8')
+                        node_ids_for_face = []
+                        all_verts_real_and_valid = True
+                        for v_face in face.verts:
+                            if v_face[is_fake_layer] != 0:
+                                all_verts_real_and_valid = False
+                                break
+                            node_id_bytes = v_face[node_id_layer]
+                            if not node_id_bytes or node_id_bytes.decode('utf-8').startswith('TEMP_'): # Skip if TEMP_
+                                all_verts_real_and_valid = False
+                                break
+                            node_ids_for_face.append(node_id_bytes.decode('utf-8'))
+                        if all_verts_real_and_valid and len(node_ids_for_face) >= 3:
+                            key = (part_origin, frozenset(node_ids_for_face))
+                            if key in hidden_faces_state:
+                                face.hide = hidden_faces_state[key]
+                    except Exception as apply_face_state_err:
+                        print(f"Warning: Could not apply hidden state for face defined by nodes {node_ids_for_face if 'node_ids_for_face' in locals() else '?'}: {apply_face_state_err}", file=sys.stderr)
             # --- End Apply Face Hidden State --- <<< END ADDED >>>
+
+            # <<< ADDED: Apply selection states >>>
+            if was_in_edit_mode_and_active: # Only restore if we were in edit mode for this object
+                node_id_layer_apply_sel = bm.verts.layers.string.get(constants.VL_NODE_ID)
+                if node_id_layer_apply_sel:
+                    bm.verts.ensure_lookup_table()
+                    for v_apply in bm.verts:
+                        v_apply.select_set(v_apply[node_id_layer_apply_sel].decode('utf-8') in selected_node_ids_to_restore)
+
+                    bm.edges.ensure_lookup_table()
+                    for e_apply in bm.edges:
+                        if len(e_apply.verts) == 2:
+                            v1_id = e_apply.verts[0][node_id_layer_apply_sel].decode('utf-8')
+                            v2_id = e_apply.verts[1][node_id_layer_apply_sel].decode('utf-8')
+                            e_apply.select_set(frozenset({v1_id, v2_id}) in selected_beam_defining_node_ids_to_restore)
+                        else:
+                            e_apply.select_set(False)
+
+                    bm.faces.ensure_lookup_table()
+                    for f_apply in bm.faces:
+                        face_node_ids = frozenset({v[node_id_layer_apply_sel].decode('utf-8') for v in f_apply.verts})
+                        f_apply.select_set(face_node_ids in selected_face_defining_node_ids_to_restore)
+
+                # Crucial for Edit Mode selection to update visually and for handlers
+                bm.select_flush_mode()
+            # <<< END ADDED >>>
 
             bm.normal_update()
 

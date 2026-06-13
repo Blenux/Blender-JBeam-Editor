@@ -38,6 +38,84 @@ from . import utils, import_vehicle
 # This avoids circular import if drawing needs properties
 # <<< MODIFIED: Removed _update_dynamic_beam_coloring from this import >>>
 # <<< MODIFIED: Added _tag_redraw_3d_views >>>
+
+# <<< ADDED: Update function for native faces visibility >>>
+def _update_native_faces_vis(self, context):
+    """
+    Handles changes to the native faces visibility toggle.
+    If turned ON, unhides all faces in Edit Mode for the active JBeam object.
+    If turned OFF, the depsgraph handler will hide them.
+    Also tags 3D views for redraw.
+    """
+    active_obj = context.active_object
+
+    # Only proceed if we have an active mesh object in Edit Mode
+    if not (active_obj and active_obj.type == 'MESH' and active_obj.mode == 'EDIT'):
+        drawing._tag_redraw_3d_views(context) # Still redraw for UI update
+        return
+
+    # Ensure it's a JBeam part and editing is enabled for it
+    obj_data = active_obj.data
+    if not (obj_data.get(constants.MESH_JBEAM_PART) is not None and \
+            obj_data.get(constants.MESH_EDITING_ENABLED, False)):
+        drawing._tag_redraw_3d_views(context) # Still redraw for UI update
+        return
+
+    # At this point, we are in Edit Mode with a valid, enabled JBeam object.
+    bm = None
+    try:
+        bm = bmesh.from_edit_mesh(obj_data)
+        bm.faces.ensure_lookup_table()
+
+        if self.toggle_native_faces_vis: # If toggle is now ON
+            needs_update = False
+            # Unhide all faces
+            for f in bm.faces:
+                if f.hide: # If face is currently hidden
+                    f.hide = False # Unhide it
+                    needs_update = True
+            # Unhide all vertices
+            bm.verts.ensure_lookup_table()
+            for v_iter in bm.verts: # Use v_iter
+                if v_iter.hide:
+                    v_iter.hide = False
+                    needs_update = True
+            # Unhide all edges
+            bm.edges.ensure_lookup_table()
+            for e_iter in bm.edges: # Use e_iter
+                if e_iter.hide:
+                    e_iter.hide = False
+                    needs_update = True
+            if needs_update:
+                bmesh.update_edit_mesh(obj_data)
+        # If toggle is OFF, the depsgraph_update_post_handler will take care of hiding.
+    except Exception as e:
+        print(f"Error in _update_native_faces_vis: {e}", file=sys.stderr)
+
+    drawing._tag_redraw_3d_views(context)
+
+# <<< ADDED: Update function for show_console_warnings_missing_nodes toggle >>>
+def _update_show_console_warnings_missing_nodes(self, context):
+    """
+    Update function for the 'Show Node Not Found Warnings' toggle.
+    If turned on, marks the all_nodes_cache as dirty to force a rebuild,
+    which will re-evaluate which nodes are missing.
+    Also marks the main visualization as dirty.
+    """
+    if self.show_console_warnings_missing_nodes:
+        # If the toggle is turned ON, we want to re-check for missing nodes.
+        # Marking the cache dirty will trigger a rebuild on the next drawing cycle.
+        setattr(drawing, 'all_nodes_cache_dirty', True)
+        # Also clear the set of already warned nodes for this rebuild cycle,
+        # so warnings are re-issued if nodes are still missing after a cache update.
+        if hasattr(drawing, 'warned_missing_nodes_this_rebuild'):
+            drawing.warned_missing_nodes_this_rebuild.clear()
+
+    # Always mark the main visualization dirty to ensure drawing updates.
+    setattr(drawing, 'veh_render_dirty', True)
+    drawing._tag_redraw_3d_views(context) # Tag for UI updates
+# <<< END ADDED >>>
+
 from .drawing import (
     _update_toggle_cross_part_beams_vis,
     veh_render_dirty,
@@ -84,7 +162,38 @@ def on_input_node_id_field_updated(self, context: bpy.types.Context):
             print(f"Renaming node {current_node_id} (index {selected_vert_index}) to {new_node_id}")
             vert[node_id_layer] = bytes(new_node_id, 'utf-8')
             jb_globals._force_do_export = True
-            # Update mesh visually
+            # Signal that the next export should consider the local rename toggle
+            jb_globals._use_local_rename_toggle_for_next_export = True
+
+            # Symmetrical renaming logic
+            if ui_props.rename_symmetrical_counterpart:
+                from .export_utils import get_symmetrical_node_id # Helper function
+
+                # 1. Get original counterpart ID (based on ID before primary rename)
+                original_counterpart_id = get_symmetrical_node_id(current_node_id, ui_props)
+
+                if original_counterpart_id:
+                    # 2. Get new counterpart ID (based on the new ID of the primary node)
+                    new_counterpart_id = get_symmetrical_node_id(new_node_id, ui_props)
+
+                    if new_counterpart_id:
+                        # 3. Find the BMVert for the original_counterpart_id
+                        found_counterpart_vert = None
+                        for v_counter in bm.verts: # Iterate through all verts in the bmesh
+                            if v_counter[node_id_layer].decode('utf-8') == original_counterpart_id:
+                                found_counterpart_vert = v_counter
+                                break
+
+                        if found_counterpart_vert:
+                            # 4. Rename the counterpart vertex in bmesh
+                            print(f"Symmetrically renaming node {original_counterpart_id} to {new_counterpart_id}")
+                            found_counterpart_vert[node_id_layer] = bytes(new_counterpart_id, 'utf-8')
+                            # _force_do_export is already True. Export will pick this up.
+                        else:
+                            print(f"Symmetrical counterpart '{original_counterpart_id}' not found in mesh for renaming.")
+                    else:
+                        print(f"Could not determine a valid new symmetrical counterpart name for '{new_node_id}'. Symmetrical rename skipped.")
+            # Update mesh visually after all potential changes
             bmesh.update_edit_mesh(obj_data)
 
         # No need to free bm from edit mesh
@@ -373,6 +482,19 @@ class UIProperties(bpy.types.PropertyGroup):
         default="",
         update=on_input_node_id_field_updated
     )
+    rename_selected_node_references: bpy.props.BoolProperty(
+        name="Rename All References",
+        description="When renaming the selected node ID above, also update all its references throughout the JBeam document",
+        default=True,
+        # No update function needed here, its value is read during export
+    )
+    rename_symmetrical_counterpart: bpy.props.BoolProperty(
+        name="Rename Symmetrical Counterpart",
+        description="When renaming the selected node, also rename its symmetrical counterpart (e.g., 'L' to 'R') based on Symmetrical Pairs settings. Works with 'Rename All References'.",
+        default=False,
+        # No update function needed here, its value is read during the primary rename's update function
+    )
+
 
     # Node Search Property
     search_node_id: bpy.props.StringProperty(
@@ -395,6 +517,16 @@ class UIProperties(bpy.types.PropertyGroup):
         default=1,
         min=1
     )
+
+    # <<< RENAMED/ENSURED: Panel Toggle for Node Visualization >>>
+    # <<< ADDED: Native Faces Visibility Toggle >>>
+    toggle_native_faces_vis: bpy.props.BoolProperty(
+        name="Show Native Faces",
+        description="Toggles the visibility of the standard Blender mesh faces (triangles and quads) in Edit Mode",
+        default=True,
+        update=_update_native_faces_vis
+    )
+    # <<< END ADDED >>>
 
     # <<< RENAMED/ENSURED: Panel Toggle for Node Visualization >>>
     show_node_visualization_settings: bpy.props.BoolProperty(
@@ -609,6 +741,13 @@ class UIProperties(bpy.types.PropertyGroup):
         min=0.0, max=1.0,
         size=4
     )
+    tooltip_show_resolved_values: bpy.props.BoolProperty(
+        name="Show Resolved Values in Tooltip",
+        description="Display final calculated/resolved values in tooltips (like Properties panel), otherwise show raw JBeam values",
+        default=True,
+        # No update function needed, value is read when tooltips are generated
+    )
+
     # --- End Shared Tooltip Settings ---
 
     affect_node_references: bpy.props.BoolProperty(
@@ -979,6 +1118,13 @@ class UIProperties(bpy.types.PropertyGroup):
         default=2.0,
         min=1.0, max=10.0,
         update=lambda self, context: setattr(drawing, 'veh_render_dirty', True)
+    )
+
+    show_console_warnings_missing_nodes: bpy.props.BoolProperty(
+        name="Show Console Messages (debug)",
+        description="Show console warnings when a JBeam element's referenced node cannot be found for drawing (e.g., 'Warning: Could not find position data for...')",
+        default=False,
+        update=_update_show_console_warnings_missing_nodes # <<< MODIFIED: Use new update function
     )
 
     # --- Node Creation Prefixes ---

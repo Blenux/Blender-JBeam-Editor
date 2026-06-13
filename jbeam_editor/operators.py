@@ -211,6 +211,66 @@ class JBEAM_EDITOR_OT_flip_jbeam_faces(bpy.types.Operator):
 
         return {'FINISHED'}
 
+# Connect selected nodes with beams
+class JBEAM_EDITOR_OT_connect_selected_nodes(bpy.types.Operator):
+    bl_idname = "jbeam_editor.connect_selected_nodes"
+    bl_label = "Connect Selected Nodes"
+    bl_description = "Create new beams between all pairs of selected nodes"
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        if not obj or obj.data.get(constants.MESH_JBEAM_PART) is None or \
+           not obj.data.get(constants.MESH_EDITING_ENABLED, False):
+            return False
+        # Need at least 2 nodes to form a beam
+        return len(jb_globals.selected_nodes) >= 2
+
+    def invoke(self, context, event):
+        obj = context.active_object
+        obj_data = obj.data
+        bm = bmesh.from_edit_mesh(obj_data)
+        bm.verts.ensure_lookup_table()
+
+        export_triggered = False
+        beams_created_count = 0
+
+        selected_node_indices = [node_info[0] for node_info in jb_globals.selected_nodes]
+        selected_bm_verts = [bm.verts[idx] for idx in selected_node_indices if idx < len(bm.verts)]
+
+        if len(selected_bm_verts) < 2:
+            self.report({'INFO'}, "Not enough valid selected nodes to create beams.")
+            return {'CANCELLED'}
+
+        beam_indices_layer = bm.edges.layers.string[constants.EL_BEAM_INDICES]
+        beam_part_origin_layer = bm.edges.layers.string[constants.EL_BEAM_PART_ORIGIN]
+
+        # Iterate through unique pairs of selected vertices
+        for i in range(len(selected_bm_verts)):
+            for j in range(i + 1, len(selected_bm_verts)):
+                v1 = selected_bm_verts[i]
+                v2 = selected_bm_verts[j]
+
+                existing_edge = bm.edges.get((v1, v2))
+
+                if existing_edge is None or existing_edge[beam_indices_layer].decode('utf-8') == '':
+                    # Create a new edge or mark existing Blender edge as new JBeam beam
+                    e = existing_edge if existing_edge else bm.edges.new((v1, v2))
+                    e[beam_indices_layer] = bytes('-1', 'utf-8') 
+                    e[beam_part_origin_layer] = bytes(obj_data[constants.MESH_JBEAM_PART], 'utf-8')
+                    export_triggered = True
+                    beams_created_count += 1
+
+        if obj.mode == 'EDIT':
+            bmesh.update_edit_mesh(obj_data)
+
+        if export_triggered:
+            jb_globals._force_do_export = True
+            self.report({'INFO'}, f"Created {beams_created_count} new beams.")
+        else:
+            self.report({'INFO'}, "No new beams created (all selected nodes might already be connected or beams exist).")
+        return {'FINISHED'}
+
 # Batch node renaming
 class JBEAM_EDITOR_OT_batch_node_renaming(bpy.types.Operator):
     bl_idname = "jbeam_editor.batch_node_renaming"
