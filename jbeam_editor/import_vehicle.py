@@ -47,18 +47,21 @@ import timeit
 
 
 def load_vehicle(vehicle_directories: list[str], vehicle_config: dict, model_name: str, reimporting_files_changed: dict | None):
+    ui_props = bpy.context.scene.ui_properties
+
     """load all the jbeam and construct the thing in memory"""
-    print('Reading JBeam files...')
+    if ui_props.show_console_warnings_missing_nodes:
+        print('Reading JBeam files...')
     t0 = timeit.default_timer()
     jbeam_parsing_errors, io_ctx = jbeam_io.start_loading(vehicle_directories, vehicle_config, reimporting_files_changed)
     t1 = timeit.default_timer()
-    print('Done reading JBeam files. Time =', round(t1 - t0, 2), 's')
-    print('Model name:', model_name)
+    if ui_props.show_console_warnings_missing_nodes:
+        print('Done reading JBeam files. Time =', round(t1 - t0, 2), 's', 'Model name:', model_name)
 
     if 'mainPartName' not in vehicle_config:
         vehicle_config['mainPartName'] = jbeam_io.get_main_part_name(io_ctx)
 
-    print('Finding parts...')
+    if ui_props.show_console_warnings_missing_nodes: print('Finding parts...')
     vehicle, unify_journal, chosen_parts, active_parts_orig = jbeam_slot_system.find_parts(io_ctx, vehicle_config)
     if vehicle is None:
         raise Exception('JBeam processing error.')
@@ -82,15 +85,14 @@ def load_vehicle(vehicle_directories: list[str], vehicle_config: dict, model_nam
                                     veh_files.append(file)
                                     file_added = True
 
-    print('Applying variables...')
+    if ui_props.show_console_warnings_missing_nodes: print('Applying variables...')
     all_variables = jbeam_variables.process_parts(vehicle, unify_journal, vehicle_config)
 
-    print('Unifying parts...')
+    if ui_props.show_console_warnings_missing_nodes: print('Unifying parts...')
     jbeam_slot_system.init_unify_parts(vehicle)
     jbeam_slot_system.unify_part_journal(io_ctx, unify_journal)
     jbeam_variables.process_unified_vehicle(vehicle, all_variables)
-
-    print('Assembling tables ...')
+    if ui_props.show_console_warnings_missing_nodes: print('Assembling tables ...')
     if not jbeam_table_schema.process(vehicle):
         raise Exception('JBeam processing error.')
 
@@ -137,7 +139,7 @@ def load_vehicle(vehicle_directories: list[str], vehicle_config: dict, model_nam
 
         # Only print a warning if some beams could not be fixed
         if beams_unable_to_fix > 0:
-            print(f"Warning: Unable to fix missing 'partOrigin' for {beams_unable_to_fix} beams during vehicle load.")
+            if ui_props.show_console_warnings_missing_nodes: print(f"Warning: Unable to fix missing 'partOrigin' for {beams_unable_to_fix} beams during vehicle load.")
         # Commented out the original message:
         # if beams_missing_origin > 0:
         #     print(f"Attempted to fix missing 'partOrigin' in {beams_missing_origin} beams. Successfully updated: {beams_updated_count}. Unable to fix: {beams_unable_to_fix}")
@@ -149,7 +151,7 @@ def load_vehicle(vehicle_directories: list[str], vehicle_config: dict, model_nam
     jbeam_io.finish_loading()
 
     t2 = timeit.default_timer()
-    print('Done loading JBeam. Time =', round(t2 - t1, 2), 's')
+    if ui_props.show_console_warnings_missing_nodes: print('Done loading JBeam. Time =', round(t2 - t1, 2), 's')
 
     return jbeam_parsing_errors, {
         'vehicleDirectory' : vehicle_directories[0],
@@ -774,9 +776,9 @@ def reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Colle
         #     obj_data[constants.MESH_EDITING_ENABLED] = True
 
         if len(jbeam_parsing_errors) == 0:
-            print('Done reimporting vehicle.')
+            if ui_props.show_console_warnings_missing_nodes: print('Done reimporting vehicle')
         else:
-            print('WARNING, done reimporting vehicle with errors. Some parts may not be imported.')
+            if ui_props.show_console_warnings_missing_nodes: print('WARNING, done reimporting vehicle with errors. Some parts may not be imported.')
         return True
     except Exception as e: # Catch specific exceptions if possible, but broad Exception for now
         traceback.print_exc()
@@ -819,8 +821,8 @@ def import_vehicle(context: bpy.types.Context, config_path: str):
         generate_meshes(vehicle_bundle)
 
         text_editor.check_all_int_files_for_changes(context, False, False)
-
-        print('Done importing vehicle.')
+        ui_props = context.scene.ui_properties
+        if ui_props.show_console_warnings_missing_nodes: print('Done importing vehicle.')
 
         if len(jbeam_parsing_errors) == 0:
             utils.show_message_box('INFO', 'Import Vehicle', 'Done importing vehicle.')
@@ -866,6 +868,7 @@ class JBEAM_EDITOR_OT_import_vehicle(Operator, ImportHelper):
     )
 
     def execute(self, context):
+        ui_props = context.scene.ui_properties
         pc_config_path = Path(self.filepath).as_posix()
         res = import_vehicle(context, pc_config_path)
         if not res:

@@ -129,6 +129,7 @@ def read_int_file(filename: str) -> str | None:
 
 
 def delete_int_file(filename: str):
+    ui_props = bpy.context.scene.ui_properties
     internal_name = _get_internal_filename(filename) # <<< Use new helper
     text: bpy.types.Text | None = bpy.data.texts.get(internal_name)
     if text is None:

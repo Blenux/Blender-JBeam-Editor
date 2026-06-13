@@ -23,9 +23,8 @@ import sys
 
 # Import from local modules
 from . import constants
-# Import classes and functions from other modules
-# <<< MODIFIED: Import update function >>>
-from .properties import UIProperties, ImportedPCFileItem, ActivePCFilterItem, update_pc_filters
+# Import classes and functions from other modules # <<< MODIFIED: Import update function, NodeWeightVariableItem >>>
+from .properties import UIProperties, ImportedPCFileItem, ActivePCFilterItem, NodeWeightVariableItem, update_pc_filters
 from .operators import (
     JBEAM_EDITOR_OT_force_jbeam_sync,
     JBEAM_EDITOR_OT_undo,
@@ -82,6 +81,7 @@ from . import import_vehicle
 
 # List of classes to register
 classes = (
+    NodeWeightVariableItem, # <<< ADDED: Register NodeWeightVariableItem first
     ImportedPCFileItem, # <<< ADDED
     ActivePCFilterItem, # <<< ADDED
     UIProperties,

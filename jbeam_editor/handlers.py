@@ -68,7 +68,7 @@ from .drawing import (
 # <<< MODIFIED: Remove JBEAM_EDITOR_OT_confirm_text_deletion import >>>
 from .operators import JBEAM_EDITOR_OT_batch_node_renaming # Import operators
 from .text_editor import SCENE_SHORT_TO_FULL_FILENAME
-# from .sjsonast import parse as sjsonast_parse, calculate_char_positions as sjsonast_calculate_char_positions, ASTNode # <<< Remove ASTNode import here
+from .sjsonast import parse as sjsonast_parse # <<< MODIFIED: Keep sjsonast_parse
 from . import utils # <<< ADDED: Import utils for show_message_box
 
 # Timer intervals
@@ -223,11 +223,84 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
         refresh_curr_vdata()
         return # Exit if not a JBeam object
 
+    # Determine if the active JBeam object has changed.
+    # This must be done BEFORE refresh_curr_vdata() updates jb_globals.prev_obj_selected.
+    is_new_jbeam_object = False
+    # is_jbeam_obj is true at this point, active_obj and active_obj_data are valid
+    current_active_obj_name = active_obj.name
+    if jb_globals.prev_obj_selected != current_active_obj_name:
+        is_new_jbeam_object = True
+    # else: is_new_jbeam_object remains False
+
     refresh_curr_vdata()
 
     jbeam_filepath = active_obj_data.get(constants.MESH_JBEAM_FILE_PATH)
+    jbeam_part = active_obj_data.get(constants.MESH_JBEAM_PART) # Define jbeam_part for the current active object
+    obj = active_obj # Define obj for clarity, refers to the current active_obj
+
+    # Ensure the text editor is showing the correct file *before* attempting to scroll
     if jbeam_filepath:
         text_editor.show_int_file(jbeam_filepath)
+
+    if is_new_jbeam_object and jbeam_filepath and jbeam_part:
+        try:
+            file_content = text_editor.read_int_file(jbeam_filepath)
+            if file_content:
+                ast_data = sjsonast_parse(file_content)
+                if ast_data and 'ast' in ast_data and 'nodes' in ast_data['ast']:
+                    ast_nodes = ast_data['ast']['nodes']
+                    # sjsonast.calculate_char_positions is called within get_part_in_ast_nodes
+                    part_start_node_idx, _ = export_jbeam.get_part_in_ast_nodes(ast_nodes, jbeam_part)
+
+                    if part_start_node_idx != -1 and part_start_node_idx < len(ast_nodes):
+                        # Find the first non-WSC node for the part definition to get a more accurate line
+                        actual_part_def_start_idx = part_start_node_idx
+                        while actual_part_def_start_idx < len(ast_nodes) and ast_nodes[actual_part_def_start_idx].data_type == 'wsc':
+                            actual_part_def_start_idx += 1
+
+                        if actual_part_def_start_idx < len(ast_nodes):
+                            char_pos = ast_nodes[actual_part_def_start_idx].start_pos
+                            line_number = file_content[:char_pos].count('\n') + 1
+                            drawing._scroll_editor_to_line(context, jbeam_filepath, line_number)
+        except Exception as e:
+            print(f"Error scrolling to part definition: {e}", file=sys.stderr)
+
+    # --- Undo Logic for Object Selection ---
+    # If a new JBeam object has been selected, push its current file state to the undo history.
+    # 'is_new_jbeam_object' is now defined.
+    # 'jbeam_part' and 'obj' refer to the current active object's properties.
+    if is_new_jbeam_object and jbeam_part is not None and obj is not None and obj.data is not None: # Ensure obj and obj.data are valid
+        active_jbeam_filepath = obj.data.get(constants.MESH_JBEAM_FILE_PATH) # Use the current obj's filepath
+        if active_jbeam_filepath:
+            internal_name = text_editor._get_internal_filename(active_jbeam_filepath)
+            current_text_content = text_editor.read_int_file(active_jbeam_filepath)
+
+            if current_text_content is not None:
+                # Access history stack directly from text_editor module
+                history_stack = text_editor.history_stack
+                # history_stack_idx is a global in text_editor, so we modify it directly
+
+                # When a new JBeam object is selected, its current state should always become
+                # the new top of the undo stack, effectively making the selection a new "action".
+                new_state_to_push = {internal_name: current_text_content}
+
+                text_editor.history_stack_idx += 1
+                # Insert the new state at the current index (which is now the new top)
+                history_stack.insert(text_editor.history_stack_idx, new_state_to_push)
+                # Truncate any "redo" history that might have existed beyond this new top
+                text_editor.history_stack = history_stack[:text_editor.history_stack_idx + 1]
+
+                # Limit history stack size
+                if len(history_stack) > text_editor.HISTORY_STACK_SIZE:
+                    history_stack.pop(0)
+                    # Adjust index if the first element was removed
+                    text_editor.history_stack_idx -= 1
+
+                # Update scene's previous text state to prevent immediate "change" detection by other handlers
+                if text_editor.SCENE_PREV_TEXTS not in scene:
+                    scene[text_editor.SCENE_PREV_TEXTS] = {}
+                scene[text_editor.SCENE_PREV_TEXTS][internal_name] = current_text_content
+    # --- End Undo Logic for Object Selection ---
 
     # <<< MODIFIED: Keep bmesh access even if not in EDIT mode for face hiding >>>
     # The face hiding logic needs bmesh access.
@@ -257,179 +330,187 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
                 if layer is not None:
                     context.view_layer.active_layer_collection = layer
 
-    bm = None
-    try:
-        bm = bmesh.from_edit_mesh(active_obj_data)
-        # <<< ADDED: Face Hiding Logic >>>
-        # Only apply face hiding if in Edit Mode and editing is enabled
-        if active_obj.mode == 'EDIT' and mesh_editing_enabled:
-            try:
-                bm.faces.ensure_lookup_table()
-                bm.verts.ensure_lookup_table() # Ensure verts table for modification
-                bm.edges.ensure_lookup_table() # Ensure edges table for modification
+    if active_obj.mode == 'EDIT':
+        bm = None
+        try:
+            bm = bmesh.from_edit_mesh(active_obj_data)
+            # <<< ADDED: Face Hiding Logic >>>
+            # Only apply face hiding if in Edit Mode and editing is enabled
+            if mesh_editing_enabled: # active_obj.mode == 'EDIT' is guaranteed here
+                try:
+                    bm.faces.ensure_lookup_table()
+                    bm.verts.ensure_lookup_table() # Ensure verts table for modification
+                    bm.edges.ensure_lookup_table() # Ensure edges table for modification
 
-                # If the toggle is OFF, hide all faces that are not already hidden.
-                # If the toggle is ON, do nothing here, allowing Blender's native hide/unhide to work.
-                if not ui_props.toggle_native_faces_vis:
-                    needs_bm_update = False
-                    for f_iter in bm.faces: # Use f_iter to avoid conflict if f is used elsewhere
-                        if not f_iter.hide: # If face is currently visible
-                            f_iter.hide = True
-                            needs_bm_update = True
-                            # Also hide its vertices and edges
-                            for v_face in f_iter.verts:
-                                if not v_face.hide:
-                                    v_face.hide = True
-                            for e_face in f_iter.edges:
-                                if not e_face.hide:
-                                    e_face.hide = True
-                    if needs_bm_update:
-                        bmesh.update_edit_mesh(active_obj_data)
-            except Exception as e:
-                print(f"Error applying face visibility: {e}", file=sys.stderr)
-        # <<< END ADDED >>>
-    except Exception as e:
-        print(f"Error getting bmesh in depsgraph callback: {e}", file=sys.stderr)
+                    # If the toggle is OFF, hide all faces that are not already hidden.
+                    # If the toggle is ON, do nothing here, allowing Blender's native hide/unhide to work.
+                    if not ui_props.toggle_native_faces_vis:
+                        needs_bm_update = False
+                        for f_iter in bm.faces: # Use f_iter to avoid conflict if f is used elsewhere
+                            if not f_iter.hide: # If face is currently visible
+                                f_iter.hide = True
+                                needs_bm_update = True
+                                # Also hide its vertices and edges
+                                for v_face in f_iter.verts:
+                                    if not v_face.hide:
+                                        v_face.hide = True
+                                for e_face in f_iter.edges:
+                                    if not e_face.hide:
+                                        e_face.hide = True
+                        if needs_bm_update:
+                            bmesh.update_edit_mesh(active_obj_data)
+                except Exception as e:
+                    print(f"Error applying face visibility: {e}", file=sys.stderr)
+            # <<< END ADDED >>>
+
+            init_node_id_layer = bm.verts.layers.string.get(constants.VL_INIT_NODE_ID)
+            # ... (rest of layer checks) ...
+            node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
+            is_fake_layer = bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+            beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
+            face_idx_layer = bm.faces.layers.int.get(constants.FL_FACE_IDX)
+            beam_part_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
+            face_part_origin_layer = bm.faces.layers.string.get(constants.FL_FACE_PART_ORIGIN)
+            node_part_origin_layer = bm.verts.layers.string.get(constants.VL_NODE_PART_ORIGIN)
+
+            if not all([init_node_id_layer, node_id_layer, is_fake_layer, beam_indices_layer, face_idx_layer, beam_part_origin_layer, face_part_origin_layer, node_part_origin_layer]):
+                print("Warning: One or more JBeam layers missing from mesh.", file=sys.stderr)
+                return
+
+            bm.verts.ensure_lookup_table(); bm.edges.ensure_lookup_table(); bm.faces.ensure_lookup_table()
+
+            current_vert_count = active_obj_data.get(constants.MESH_VERTEX_COUNT, 0)
+            current_edge_count = active_obj_data.get(constants.MESH_EDGE_COUNT, 0)
+            current_face_count = active_obj_data.get(constants.MESH_FACE_COUNT, 0)
+            new_vert_count = len(bm.verts); new_edge_count = len(bm.edges); new_face_count = len(bm.faces)
+
+            current_selected_indices = set()
+            newly_selected_vert_index = -1
+            num_currently_selected = 0
+
+            for v in bm.verts:
+                if v[is_fake_layer]: continue
+                if v.select:
+                    current_selected_indices.add(v.index)
+                    num_currently_selected += 1
+                    if v.index not in jb_globals.previous_selected_indices:
+                        if newly_selected_vert_index == -1: newly_selected_vert_index = v.index
+                        else: newly_selected_vert_index = -2
+
+            if jb_globals.batch_node_renaming_enabled and newly_selected_vert_index >= 0:
+                try:
+                    vert_to_rename = bm.verts[newly_selected_vert_index]
+                    new_node_id: str = ui_props.batch_node_renaming_naming_scheme
+                    if '#' in new_node_id:
+                        new_node_id = new_node_id.replace('#', f'{ui_props.batch_node_renaming_node_idx}')
+                        vert_to_rename[node_id_layer] = bytes(new_node_id, 'utf-8')
+                        ui_props.batch_node_renaming_node_idx += 1
+                        jb_globals._force_do_export = True
+                        # Ensure batch renaming respects the local "Rename All References" toggle
+                        jb_globals._use_local_rename_toggle_for_next_export = True
+                    else:
+                         print(f"Warning: Batch rename scheme '{ui_props.batch_node_renaming_naming_scheme}' does not contain '#'. No rename performed.")
+                except IndexError: print(f"Error: Could not find vertex with index {newly_selected_vert_index} for renaming.")
+                except Exception as rename_err: print(f"Error during batch renaming: {rename_err}")
+
+            # --- Update Node Selection ---
+            node_selection_changed = False
+            if len(current_selected_indices) != len(jb_globals.previous_selected_indices) or \
+               current_selected_indices != jb_globals.previous_selected_indices:
+                node_selection_changed = True
+                jb_globals.selected_nodes.clear()
+                for idx in current_selected_indices:
+                    try:
+                        v = bm.verts[idx]
+                        jb_globals.selected_nodes.append((idx, v[init_node_id_layer].decode('utf-8')))
+                    except IndexError: pass
+                # <<< ADDED: Set veh_render_dirty if node selection changed >>>
+                drawing.veh_render_dirty = True
+                jb_globals.previous_selected_indices = current_selected_indices.copy() # Use copy
+            # --- End Update Node Selection ---
+
+            # --- MODIFICATION START ---
+            for i_vert, v_iter in enumerate(bm.verts): # Renamed i to i_vert, v to v_iter
+                if i_vert >= current_vert_count: # If this is a newly added vertex
+                    # Assign a temporary ID. The final L/R/M prefix will be added during export.
+                    temp_node_id = f"TEMP_{uuid.uuid4()}" # Use TEMP_ prefix for easy identification
+
+                    temp_node_id_bytes = bytes(temp_node_id, 'utf-8')
+                    v_iter[init_node_id_layer] = temp_node_id_bytes # Assign as initial ID
+                    v_iter[node_id_layer] = temp_node_id_bytes      # Assign as current ID
+                    v_iter[node_part_origin_layer] = bytes(active_obj_data[constants.MESH_JBEAM_PART], 'utf-8') # Assign part origin
+                    # v_iter[is_fake_layer] should default to 0 (or be set if necessary)
+            # --- MODIFICATION END ---
+
+            # --- Update Beam Selection ---
+            beam_selection_changed = False
+            current_selected_beam_indices = set()
+            for i_edge, e_iter in enumerate(bm.edges): # Renamed i to i_edge, e to e_iter
+                beam_indices = e_iter[beam_indices_layer].decode('utf-8')
+                if i_edge >= current_edge_count:
+                    if beam_indices == '':
+                        e_iter[beam_indices_layer] = bytes('-1', 'utf-8')
+                        e_iter[beam_part_origin_layer] = bytes(active_obj_data[constants.MESH_JBEAM_PART], 'utf-8')
+                if beam_indices != '' and e_iter.select:
+                    current_selected_beam_indices.add(e_iter.index) # Add index to current set
+
+            # Compare current beam selection with previous state
+            if current_selected_beam_indices != jb_globals.selected_beam_edge_indices:
+                beam_selection_changed = True
+                jb_globals.selected_beam_edge_indices = current_selected_beam_indices.copy() # Use copy
+                # Update the list used for properties/tooltips
+                jb_globals.selected_beams.clear()
+                for edge_index in current_selected_beam_indices:
+                    try:
+                        e_sel = bm.edges[edge_index] # Renamed e to e_sel
+                        beam_indices_str = e_sel[beam_indices_layer].decode('utf-8')
+                        jb_globals.selected_beams.append((edge_index, beam_indices_str))
+                    except (IndexError, ReferenceError): pass # Ignore if edge becomes invalid
+                drawing.veh_render_dirty = True # Trigger redraw if beam selection changed
+            # --- End Update Beam Selection ---
+
+            jb_globals.selected_tris_quads.clear()
+            for i_face, f_iter in enumerate(bm.faces): # Renamed i to i_face, f to f_iter
+                face_idx = f_iter[face_idx_layer]
+                if i_face >= current_face_count:
+                    if face_idx == 0:
+                        f_iter[face_idx_layer] = -1
+                        f_iter[face_part_origin_layer] = bytes(active_obj_data[constants.MESH_JBEAM_PART], 'utf-8')
+                if face_idx != 0 and f_iter.select:
+                    jb_globals.selected_tris_quads.append((f_iter.index, face_idx))
+
+            if new_vert_count != current_vert_count: active_obj_data[constants.MESH_VERTEX_COUNT] = new_vert_count
+            if new_edge_count != current_edge_count: active_obj_data[constants.MESH_EDGE_COUNT] = new_edge_count
+            if new_face_count != current_face_count: active_obj_data[constants.MESH_FACE_COUNT] = new_face_count
+
+            if len(jb_globals.selected_nodes) == 1:
+                vert_index, init_node_id = jb_globals.selected_nodes[0]
+                try:
+                    v_sel = bm.verts[vert_index] # Renamed v to v_sel
+                    current_node_id = v_sel[node_id_layer].decode('utf-8')
+                    if ui_props.input_node_id != current_node_id:
+                        ui_props.input_node_id = current_node_id
+                except IndexError:
+                     if ui_props.input_node_id != "": ui_props.input_node_id = ""
+
+            # --- Tooltip Logic ---
+            _update_tooltip_info(context, active_obj, bm, jbeam_filepath, ui_props)
+
+        except Exception as e:
+            print(f"Error processing bmesh in depsgraph callback (Edit Mode): {e}", file=sys.stderr)
+            traceback.print_exc()
+            # Clear tooltips on error
+            jb_globals._selected_beam_line_info = None; jb_globals._selected_beam_params_info = None
+            jb_globals._selected_node_params_info = None; jb_globals._selected_node_line_info = None
+            return
+        # No need to free bm from edit mesh
+    else: # Object Mode
         # Clear tooltips on error
         jb_globals._selected_beam_line_info = None; jb_globals._selected_beam_params_info = None
         jb_globals._selected_node_params_info = None; jb_globals._selected_node_line_info = None
-        return
 
-    init_node_id_layer = bm.verts.layers.string.get(constants.VL_INIT_NODE_ID)
-    # ... (rest of layer checks) ...
-    node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
-    is_fake_layer = bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
-    beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
-    face_idx_layer = bm.faces.layers.int.get(constants.FL_FACE_IDX)
-    beam_part_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
-    face_part_origin_layer = bm.faces.layers.string.get(constants.FL_FACE_PART_ORIGIN)
-    node_part_origin_layer = bm.verts.layers.string.get(constants.VL_NODE_PART_ORIGIN)
-
-    if not all([init_node_id_layer, node_id_layer, is_fake_layer, beam_indices_layer, face_idx_layer, beam_part_origin_layer, face_part_origin_layer, node_part_origin_layer]):
-        print("Warning: One or more JBeam layers missing from mesh.", file=sys.stderr)
-        return
-
-    bm.verts.ensure_lookup_table(); bm.edges.ensure_lookup_table(); bm.faces.ensure_lookup_table()
-
-    current_vert_count = active_obj_data.get(constants.MESH_VERTEX_COUNT, 0)
-    current_edge_count = active_obj_data.get(constants.MESH_EDGE_COUNT, 0)
-    current_face_count = active_obj_data.get(constants.MESH_FACE_COUNT, 0)
-    new_vert_count = len(bm.verts); new_edge_count = len(bm.edges); new_face_count = len(bm.faces)
-
-    current_selected_indices = set()
-    newly_selected_vert_index = -1
-    num_currently_selected = 0
-
-    for v in bm.verts:
-        if v[is_fake_layer]: continue
-        if v.select:
-            current_selected_indices.add(v.index)
-            num_currently_selected += 1
-            if v.index not in jb_globals.previous_selected_indices:
-                if newly_selected_vert_index == -1: newly_selected_vert_index = v.index
-                else: newly_selected_vert_index = -2
-
-    if jb_globals.batch_node_renaming_enabled and newly_selected_vert_index >= 0:
-        try:
-            vert_to_rename = bm.verts[newly_selected_vert_index]
-            new_node_id: str = ui_props.batch_node_renaming_naming_scheme
-            if '#' in new_node_id:
-                new_node_id = new_node_id.replace('#', f'{ui_props.batch_node_renaming_node_idx}')
-                vert_to_rename[node_id_layer] = bytes(new_node_id, 'utf-8')
-                ui_props.batch_node_renaming_node_idx += 1
-                jb_globals._force_do_export = True
-                # Ensure batch renaming respects the local "Rename All References" toggle
-                jb_globals._use_local_rename_toggle_for_next_export = True
-            else:
-                 print(f"Warning: Batch rename scheme '{ui_props.batch_node_renaming_naming_scheme}' does not contain '#'. No rename performed.")
-        except IndexError: print(f"Error: Could not find vertex with index {newly_selected_vert_index} for renaming.")
-        except Exception as rename_err: print(f"Error during batch renaming: {rename_err}")
-
-    # --- Update Node Selection ---
-    node_selection_changed = False
-    if len(current_selected_indices) != len(jb_globals.previous_selected_indices) or \
-       current_selected_indices != jb_globals.previous_selected_indices:
-        node_selection_changed = True
-        jb_globals.selected_nodes.clear()
-        for idx in current_selected_indices:
-            try:
-                v = bm.verts[idx]
-                jb_globals.selected_nodes.append((idx, v[init_node_id_layer].decode('utf-8')))
-            except IndexError: pass
-        # <<< ADDED: Set veh_render_dirty if node selection changed >>>
-        drawing.veh_render_dirty = True
-        jb_globals.previous_selected_indices = current_selected_indices
-    # --- End Update Node Selection ---
-
-    # --- MODIFICATION START ---
-    for i, v in enumerate(bm.verts):
-        if i >= current_vert_count: # If this is a newly added vertex
-            # Assign a temporary ID. The final L/R/M prefix will be added during export.
-            temp_node_id = f"TEMP_{uuid.uuid4()}" # Use TEMP_ prefix for easy identification
-
-            temp_node_id_bytes = bytes(temp_node_id, 'utf-8')
-            v[init_node_id_layer] = temp_node_id_bytes # Assign as initial ID
-            v[node_id_layer] = temp_node_id_bytes      # Assign as current ID
-            v[node_part_origin_layer] = bytes(active_obj_data[constants.MESH_JBEAM_PART], 'utf-8') # Assign part origin
-            # v[is_fake_layer] should default to 0 (or be set if necessary)
-    # --- MODIFICATION END ---
-
-    # --- Update Beam Selection ---
-    beam_selection_changed = False
-    current_selected_beam_indices = set()
-    for i, e in enumerate(bm.edges):
-        beam_indices = e[beam_indices_layer].decode('utf-8')
-        if i >= current_edge_count:
-            if beam_indices == '':
-                e[beam_indices_layer] = bytes('-1', 'utf-8')
-                e[beam_part_origin_layer] = bytes(active_obj_data[constants.MESH_JBEAM_PART], 'utf-8')
-        if beam_indices != '' and e.select:
-            current_selected_beam_indices.add(e.index) # Add index to current set
-
-    # Compare current beam selection with previous state
-    if current_selected_beam_indices != jb_globals.selected_beam_edge_indices:
-        beam_selection_changed = True
-        jb_globals.selected_beam_edge_indices = current_selected_beam_indices
-        # Update the list used for properties/tooltips
-        jb_globals.selected_beams.clear()
-        for edge_index in current_selected_beam_indices:
-            try:
-                e = bm.edges[edge_index]
-                beam_indices_str = e[beam_indices_layer].decode('utf-8')
-                jb_globals.selected_beams.append((edge_index, beam_indices_str))
-            except (IndexError, ReferenceError): pass # Ignore if edge becomes invalid
-        drawing.veh_render_dirty = True # Trigger redraw if beam selection changed
-    # --- End Update Beam Selection ---
-
-    jb_globals.selected_tris_quads.clear()
-    for i, f in enumerate(bm.faces):
-        face_idx = f[face_idx_layer]
-        if i >= current_face_count:
-            if face_idx == 0:
-                f[face_idx_layer] = -1
-                f[face_part_origin_layer] = bytes(active_obj_data[constants.MESH_JBEAM_PART], 'utf-8')
-        if face_idx != 0 and f.select:
-            # <<< CHANGE: Store face index (f.index) instead of the BMFace object (f) >>>
-            jb_globals.selected_tris_quads.append((f.index, face_idx))
-
-    if new_vert_count != current_vert_count: active_obj_data[constants.MESH_VERTEX_COUNT] = new_vert_count
-    if new_edge_count != current_edge_count: active_obj_data[constants.MESH_EDGE_COUNT] = new_edge_count
-    if new_face_count != current_face_count: active_obj_data[constants.MESH_FACE_COUNT] = new_face_count
-
-    if len(jb_globals.selected_nodes) == 1:
-        vert_index, init_node_id = jb_globals.selected_nodes[0]
-        try:
-            v = bm.verts[vert_index]
-            current_node_id = v[node_id_layer].decode('utf-8')
-            if ui_props.input_node_id != current_node_id:
-                ui_props.input_node_id = current_node_id
-        except IndexError:
-             if ui_props.input_node_id != "": ui_props.input_node_id = ""
-
-    # --- Tooltip Logic ---
-    jb_globals._selected_beam_line_info = None; jb_globals._selected_beam_params_info = None
-    jb_globals._selected_node_params_info = None; jb_globals._selected_node_line_info = None
-
+def _update_tooltip_info(context: bpy.types.Context, active_obj: bpy.types.Object, bm: bmesh.types.BMesh, jbeam_filepath: str, ui_props: bpy.types.PropertyGroup):
+    """Helper function to update tooltip information based on current selection in bmesh."""
     if len(jb_globals.selected_nodes) == 1:
         vert_index, node_id = jb_globals.selected_nodes[0]
         node_world_pos = active_obj.matrix_world @ bm.verts[vert_index].co
@@ -442,19 +523,26 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
                 if k == Metadata or k == 'pos' or k == 'posNoOffset': continue
                 val = node_data[k]
                 if show_resolved:
-                    resolved_val = drawing.resolve_jbeam_variable_value(val, jb_globals.jbeam_variables_cache)
-                    display_val_str = repr(resolved_val)
+                    resolved_val = drawing.resolve_jbeam_variable_value(val, jb_globals.jbeam_variables_cache, 0, context)
+                    if isinstance(resolved_val, float):
+                        display_val_str = utils.to_float_str(resolved_val) # Use to_float_str
+                    else:
+                        display_val_str = repr(resolved_val)
                     if isinstance(val, str) and val.startswith('=$'):
                         if resolved_val != val: display_val_str += f" (from {val})"
                         else: display_val_str += " (unresolved/failed)"
                     params_list.append((k, display_val_str))
                 else:
-                    params_list.append((k, repr(val)))
+                    if isinstance(val, float):
+                        params_list.append((k, utils.to_float_str(val))) # Use to_float_str
+                    else:
+                        params_list.append((k, repr(val)))
 
             if params_list: jb_globals._selected_node_params_info = {'params_list': params_list, 'pos': node_world_pos}
             else: jb_globals._selected_node_params_info = {'params_list': [("(No properties)", "")], 'pos': node_world_pos}
 
         try:
+            node_part_origin_layer = bm.verts.layers.string.get(constants.VL_NODE_PART_ORIGIN)
             target_part_origin = bm.verts[vert_index][node_part_origin_layer].decode('utf-8')
             if target_part_origin and jbeam_filepath:
                 line_num = find_node_line_number(jbeam_filepath, target_part_origin, node_id)
@@ -472,6 +560,8 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
         beam_indices = beam_indices_str.split(',')
         if beam_indices:
             try:
+                beam_part_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
+                init_node_id_layer = bm.verts.layers.string.get(constants.VL_INIT_NODE_ID)
                 target_part_origin = e[beam_part_origin_layer].decode('utf-8')
                 midpoint = active_obj.matrix_world @ ((e.verts[0].co + e.verts[1].co) / 2)
 
@@ -496,14 +586,20 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
                             if k in ('id1:', 'id2:', 'partOrigin') or k == Metadata: continue
                             val = beam_data[k]
                             if show_resolved:
-                                resolved_val = drawing.resolve_jbeam_variable_value(val, jb_globals.jbeam_variables_cache)
-                                display_val_str = repr(resolved_val)
+                                resolved_val = drawing.resolve_jbeam_variable_value(val, jb_globals.jbeam_variables_cache, 0, context)
+                                if isinstance(resolved_val, float):
+                                    display_val_str = utils.to_float_str(resolved_val) # Use to_float_str
+                                else:
+                                    display_val_str = repr(resolved_val)
                                 if isinstance(val, str) and val.startswith('=$'):
                                     if resolved_val != val: display_val_str += f" (from {val})"
                                     else: display_val_str += " (unresolved/failed)"
                                 params_list.append((k, display_val_str))
                             else:
-                                params_list.append((k, repr(val)))
+                                if isinstance(val, float):
+                                    params_list.append((k, utils.to_float_str(val))) # Use to_float_str
+                                else:
+                                    params_list.append((k, repr(val)))
                         if params_list: jb_globals._selected_beam_params_info = {'params_list': params_list, 'midpoint': midpoint}
                         else: jb_globals._selected_beam_params_info = {'params_list': [("(No properties)", "")], 'midpoint': midpoint}
                     else: print(f"  Warning: Global beam index {global_beam_idx} not found or invalid for part '{target_part_origin}' for param lookup.")

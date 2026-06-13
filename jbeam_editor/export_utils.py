@@ -133,31 +133,69 @@ def get_next_non_wsc_node(ast_nodes, start_idx):
 
 
 def compare_and_set_value(original_jbeam_file_data, jbeam_file_data, stack, index, node):
-    old_data = original_jbeam_file_data
-    data = jbeam_file_data
-    for stack_entry in stack:
-        old_data = old_data[stack_entry[0]]
-        data = data[stack_entry[0]]
+    # Traverse to the target new_data location
+    current_new_data = jbeam_file_data
+    try:
+        for stack_entry in stack:
+            current_new_data = current_new_data[stack_entry[0]]
+        new_val = current_new_data[index]
+    except (KeyError, IndexError, TypeError) as e:
+        # Path from AST is not present in the modified SJSON data.
+        # This can happen if the structure was changed (e.g., a list shortened, a key removed in jbeam_file_data).
+        # The AST node 'node' should not be updated as there's no corresponding new value.
+        # The calling function (update_ast_nodes) is responsible for structural AST changes if any.
+        # Silently return False, indicating no update to this AST value node.
+        return False
 
-    old_data = old_data[index]
-    data = data[index]
+    # Try to traverse to the target old_data location
+    current_old_data = original_jbeam_file_data
+    old_val_exists = True
+    old_val = None # Initialize old_val
+    try:
+        for stack_entry in stack:
+            current_old_data = current_old_data[stack_entry[0]]
+        old_val = current_old_data[index]
+    except (KeyError, IndexError, TypeError):
+        old_val_exists = False
 
-    # Only change value in AST if changed between old and new SJSON data
-    if node.data_type == 'number':
-        if is_number(data) and (to_c_float(old_data) != to_c_float(data) and old_data != data):
-            node.value = data
-            fval = float(data)
-            node.precision = min(4, max(len((f'%.4g' % abs(fval - int(fval)))) - 2, 0))
-            return True
+    ast_updated = False
+    if not old_val_exists:
+        # Path didn't exist in original data, or types mismatched.
+        # Update AST node if its current value differs from new_val, or if it's a number and new_val is a number.
+        if node.data_type == 'number':
+            if is_number(new_val): # Only update if new_val is a number
+                if not (is_number(node.value) and to_c_float(node.value) == to_c_float(new_val)):
+                    node.value = new_val
+                    fval = float(new_val)
+                    node.precision = min(4, max(len((f'%.4g' % abs(fval - int(fval)))) - 2, 0))
+                    ast_updated = True
+        elif node.value != new_val: # For strings, bools
+            node.value = new_val
+            ast_updated = True
     else:
-        if old_data != data:
-            node.value = data
-            return True
+        # Both old_val and new_val exist, compare them
+        if node.data_type == 'number':
+            if is_number(old_val) and is_number(new_val):
+                # Compare float representations and also raw values for non-float numbers
+                if to_c_float(old_val) != to_c_float(new_val) or (not isinstance(old_val, float) and old_val != new_val):
+                    node.value = new_val
+                    fval = float(new_val)
+                    node.precision = min(4, max(len((f'%.4g' % abs(fval - int(fval)))) - 2, 0))
+                    ast_updated = True
+            elif old_val != new_val: # If types changed or one wasn't a number, and new_val is a number
+                if is_number(new_val):
+                    node.value = new_val
+                    fval = float(new_val)
+                    node.precision = min(4, max(len((f'%.4g' % abs(fval - int(fval)))) - 2, 0))
+                    ast_updated = True
+        elif old_val != new_val: # For strings, bools
+            node.value = new_val
+            ast_updated = True
 
-    return False
+    return ast_updated
 
 
-def add_jbeam_setup(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int):
+def add_jbeam_setup(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, comment_text_to_check: str = '//ADDED NODES BY EDITOR//'): # Added comment_text_to_check
     if ast_nodes[jbeam_section_end_node_idx - 1].data_type == 'wsc':
         i = jbeam_section_end_node_idx - 1
     else:
@@ -165,27 +203,48 @@ def add_jbeam_setup(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 
     node_after_entry = ast_nodes[i]
     node_2_after_entry = None
+    # comment_text = '//ADDED NODES BY EDITOR//' # Now passed as argument
 
     if node_after_entry.data_type == 'wsc':
-        # Split WSC node into one node for inline WSCS node entry and second node after newline character
         wscs = node_after_entry.value
-        nl_found = False
+        comment_start_idx_in_wscs = wscs.find(comment_text_to_check)
 
-        for k, char in enumerate(wscs):
-            if char == '\n':
-                nl_found = True
-                break
-
-        node_after_entry.value = wscs[:k] if nl_found else wscs
-        node_2_after_entry = ASTNode('wsc', wscs[k:]) if nl_found else None
+        if comment_start_idx_in_wscs != -1:
+            # Comment found in this WSC. node_after_entry.value should include the comment line.
+            # node_2_after_entry.value should be what comes after the comment line's newline.
+            end_of_comment_line_nl = wscs.find('\n', comment_start_idx_in_wscs + len(comment_text_to_check))
+            if end_of_comment_line_nl != -1:
+                node_after_entry.value = wscs[:end_of_comment_line_nl + 1] # Include the newline
+                remaining_wsc = wscs[end_of_comment_line_nl + 1:]
+                if remaining_wsc:
+                    node_2_after_entry = ASTNode('wsc', remaining_wsc)
+                else:
+                    # Nothing after comment line's \n, means ']' should be on next line, NL_INDENT
+                    node_2_after_entry = ASTNode('wsc', NL_INDENT)
+            else:
+                # Comment is the last line in WSC, or WSC ends without newline after comment.
+                # node_after_entry.value is already wscs.
+                # node_2_after_entry should be NL_INDENT for the ']'
+                node_after_entry.value += '\n' # Ensure a newline after the comment if it's the last thing
+                node_2_after_entry = ASTNode('wsc', NL_INDENT)
+        else:
+            # Comment not found, original logic: split at the first newline.
+            first_nl = wscs.find('\n')
+            if first_nl != -1:
+                node_after_entry.value = wscs[:first_nl] # Content up to (but not including) the newline
+                node_2_after_entry = ASTNode('wsc', wscs[first_nl:]) # Content from the newline onwards
+            else:
+                # No newline in WSC, node_after_entry.value is wscs.
+                # node_2_after_entry should be NL_INDENT for the ']' if section isn't empty.
+                node_2_after_entry = ASTNode('wsc', NL_INDENT)
     else:
+        # The node before ']' is not WSC. This is unusual for well-formatted JBeam.
+        # Insert a new empty WSC node for node_after_entry.
         node_after_entry = ASTNode('wsc', '')
         ast_nodes.insert(i, node_after_entry)
-    i += 1
-
-    #print("node_after_entry", repr(node_after_entry.value))
-    #if node_2_after_entry:
-    #    print("node_2_after_entry", repr(node_2_after_entry.value))
+        # node_2_after_entry should be NL_INDENT for the ']'
+        node_2_after_entry = ASTNode('wsc', NL_INDENT)
+    i += 1 # Increment i because we've processed/inserted node_after_entry
 
     return i, node_after_entry, node_2_after_entry
 
@@ -194,46 +253,45 @@ def add_jbeam_setup(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 def add_jbeam_nodes(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, nodes_to_add: dict):
     # <<< This function now only handles nodes NOT added symmetrically >>>
     # <<< ADDED: Early exit if nothing to add >>>
-    if not nodes_to_add: # <<< ADDED: Early exit if nothing to add >>>
-        return jbeam_section_end_node_idx
-    if not nodes_to_add: # <<< ADDED: Early exit if nothing to add >>>
+    if not nodes_to_add:
         return jbeam_section_end_node_idx
 
-    i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx)
+    comment_text_nodes = '//ADDED NODES BY EDITOR//'
+    i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx, comment_text_nodes)
 
-    # <<< START ADDED COMMENT LOGIC >>>
     # Check if "//ADDED NODES BY EDITOR//" comment exists within the current node section
-    comment_text = '//ADDED NODES BY EDITOR//'
     comment_already_exists_in_section = False
     # Iterate only within the bounds of the current node section
-    for k in range(jbeam_section_start_node_idx, jbeam_section_end_node_idx):
+    for k in range(jbeam_section_start_node_idx, jbeam_section_end_node_idx): # Check up to where new nodes will be inserted
         node = ast_nodes[k]
-        if node.data_type == 'wsc' and comment_text in node.value:
+        if node.data_type == 'wsc' and comment_text_nodes in node.value:
             comment_already_exists_in_section = True
-            break # Found it within the section, no need to check further
+            break
 
-    # Add "//ADDED NODES BY EDITOR//" comment only if nodes are being added and comment doesn't already exist in this section
+    # Add comment only if nodes are being added and comment doesn't already exist in this section
     if nodes_to_add and not comment_already_exists_in_section:
-        # Add an extra newline before the standard indent and comment text
-        comment_wsc_value = '\n' + NL_TWO_INDENT + comment_text
-        if node_after_entry:
-            # Append comment to the existing whitespace node before the first new node's indent
-            node_after_entry.value += comment_wsc_value
-            # Don't set node_after_entry to None here, the loop needs it for the first node's indent
-        else:
-            # Insert comment as a new whitespace node. The loop will handle the first node's indent.
-            ast_nodes.insert(i, ASTNode('wsc', comment_wsc_value))
-            i += 1 # Adjust insertion index because we added a node
-    # <<< END ADDED COMMENT LOGIC >>>
+        # The comment will be part of node_after_entry.value if it was the last line,
+        # or a new WSC node will be created by add_jbeam_setup if it wasn't.
+        # The add_jbeam_setup logic now handles placing the comment correctly relative to new nodes.
+        # We just need to ensure the comment text is there.
+        # If node_after_entry.value (after add_jbeam_setup) doesn't contain the comment, add it.
+        if comment_text_nodes not in node_after_entry.value:
+            # Add an extra newline before the standard indent and comment text
+            comment_wsc_value = '\n' + NL_TWO_INDENT + comment_text_nodes # Add extra newline for an empty line before comment
+            if node_after_entry.value.endswith('\n'):
+                 node_after_entry.value += comment_wsc_value[1:] # Remove leading \n from comment_wsc_value
+            else:
+                 node_after_entry.value += '\n' + comment_wsc_value[1:] # Add newline then comment
 
     # Insert new nodes at bottom of nodes section
     nodes = nodes_to_add.items()
 
     for node_id, node_pos in nodes:
-        # This logic correctly adds the NL_TWO_INDENT *after* the comment (if added),
-        # or as a new node for subsequent nodes.
         if node_after_entry:
-            node_after_entry.value += NL_TWO_INDENT
+            if node_after_entry.value.endswith('\n'):
+                node_after_entry.value += TWO_INDENT
+            else:
+                node_after_entry.value += NL_TWO_INDENT
             node_after_entry = None
         else:
             ast_nodes.insert(i + 0, ASTNode('wsc', NL_TWO_INDENT))
@@ -251,59 +309,50 @@ def add_jbeam_nodes(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
         ast_nodes.insert(i + 9, ASTNode('wsc', ','))
         i += 10
 
-    # Add modified original last WSCS back to end of section
     if node_2_after_entry:
-        # Append the original trailing whitespace after the last added comma's whitespace node
         if i > 0 and ast_nodes[i - 1].data_type == 'wsc':
              ast_nodes[i - 1].value += node_2_after_entry.value
-        # Handle case where no nodes were added but whitespace was modified
-        elif node_after_entry:
+        elif node_after_entry: # Should not happen if nodes were added
              node_after_entry.value += node_2_after_entry.value
-
-    #print_ast_nodes(ast_nodes, i, 10, True)
+        else: # If no nodes were added, but comment was, and node_2_after_entry exists
+            # This case needs careful handling if the comment was the only thing.
+            # However, if nodes_to_add is empty, this loop doesn't run.
+            # If comment was added, node_after_entry would have been used.
+            pass
     return i
 
 
 # Add jbeam beams to end of JBeam section from list of beams to add (this is called on beam section list end character)
 def add_jbeam_beams(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, beams_to_add: list):
-    # <<< REVERTED: Use hardcoded comment >>>
-    comment_text = '//ADDED BEAMS BY EDITOR//'
+    comment_text_beams = '//ADDED BEAMS BY EDITOR//'
 
-    # <<< ADDED: Early exit if nothing to add >>>
     if not beams_to_add:
         return jbeam_section_end_node_idx
-    i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx)
 
-    # <<< MODIFIED: Use the custom comment_text for the existence check >>>
-    # Check if the custom comment exists within the current beam section
+    i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx, comment_text_beams)
+
     comment_already_exists_in_section = False
-    # Iterate only within the bounds of the current beam section
-    for k in range(jbeam_section_start_node_idx, jbeam_section_end_node_idx):
+    for k in range(jbeam_section_start_node_idx, i): # Check up to where new beams will be inserted
         node = ast_nodes[k]
-        if node.data_type == 'wsc' and comment_text and comment_text in node.value: # Check if comment_text is not empty before checking 'in'
+        if node.data_type == 'wsc' and comment_text_beams in node.value:
             comment_already_exists_in_section = True
-            break # Found it within the section, no need to check further
+            break
 
-    # <<< MODIFIED: Use custom comment_text and check if it's not empty >>>
-    # Add comment only if beams are being added, comment text is provided, and comment doesn't already exist in this section
-    if beams_to_add and comment_text and not comment_already_exists_in_section:
-        # Add an extra newline before the standard indent and comment text
-        comment_wsc_value = '\n' + NL_TWO_INDENT + comment_text
-        if node_after_entry:
-            # Append comment to the existing whitespace node before the first new beam's indent
-            node_after_entry.value += comment_wsc_value
-            # Don't set node_after_entry to None here, the loop needs it for the first beam's indent
-        else:
-            # Insert comment as a new whitespace node. The loop will handle the first beam's indent.
-            ast_nodes.insert(i, ASTNode('wsc', comment_wsc_value))
-            i += 1 # Adjust insertion index because we added a node
+    if beams_to_add and not comment_already_exists_in_section:
+        if comment_text_beams not in node_after_entry.value:
+            comment_wsc_value = '\n' + NL_TWO_INDENT + comment_text_beams # Add extra newline
+            if node_after_entry.value.endswith('\n'):
+                 node_after_entry.value += comment_wsc_value[1:]
+            else:
+                 node_after_entry.value += '\n' + comment_wsc_value[1:]
 
-    # Insert new beams at bottom of beams section (Original Loop Logic)
+
     for (node_id_1, node_id_2) in beams_to_add:
-        # This logic correctly adds the NL_TWO_INDENT *after* the comment (if added),
-        # or as a new node for subsequent beams.
         if node_after_entry:
-            node_after_entry.value += NL_TWO_INDENT
+            if node_after_entry.value.endswith('\n'):
+                node_after_entry.value += TWO_INDENT
+            else:
+                node_after_entry.value += NL_TWO_INDENT
             node_after_entry = None
         else:
             ast_nodes.insert(i + 0, ASTNode('wsc', NL_TWO_INDENT))
@@ -311,44 +360,48 @@ def add_jbeam_beams(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 
         ast_nodes.insert(i + 0, ASTNode('['))
         ast_nodes.insert(i + 1, ASTNode('"', node_id_1))
-        ast_nodes.insert(i + 2, ASTNode('wsc', ',')) # Keep comma wsc separate for clarity
+        ast_nodes.insert(i + 2, ASTNode('wsc', ','))
         ast_nodes.insert(i + 3, ASTNode('"', node_id_2))
         ast_nodes.insert(i + 4, ASTNode(']'))
-        ast_nodes.insert(i + 5, ASTNode('wsc', ',')) # Keep comma wsc separate
+        ast_nodes.insert(i + 5, ASTNode('wsc', ','))
         i += 6
 
-    # Add modified original last WSCS back to end of section
     if node_2_after_entry:
-        # Append the original trailing whitespace after the last added comma's whitespace node
         if i > 0 and ast_nodes[i - 1].data_type == 'wsc':
              ast_nodes[i - 1].value += node_2_after_entry.value
-        # If no beams were added, but setup modified whitespace, handle it?
-        # This case seems unlikely if node_2_after_entry exists and beams_to_add was empty.
-        # If beams_to_add was empty and comment was not added, node_after_entry might still exist.
         elif node_after_entry:
              node_after_entry.value += node_2_after_entry.value
-
-
-    #print_ast_nodes(ast_nodes, i, 10, True)
     return i
 
 
 # Add jbeam triangles to end of JBeam section from list of triangles to add (this is called on triangle section list end character)
 def add_jbeam_triangles(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, tris_to_add: list):
-    # <<< ADDED: Early exit if nothing to add >>>
-    if not tris_to_add: # <<< ADDED: Early exit if nothing to add >>>
-        return jbeam_section_end_node_idx
-
     if not tris_to_add:
         return jbeam_section_end_node_idx
 
-    i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx)
+    comment_text_tris = '//ADDED TRIANGLES BY EDITOR//' # Example comment
+    i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx, comment_text_tris)
 
-    # Insert new tris at bottom of triangles section
+    comment_already_exists_in_section = False
+    for k in range(jbeam_section_start_node_idx, i):
+        node = ast_nodes[k]
+        if node.data_type == 'wsc' and comment_text_tris in node.value:
+            comment_already_exists_in_section = True
+            break
+    if tris_to_add and not comment_already_exists_in_section:
+        if comment_text_tris not in node_after_entry.value:
+            comment_wsc_value = '\n' + NL_TWO_INDENT + comment_text_tris # Add extra newline
+            if node_after_entry.value.endswith('\n'):
+                 node_after_entry.value += comment_wsc_value[1:]
+            else:
+                 node_after_entry.value += '\n' + comment_wsc_value[1:]
 
     for (node_id_1, node_id_2, node_id_3) in tris_to_add:
         if node_after_entry:
-            node_after_entry.value += NL_TWO_INDENT
+            if node_after_entry.value.endswith('\n'):
+                node_after_entry.value += TWO_INDENT
+            else:
+                node_after_entry.value += NL_TWO_INDENT
             node_after_entry = None
         else:
             ast_nodes.insert(i + 0, ASTNode('wsc', NL_TWO_INDENT))
@@ -364,34 +417,43 @@ def add_jbeam_triangles(ast_nodes: list, jbeam_section_start_node_idx: int, jbea
         ast_nodes.insert(i + 7, ASTNode('wsc', ','))
         i += 8
 
-    # Add modified original last WSCS back to end of section
     if node_2_after_entry:
-        # <<< MODIFIED: Check if last node is WSC before appending >>>
         if i > 0 and ast_nodes[i - 1].data_type == 'wsc':
             ast_nodes[i - 1].value += node_2_after_entry.value
-        elif node_after_entry: # Handle case where no tris were added but whitespace was modified
+        elif node_after_entry:
             node_after_entry.value += node_2_after_entry.value
-
-    #print_ast_nodes(ast_nodes, i, 10, True)
     return i
 
 
 # Add jbeam quads to end of JBeam section from list of quads to add (this is called on triangle section list end character)
 def add_jbeam_quads(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, quads_to_add: list):
-    # <<< ADDED: Early exit if nothing to add >>>
-    if not quads_to_add: # <<< ADDED: Early exit if nothing to add >>>
-        return jbeam_section_end_node_idx
-
     if not quads_to_add:
         return jbeam_section_end_node_idx
 
-    i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx)
+    comment_text_quads = '//ADDED QUADS BY EDITOR//' # Example comment
+    i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx, comment_text_quads)
 
-    # Insert new quads at bottom of quads section
+    comment_already_exists_in_section = False
+    for k in range(jbeam_section_start_node_idx, i):
+        node = ast_nodes[k]
+        if node.data_type == 'wsc' and comment_text_quads in node.value:
+            comment_already_exists_in_section = True
+            break
+    if quads_to_add and not comment_already_exists_in_section:
+        if comment_text_quads not in node_after_entry.value:
+            comment_wsc_value = '\n' + NL_TWO_INDENT + comment_text_quads # Add extra newline
+            if node_after_entry.value.endswith('\n'):
+                 node_after_entry.value += comment_wsc_value[1:]
+            else:
+                 node_after_entry.value += '\n' + comment_wsc_value[1:]
+
 
     for (node_id_1, node_id_2, node_id_3, node_id_4) in quads_to_add:
         if node_after_entry:
-            node_after_entry.value += NL_TWO_INDENT
+            if node_after_entry.value.endswith('\n'):
+                node_after_entry.value += TWO_INDENT
+            else:
+                node_after_entry.value += NL_TWO_INDENT
             node_after_entry = None
         else:
             ast_nodes.insert(i + 0, ASTNode('wsc', NL_TWO_INDENT))
@@ -409,15 +471,11 @@ def add_jbeam_quads(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
         ast_nodes.insert(i + 9, ASTNode('wsc', ','))
         i += 10
 
-    # Add modified original last WSCS back to end of section
     if node_2_after_entry:
-        # <<< MODIFIED: Check if last node is WSC before appending >>>
         if i > 0 and ast_nodes[i - 1].data_type == 'wsc':
             ast_nodes[i - 1].value += node_2_after_entry.value
-        elif node_after_entry: # Handle case where no quads were added but whitespace was modified
+        elif node_after_entry:
             node_after_entry.value += node_2_after_entry.value
-
-    #print_ast_nodes(ast_nodes, i, 50, True)
     return i
 
 
@@ -660,16 +718,25 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
     context = bpy.context
     ui_props = context.scene.ui_properties # Already getting ui_props
 
+    # Store original node data by their IDs for quick lookup
+    original_nodes_info_map = {
+        node_id: data.copy() for node_id, data in init_nodes_data.items()
+    } if init_nodes_data else {}
+    # Track which original init_ids have been "claimed" by a bmesh vertex
+    claimed_original_init_ids = set()
+
     parts_actions = {jbeam_part: PartNodesActions()}
 
     init_node_id_layer = bm.verts.layers.string[constants.VL_INIT_NODE_ID]
-    node_id_layer = bm.verts.layers.string[constants.VL_NODE_ID]
     part_origin_layer = bm.verts.layers.string[constants.VL_NODE_PART_ORIGIN]
     node_is_fake_layer = bm.verts.layers.int[constants.VL_NODE_IS_FAKE]
 
     blender_nodes = {}
     processed_new_node_positions = set() # Store tuples (x, y, z)
     nodes_requiring_confirmation = [] # Store tuples: (node_id, display_name_for_dialog, position_tuple, existing_collided_id)
+
+    # Make sure to get the current node_id_layer after potential updates by TEMP_ node logic
+    node_id_layer = bm.verts.layers.string[constants.VL_NODE_ID]
 
     # Ensure lookup table before iterating
     bm.verts.ensure_lookup_table()
@@ -680,13 +747,18 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
         if v[node_is_fake_layer] == 1:
             continue
 
-        init_node_id = v[init_node_id_layer].decode('utf-8')
-        node_id = v[node_id_layer].decode('utf-8')
+        bmesh_init_node_id = v[init_node_id_layer].decode('utf-8')
+        # Get the most up-to-date node_id from the layer, as TEMP logic might change it
+        node_id_layer_current = bm.verts.layers.string[constants.VL_NODE_ID] # Re-fetch layer
+        bmesh_current_node_id = v[node_id_layer_current].decode('utf-8')
+
         node_part_origin = v[part_origin_layer].decode('utf-8')
         pos: Vector = obj.matrix_world @ v.co
+        current_pos_tuple = pos.to_tuple()
+        current_actions_part_key = node_part_origin # Default to current part origin
 
         # --- Handle TEMP nodes ---
-        if node_id.startswith('TEMP_'):
+        if bmesh_current_node_id.startswith('TEMP_'): # Check current_node_id from bmesh layer
             # <<< ADDED: Check if prefixing is enabled >>>
             use_prefixes = ui_props.use_node_naming_prefixes
             # <<< END ADDED >>>
@@ -698,7 +770,7 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
             # <<< MODIFIED: Only perform mirror check if prefixes are enabled >>>
             if use_prefixes:
                 for other_node_id, other_node_data in init_nodes_data.items():
-                    # Skip if the other node is marked for deletion in this cycle
+                    # Skip if the other node is marked for deletion in this cycle (check all part actions)
                     is_marked_for_delete = False
                     for actions in parts_actions.values():
                         if other_node_id in actions.nodes_to_delete:
@@ -706,7 +778,7 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
                     if is_marked_for_delete: continue
 
                     other_init_pos = other_node_data.get('pos')
-                    if other_init_pos and len(other_init_pos) == 3:
+                    if other_init_pos and isinstance(other_init_pos, (list, tuple)) and len(other_init_pos) == 3:
                         if (abs(pos.y - other_init_pos[1]) < MIRROR_CHECK_TOLERANCE and
                             abs(pos.z - other_init_pos[2]) < MIRROR_CHECK_TOLERANCE and
                             abs(pos.x + other_init_pos[0]) < MIRROR_CHECK_TOLERANCE):
@@ -776,7 +848,7 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
                 # Skip if marked for deletion
                 is_marked_for_delete = False
                 for actions in parts_actions.values():
-                    if other_node_id in actions.nodes_to_delete:
+                    if other_node_id in actions.nodes_to_delete: # Check all part actions
                         is_marked_for_delete = True; break
                 if is_marked_for_delete: continue
 
@@ -789,7 +861,7 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
             # Check against newly processed nodes
             if not collision_found:
                 rounded_pos = tuple(round(coord, 6) for coord in pos)
-                if rounded_pos in processed_new_node_positions:
+                if rounded_pos in processed_new_node_positions: # Check against already processed new nodes
                     collision_found = True; collided_with_id = "another new node"
 
             # --- Handle Collision or No Collision ---
@@ -807,14 +879,14 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
                 jb_globals.node_overlap_remap[final_node_id_collision] = collided_with_id
 
                 # <<< *** MODIFIED PLACEMENT LOGIC *** >>>
-                part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
+                temp_part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
                 if mirrored_node_found and mirrored_node_id is not None:
                     # If it HAS a mirror, add to symmetrical list even though it collided
-                    part_actions.nodes_to_add_symmetrically[final_node_id_collision] = (mirrored_node_id, pos.to_tuple())
+                    temp_part_actions.nodes_to_add_symmetrically[final_node_id_collision] = (mirrored_node_id, pos.to_tuple())
                 else:
                     # If it has NO mirror, add to normal list
-                    # part_actions.nodes_to_add[final_node_id_collision] = pos.to_tuple() # Don't add to list yet, handled by confirmation
-                    pass # No action needed here, handled by confirmation operator
+                    # For collided TEMP nodes without a mirror, they are only tracked for confirmation, not added to nodes_to_add yet.
+                    pass
                 # <<< *** END MODIFIED PLACEMENT LOGIC *** >>>
                 blender_nodes[final_node_id_collision] = {'curr_node_id': final_node_id_collision, 'pos': pos.to_tuple(), 'partOrigin': node_part_origin} # Still add to blender_nodes for tracking
 
@@ -824,105 +896,179 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
                 final_node_id_bytes = bytes(final_node_id_no_collision, 'utf-8')
                 v[node_id_layer] = final_node_id_bytes
                 v[init_node_id_layer] = final_node_id_bytes # Update init ID as well
-                init_node_id = final_node_id_no_collision
-                node_id = final_node_id_no_collision
-                part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
+                # init_node_id = final_node_id_no_collision # No longer need separate init_node_id and node_id vars here
+                # node_id = final_node_id_no_collision
+                temp_part_actions_no_collision: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
 
                 # <<< MODIFIED: Add to symmetrical list if mirror found, else normal list >>>
                 if mirrored_node_found and mirrored_node_id is not None:
-                    part_actions.nodes_to_add_symmetrically[node_id] = (mirrored_node_id, pos.to_tuple())
+                    temp_part_actions_no_collision.nodes_to_add_symmetrically[final_node_id_no_collision] = (mirrored_node_id, pos.to_tuple())
                 else:
-                    part_actions.nodes_to_add[node_id] = pos.to_tuple() # Store tuple
+                    temp_part_actions_no_collision.nodes_to_add[final_node_id_no_collision] = pos.to_tuple() # Store tuple
                 # <<< END MODIFIED >>>
 
                 rounded_pos = tuple(round(coord, 6) for coord in pos)
                 processed_new_node_positions.add(rounded_pos)
                 init_node_data_placeholder = {
-                    'posNoOffset': pos.to_tuple(), 'pos': pos.to_tuple(), Metadata: Metadata() # Use Metadata class as key
+                    'posNoOffset': pos.to_tuple(), 'pos': pos.to_tuple(), Metadata: Metadata()
                 }
                 new_pos_tup_for_sjson = undo_node_move_offset_and_apply_translation_to_expr(init_node_data_placeholder, pos)
-                blender_nodes[init_node_id] = {'curr_node_id': node_id, 'pos': new_pos_tup_for_sjson, 'partOrigin': node_part_origin}
+                blender_nodes[final_node_id_no_collision] = {'curr_node_id': final_node_id_no_collision, 'pos': new_pos_tup_for_sjson, 'partOrigin': node_part_origin}
+                claimed_original_init_ids.add(final_node_id_no_collision) # Mark this new ID as handled
                 continue # Go to next vertex
         # --- End TEMP node handling ---
 
         # --- Handle existing nodes ---
-        init_node_data = init_nodes_data.get(init_node_id)
-        if init_node_data is None:
-            # This node wasn't in the original JBeam data.
-            # It could be a newly added node (TEMP_ handled above),
-            # OR it could be a node kept after a cancelled deletion confirmation.
+        # This vertex `v` has a non-TEMP bmesh_init_node_id.
+        claimed_original_init_ids.add(bmesh_init_node_id) # This bmesh vertex claims this original init_id
+        original_node_data_for_this_init_id = original_nodes_info_map.get(bmesh_init_node_id)
 
-            part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
-
-            # <<< *** NEW LOGIC for init_node_data is None *** >>>
-            # Perform mirror check based on current position to see if it *should* be symmetrical
-            # This covers the case where a node was kept after cancellation.
-            # We need to re-do the mirror check logic here, similar to TEMP_ nodes.
-
-            # Assume it's not mirrored initially
-            is_potentially_symmetrical = False
-            mirrored_node_id_for_kept_node = None
-
-            # <<< ADDED: Check if prefixing is enabled >>>
-            use_prefixes_for_kept = ui_props.use_node_naming_prefixes
-            # <<< END ADDED >>>
-
-            # <<< MODIFIED: Only perform mirror check if prefixes are enabled >>>
-            if use_prefixes_for_kept:
-                for other_node_id, other_node_data in init_nodes_data.items():
-                    # Skip if the other node is marked for deletion in this cycle
+        if original_node_data_for_this_init_id is None:
+            # Anomaly: bmesh vert has a non-TEMP init_id that wasn't in the original file.
+            # This could happen if a TEMP node's init_id was manually changed to something non-TEMP
+            # or if a previous Symmetrize operation left an orphaned node that wasn't cleaned up.
+            # Treat as a new node using its bmesh_current_node_id.
+            final_id_anomaly = bmesh_current_node_id
+            # Perform mirror check for placement
+            anomaly_mirrored_node_found = False
+            anomaly_mirrored_node_id_ref = None
+            if ui_props.use_node_naming_prefixes:
+                for other_node_id_anomaly, other_node_data_anomaly in original_nodes_info_map.items():
                     is_marked_for_delete = False
                     for actions in parts_actions.values():
-                        if other_node_id in actions.nodes_to_delete:
+                        if other_node_id_anomaly in actions.nodes_to_delete:
                             is_marked_for_delete = True; break
                     if is_marked_for_delete: continue
-
-                    other_init_pos = other_node_data.get('pos')
-                    if other_init_pos and len(other_init_pos) == 3:
-                        if (abs(pos.y - other_init_pos[1]) < MIRROR_CHECK_TOLERANCE and
-                            abs(pos.z - other_init_pos[2]) < MIRROR_CHECK_TOLERANCE and
-                            abs(pos.x + other_init_pos[0]) < MIRROR_CHECK_TOLERANCE):
-                            is_potentially_symmetrical = True
-                            mirrored_node_id_for_kept_node = other_node_id
+                    other_pos_anomaly = other_node_data_anomaly.get('pos')
+                    if other_pos_anomaly and isinstance(other_pos_anomaly, (list, tuple)) and len(other_pos_anomaly) == 3:
+                        if (abs(pos.y - other_pos_anomaly[1]) < MIRROR_CHECK_TOLERANCE and
+                            abs(pos.z - other_pos_anomaly[2]) < MIRROR_CHECK_TOLERANCE and
+                            abs(pos.x + other_pos_anomaly[0]) < MIRROR_CHECK_TOLERANCE):
+                            anomaly_mirrored_node_found = True
+                            anomaly_mirrored_node_id_ref = other_node_id_anomaly
                             break
-            # <<< END MODIFIED >>>
 
-            if is_potentially_symmetrical and mirrored_node_id_for_kept_node is not None:
-                 # If it finds a mirror now, add it to the symmetrical list
-                 # Use the current node_id (which might be the UUID from the previous cycle)
-                 part_actions.nodes_to_add_symmetrically[node_id] = (mirrored_node_id_for_kept_node, pos.to_tuple())
+            current_part_actions_anomaly: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
+            if anomaly_mirrored_node_found and anomaly_mirrored_node_id_ref:
+                current_part_actions_anomaly.nodes_to_add_symmetrically[final_id_anomaly] = (anomaly_mirrored_node_id_ref, current_pos_tuple)
             else:
-                 # Otherwise, add to the normal list (original behavior for truly new/non-mirrored nodes)
-                 part_actions.nodes_to_add[node_id] = pos.to_tuple() # Store tuple
+                current_part_actions_anomaly.nodes_to_add[final_id_anomaly] = current_pos_tuple
 
-            # Calculate position considering expressions for SJSON update (remains the same)
-            init_node_data_placeholder = {
-                'posNoOffset': pos.to_tuple(), 'pos': pos.to_tuple(), Metadata: Metadata()
-            }
-            new_pos_tup_for_sjson = undo_node_move_offset_and_apply_translation_to_expr(init_node_data_placeholder, pos)
-            # Use init_node_id (UUID or original if somehow not TEMP) as the key here,
-            # as that's what the export process expects for blender_nodes mapping.
-            blender_nodes[init_node_id] = {'curr_node_id': node_id, 'pos': new_pos_tup_for_sjson, 'partOrigin': node_part_origin}
-            # <<< *** END NEW LOGIC *** >>>
+            init_data_placeholder_anomaly = {'posNoOffset': current_pos_tuple, 'pos': current_pos_tuple, Metadata: Metadata()}
+            pos_for_sjson_anomaly = undo_node_move_offset_and_apply_translation_to_expr(init_data_placeholder_anomaly, pos)
+            blender_nodes[final_id_anomaly] = {'curr_node_id': final_id_anomaly, 'pos': pos_for_sjson_anomaly, 'partOrigin': node_part_origin}
+            if bmesh_init_node_id != final_id_anomaly : # If init_id was changed (e.g. from a non-TEMP to a new UUID)
+                v[init_node_id_layer] = bytes(final_id_anomaly, 'utf-8')
+            if bmesh_current_node_id != final_id_anomaly:
+                 v[node_id_layer] = bytes(final_id_anomaly, 'utf-8')
             continue # Go to next vertex
 
-        # Check for movement
-        init_pos = init_node_data['pos']
-        if abs(pos.x - init_pos[0]) > 0.000001 or abs(pos.y - init_pos[1]) > 0.000001 or abs(pos.z - init_pos[2]) > 0.000001:
-            part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
-            part_actions.nodes_to_move[node_id] = pos.to_tuple() # Store tuple
+        # Vertex `v` has bmesh_init_node_id that IS in original_nodes_info_map
+        original_pos_vec = Vector(original_node_data_for_this_init_id['pos'])
+        current_pos_is_mirror_of_original = \
+            abs(pos.y - original_pos_vec.y) < MIRROR_CHECK_TOLERANCE and \
+            abs(pos.z - original_pos_vec.z) < MIRROR_CHECK_TOLERANCE and \
+            abs(pos.x + original_pos_vec.x) < MIRROR_CHECK_TOLERANCE
 
-        # Calculate position considering expressions (for SJSON data update)
-        new_pos_tup_for_sjson = undo_node_move_offset_and_apply_translation_to_expr(init_node_data, pos)
+        significant_move_from_original = (pos - original_pos_vec).length_squared > POSITION_COLLISION_TOLERANCE**2
 
-        # Check for rename
-        if init_node_id != node_id:
-            affected_part = True if affect_node_references else node_part_origin
-            part_actions: PartNodesActions = parts_actions.setdefault(affected_part, PartNodesActions())
-            part_actions.nodes_to_rename[init_node_id] = node_id
+        if current_pos_is_mirror_of_original and significant_move_from_original:
+            # This vertex `v` (with bmesh_init_node_id `I`) is at the mirrored position of `I`.
+            # This implies Symmetrize deleted the original vertex for `I` and created this one,
+            # and Blender copied the init_node_id.
 
-        blender_nodes[init_node_id] = {'curr_node_id': node_id, 'pos': new_pos_tup_for_sjson, 'partOrigin': node_part_origin}
+            # Determine the correct ID for this vertex.
+            # If get_symmetrical_node_id returns a valid counterpart name, use it.
+            # This handles cases like Symmetrize where bmesh_init_node_id is the source node's ID,
+            # and this vertex (v) is the new symmetrical counterpart.
+            # If get_symmetrical_node_id returns None, it means bmesh_init_node_id
+            # is likely a middle node or doesn't have a defined L/R counterpart.
+            # In this scenario, the vertex v (which is bmesh_init_node_id itself, but moved
+            # to be a mirror of its own file state) should retain its bmesh_init_node_id.
+            # It should NOT be renamed to sym_{bmesh_init_node_id}_uuid.
+            symmetrical_id_for_this_pos = get_symmetrical_node_id(bmesh_init_node_id, ui_props)
+
+            if symmetrical_id_for_this_pos is not None and symmetrical_id_for_this_pos != bmesh_init_node_id:
+                # This is a true symmetrical counterpart situation (e.g., "L_node" becomes "R_node" after Symmetrize)
+                # or a node was moved and renamed to become a symmetrical counterpart.
+                symmetrical_id_to_use = symmetrical_id_for_this_pos
+
+                current_part_actions_sym: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
+                current_part_actions_sym.nodes_to_add_symmetrically[symmetrical_id_to_use] = (bmesh_init_node_id, current_pos_tuple)
+
+                init_data_placeholder_sym = {'posNoOffset': current_pos_tuple, 'pos': current_pos_tuple, Metadata: Metadata()}
+                pos_for_sjson_sym = undo_node_move_offset_and_apply_translation_to_expr(init_data_placeholder_sym, pos)
+                blender_nodes[symmetrical_id_to_use] = { # Key is the new symmetrical_id
+                    'curr_node_id': symmetrical_id_to_use, 'pos': pos_for_sjson_sym, 'partOrigin': node_part_origin
+                }
+                v[init_node_id_layer] = bytes(symmetrical_id_to_use, 'utf-8') # Update bmesh init_id to the new symmetrical ID
+                v[node_id_layer] = bytes(symmetrical_id_to_use, 'utf-8')    # Update bmesh current_id to the new symmetrical ID
+                claimed_original_init_ids.add(symmetrical_id_to_use) # Mark this new ID as handled
+            else:
+                # Case 1: symmetrical_id_for_this_pos is None (middle node moved to its own mirror).
+                # Case 2: symmetrical_id_for_this_pos == bmesh_init_node_id (e.g. Symmetrize of a middle node, new vert has same ID).
+                # Both cases should be treated as a standard move/rename of bmesh_init_node_id, not a symmetrical addition.
+                # This means it's effectively a standard move.
+                is_moved = True # significant_move_from_original is true to enter this block
+                is_renamed = bmesh_init_node_id != bmesh_current_node_id
+                current_part_actions_std: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
+
+                current_part_actions_std.nodes_to_move[bmesh_current_node_id] = current_pos_tuple
+                if is_renamed: # This rename would have been set by properties.py or other logic
+                    affected_part_key_rename = True if affect_node_references else node_part_origin
+                    rename_part_actions_std: PartNodesActions = parts_actions.setdefault(affected_part_key_rename, PartNodesActions())
+                    rename_part_actions_std.nodes_to_rename[bmesh_init_node_id] = bmesh_current_node_id
+                
+                pos_for_sjson = undo_node_move_offset_and_apply_translation_to_expr(original_node_data_for_this_init_id, pos)
+                blender_nodes[bmesh_init_node_id] = {
+                    'curr_node_id': bmesh_current_node_id,
+                    'pos': pos_for_sjson, 'partOrigin': node_part_origin
+                }
+                # v layers are already bmesh_init_node_id / bmesh_current_node_id.
+                # claimed_original_init_ids.add(bmesh_init_node_id) was done at the start of "existing nodes" processing.
+
+        else:
+            # Standard processing: vertex `v` represents the original bmesh_init_node_id, possibly moved/renamed.
+            is_moved = significant_move_from_original
+            is_renamed = bmesh_init_node_id != bmesh_current_node_id
+            current_part_actions_std: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
+
+            if is_moved:
+                current_part_actions_std.nodes_to_move[bmesh_current_node_id] = current_pos_tuple
+            if is_renamed:
+                affected_part_key_rename = True if affect_node_references else node_part_origin
+                rename_part_actions_std: PartNodesActions = parts_actions.setdefault(affected_part_key_rename, PartNodesActions())
+                rename_part_actions_std.nodes_to_rename[bmesh_init_node_id] = bmesh_current_node_id
+            
+            pos_for_sjson = undo_node_move_offset_and_apply_translation_to_expr(original_node_data_for_this_init_id, pos)
+            blender_nodes[bmesh_init_node_id] = { # Key is the original init_id
+                'curr_node_id': bmesh_current_node_id, # Current ID in bmesh
+                'pos': pos_for_sjson, 'partOrigin': node_part_origin
+            }
         # --- End existing node handling ---
+
+    # After processing all bmesh vertices, handle original nodes that were not represented in bmesh
+    # or need to be re-affirmed in blender_nodes if they were sources for symmetry.
+    for original_id, original_data in original_nodes_info_map.items():
+        if original_id not in claimed_original_init_ids:
+            # This node was in init_nodes_data, but no bmesh vertex claimed its init_id.
+            # This means its vertex was deleted by Symmetrize and it wasn't a source for a mirror
+            # that got handled by the special symmetrized case above. Mark for deletion.
+            origin_part_of_deleted_orig = original_data.get('partOrigin', jbeam_part)
+            affected_part_deleted_orig = True if affect_node_references else origin_part_of_deleted_orig
+            delete_part_actions_orig: PartNodesActions = parts_actions.setdefault(affected_part_deleted_orig, PartNodesActions())
+            delete_part_actions_orig.nodes_to_delete.add(original_id)
+        elif original_id not in blender_nodes:
+            # This original_id was claimed (likely as a source for a mirror operation where the
+            # bmesh vertex at the mirrored location had this original_id as its bmesh_init_node_id),
+            # but it hasn't been added to blender_nodes itself yet. Add it now with its original data.
+            original_pos_vec_for_bn_orig = Vector(original_data['pos'])
+            pos_for_sjson_for_bn_orig = undo_node_move_offset_and_apply_translation_to_expr(original_data, original_pos_vec_for_bn_orig)
+            blender_nodes[original_id] = {
+                'curr_node_id': original_id, # Its current ID is its original ID
+                'pos': pos_for_sjson_for_bn_orig,
+                'partOrigin': original_data.get('partOrigin', jbeam_part)
+            }
 
     # --- Invoke confirmation operator if needed ---
     # After the main loop iterating through bm.verts and before returning
@@ -935,15 +1081,6 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
     # to access the correct part_actions and blender_nodes.
     # This block should ideally run after the main loop over bm.verts has populated
     # initial renames and blender_nodes for all vertices.
-
-    # Create a temporary list of primary renames detected in the loop above
-    # to avoid modifying parts_actions while iterating it if done inside the loop.
-    # For simplicity, this example assumes we can iterate `parts_actions` after the main vert loop.
-    # A more robust way is to collect primary renames during the loop, then process them here.
-
-    # This logic is better placed *inside* the `for v in bm.verts:` loop,
-    # right after a primary rename for `v` is detected and registered.
-    # The following is a conceptual placement for clarity of the addition:
 
     # (This block would be more effectively integrated into the main v in bm.verts loop)
     # Example of integration point: Inside the loop, after a rename for 'v' is processed.
@@ -990,14 +1127,6 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
             print(f"Error invoking node deletion confirmation: {e}", file=sys.stderr)
             traceback.print_exc()
             jb_globals.confirm_delete_pending = False
-
-    # --- Get nodes to delete (based on initial data vs remaining blender nodes) ---
-    for init_node_id, init_node_data in init_nodes_data.items():
-        if init_node_id not in blender_nodes:
-            node_part_origin = init_node_data.get('partOrigin', jbeam_part)
-            affected_part = True if affect_node_references else node_part_origin
-            part_actions: PartNodesActions = parts_actions.setdefault(affected_part, PartNodesActions())
-            part_actions.nodes_to_delete.add(init_node_id)
 
     # After the main loop over bm.verts, iterate through detected primary renames to ensure symmetrical ones are also queued.
     # This is a more robust location for this logic.

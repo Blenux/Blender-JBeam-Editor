@@ -65,9 +65,11 @@ _populating_search_id_from_highlight = False # <<< ADDED: Flag for search update
 last_text_area_info = {'name': None, 'line_index': -1}
 
 # <<< ADDED: JBeam Variables Cache >>>
-# Stores found variables like: {'$varName': {'value': val, 'source_file': str, 'line_number': int}}
+# Stores found variables like: {'$varName': [{'value': val, 'source_file': str, 'source_part': str, 'line_number': int, 'source_type': str, 'unique_id': str}, ...]}
 jbeam_variables_cache: dict = {}
 jbeam_variables_cache_dirty: bool = True
+# <<< ADDED: Set to store variables actively used in nodeWeight calculation >>>
+used_in_node_weight_calculation_vars = set()
 # <<< ADDED: Flag to indicate if the local rename references toggle should be used for the next export >>>
 _use_local_rename_toggle_for_next_export: bool = False
 

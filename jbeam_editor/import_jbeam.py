@@ -46,6 +46,7 @@ _jbeam_part_choices = None
 
 
 def get_vertices_edges_faces(vdata: dict):
+
     node_index_to_id = []
     node_id_to_index = {}
 
@@ -221,6 +222,7 @@ def generate_part_mesh(obj: bpy.types.Object, obj_data: bpy.types.Mesh, bm: bmes
 
 
 def import_jbeam_part(context: bpy.types.Context, jbeam_file_path: str, jbeam_file_data: dict, chosen_part: str):
+    ui_props = context.scene.ui_properties
     try:
         # Prevent overriding a jbeam part that already exists in scene!
         jbeam_collection: bpy.types.Collection | None = bpy.data.collections.get('JBeam Objects')
@@ -287,6 +289,7 @@ def import_jbeam_part(context: bpy.types.Context, jbeam_file_path: str, jbeam_fi
 def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collection, obj: bpy.types.Object, jbeam_file_path: str, regenerate_mesh: bool):
     obj_data: bpy.types.Mesh = obj.data
     part_data = None # Initialize part_data to None
+    ui_props = context.scene.ui_properties
     try:
         # Reimport object
         jbeam_file_data, cached_changed = jbeam_io.get_jbeam(jbeam_file_path, True, True)
@@ -564,7 +567,7 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
 
         context.scene['jbeam_editor_reimporting_jbeam'] = 1 # Prevents exporting jbeam
 
-        print('Done reimporting JBeam.')
+        if ui_props.show_console_warnings_missing_nodes: print('Done reimporting JBeam.')
         return True
     except Exception as e: # Catch potential exceptions during the process
         # On error reimporting jbeam, remove mesh data

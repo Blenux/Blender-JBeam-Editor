@@ -10,7 +10,7 @@
 # The above copyright notice and this permission notice shall be included in all
 # copies or substantial portions of the Software.
 #
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
@@ -127,6 +127,16 @@ from .drawing import (
 # <<< MODIFIED: Import renamed helper >>>
 from .operators import _find_and_frame_element_logic
 # <<< ADDED: Import globals >>>
+# <<< ADDED: Import TYPE_CHECKING for type hinting UIProperties >>>
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    class UIProperties(bpy.types.PropertyGroup): # Forward declaration for type hinting
+        node_weight_variables: bpy.props.CollectionProperty
+        # Add other UIProperties fields here if needed for type hinting in this file
+else:
+    class UIProperties(bpy.types.PropertyGroup): # Actual definition at the end
+        pass
 # <<< MODIFIED: Import text_editor and bng_sjson >>>
 from . import globals as jb_globals, text_editor, bng_sjson
 # from . import globals as jb_globals # This line is redundant
@@ -475,6 +485,65 @@ def get_available_node_groups(self, context):
     return items
 # <<< END ADDED >>>
 
+# <<< ADDED: PropertyGroup for Node Weight Variable Selection >>>
+class NodeWeightVariableItem(bpy.types.PropertyGroup):
+    # The actual JBeam variable name, e.g., "$varX"
+    name: bpy.props.StringProperty(name="Variable Name")
+
+    # Whether this variable (any instance of it) is considered for nodeWeight
+    selected: bpy.props.BoolProperty(
+        name="Selected",
+        description="Include this variable (the active instance) when calculating nodeWeight for dynamic coloring",
+        default=True,
+        update=lambda self, context: setattr(drawing, 'veh_render_dirty', True) # Trigger full redraw
+    )
+
+    # Stores the unique_id of the instance chosen by the user from the dropdown
+    # This ID will be like "filepath::partname::line_or_idx"
+    active_instance_unique_id: bpy.props.StringProperty(
+        name="Active Instance ID",
+        description="Internal ID of the chosen instance for this variable name",
+        update=lambda self, context: setattr(drawing, 'veh_render_dirty', True) # Redraw on change
+    )
+
+    # Callback for the dropdown
+    def get_instance_choices(self, context):
+        items = []
+        # Access UIProperties to get the toggle state
+        ui_props = context.scene.ui_properties
+
+        if self.name in jb_globals.jbeam_variables_cache:
+            instances = jb_globals.jbeam_variables_cache[self.name]
+            for i, inst_data in enumerate(instances):
+                # Construct a display name for the dropdown
+                # Conditionally include the filename based on the toggle
+                if ui_props.show_filename_in_node_weight_instance:
+                    display_name = f"{Path(inst_data['source_file']).name} ({inst_data['source_part']})"
+                else:
+                    display_name = f"({inst_data['source_part']})"
+
+                if inst_data.get('line_number') is not None:
+                    display_name += f" L:{inst_data['line_number']}"
+                elif inst_data.get('source_type') == 'default':
+                    display_name += " (default)"
+
+                # The 'identifier' for the EnumProperty item will be the unique_id
+                unique_id = inst_data.get('unique_id', f"error_no_id_{i}") # Fallback ID
+                items.append((unique_id, display_name, f"Source: {inst_data['source_file']}, Part: {inst_data['source_part']}"))
+        if not items:
+            items.append(("NONE", "No instances found", "This variable name has no defined instances"))
+        return items
+
+    # The EnumProperty for the dropdown itself
+    instance_choice_dropdown: bpy.props.EnumProperty(
+        name="Instance",
+        description="Choose which instance of this variable to use",
+        items=get_instance_choices,
+        # The update function for this dropdown will set 'active_instance_unique_id'
+        update=lambda self, context: setattr(self, 'active_instance_unique_id', self.instance_choice_dropdown)
+    )
+# <<< END ADDED >>>
+
 class UIProperties(bpy.types.PropertyGroup):
     input_node_id: bpy.props.StringProperty(
         name="Input Node ID",
@@ -651,6 +720,29 @@ class UIProperties(bpy.types.PropertyGroup):
         max=10000.0,
         update=_update_dynamic_node_coloring # Ensure this update function is assigned
     )
+    dynamic_node_color_distribution_bias: bpy.props.FloatProperty(
+        name="Node Color Distribution Bias",
+        description="Controls node color spread. < 0.5 skews to Blue/Low, > 0.5 skews to Red/High. 0.5 is linear.",
+        default=0.5,
+        min=0.0,
+        max=1.0,
+        update=_update_dynamic_node_coloring # Use the same update function as other node dynamic color props
+    )
+
+    toggle_node_weight_text: bpy.props.BoolProperty(
+        name="Show Node Weight",
+        description="Toggles displaying the node's 'nodeWeight' value next to its ID",
+        default=False,
+        update=lambda self, context: drawing._tag_redraw_3d_views(context) if hasattr(drawing, '_tag_redraw_3d_views') and callable(drawing._tag_redraw_3d_views) else None
+    )
+
+    summed_visible_node_weight_display: bpy.props.StringProperty(
+        name="Summed Visible Node Weight",
+        description="Sum of 'nodeWeight' for all currently visible nodes in the active JBeam part(s) that pass the current group filter",
+        default="N/A",
+        # This property is for display only, calculated in drawing.py
+    )
+
     # <<< END ADDED >>>
 
     # <<< ADDED: Cross-Part Node ID Visibility Toggle >>>
@@ -856,6 +948,14 @@ class UIProperties(bpy.types.PropertyGroup):
         default=5000000.0,
         min=-0.0, # Allow negative for some params
         max=50000000.0,
+        update=_update_dynamic_beam_coloring
+    )
+    dynamic_color_distribution_bias: bpy.props.FloatProperty(
+        name="Color Distribution Bias",
+        description="Controls color spread. < 0.5 skews to Blue/Low, > 0.5 skews to Red/High. 0.5 is linear.",
+        default=0.5,
+        min=0.0,
+        max=1.0,
         update=_update_dynamic_beam_coloring
     )
     # --- End Dynamic Beam Coloring Properties ---
@@ -1122,10 +1222,34 @@ class UIProperties(bpy.types.PropertyGroup):
 
     show_console_warnings_missing_nodes: bpy.props.BoolProperty(
         name="Show Console Messages (debug)",
-        description="Show console warnings when a JBeam element's referenced node cannot be found for drawing (e.g., 'Warning: Could not find position data for...')",
+        description="Show console messages for debugging, such as when a JBeam element's referenced node cannot be found for drawing, a JBeam variable is unresolved, or an expression contains an unsupported operation.",
         default=False,
         update=_update_show_console_warnings_missing_nodes # <<< MODIFIED: Use new update function
     )
+    # <<< ADDED: Collection for Node Weight Variables >>>
+    node_weight_variables: bpy.props.CollectionProperty(
+        type=NodeWeightVariableItem,
+        name="Node Weight Variables",
+        description="Select variables to include in nodeWeight calculation for dynamic coloring"
+        # No direct update function here; individual item.selected has one.
+    )
+
+    # <<< ADDED: Toggle for Node Weight Variable Selection visibility >>>
+    show_node_weight_variable_selection: bpy.props.BoolProperty(
+        name="Show Node Weight Variable Selection",
+        description="Expand to see options for selecting variables used in node weight calculation",
+        default=False, # Start collapsed
+    )
+
+    # <<< ADDED: Toggle for filename visibility in node weight instance column >>>
+    show_filename_in_node_weight_instance: bpy.props.BoolProperty(
+        name="Show Filename in Instance",
+        description="Show the source filename in the 'Instance (File & Part)' column for node weight variables",
+        default=False,
+        # Update function to redraw UI when toggled
+        update=lambda self, context: _tag_redraw_3d_views(context) if hasattr(drawing, '_tag_redraw_3d_views') and callable(drawing._tag_redraw_3d_views) else None
+    )
+    # <<< END ADDED >>>
 
     # --- Node Creation Prefixes ---
     show_new_node_naming_panel: bpy.props.BoolProperty(

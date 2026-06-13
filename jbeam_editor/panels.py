@@ -44,7 +44,7 @@ from .operators import ( # Import operators used in panels
     JBEAM_EDITOR_OT_save_pc_file_to_disk, # <<< ADDED: Import PC save operator
     JBEAM_EDITOR_OT_clear_pc_filters, # <<< ADDED: Import filter operators
 )
-from .drawing import resolve_jbeam_variable_value
+from .drawing import resolve_jbeam_variable_value, utils # <<< MODIFIED: Import utils
 
 class JBEAM_EDITOR_PT_transform_panel_ext(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
@@ -202,7 +202,7 @@ class JBEAM_EDITOR_PT_find_node(bpy.types.Panel):
 
         box = layout.box()
         col = box.column(align=True)
-        col.enabled = obj.mode == 'EDIT' and editing_enabled
+        col.enabled = obj and obj.mode == 'EDIT' and editing_enabled
 
         # Display the label first
         col.label(text="Element ID:")
@@ -447,42 +447,140 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
                 row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_text_offset', text="Text Offset")
                 node_vis_col.separator() # Separator before group filter
                 # <<< MOVED: Toggle for Node Group Text >>>
+                # --- Node Dot Visualization ---
+                node_vis_col.prop(ui_props, 'toggle_node_dots_vis', text="Show Node Dots")
+                row = node_vis_col.row() # Create a new row for the dot size property
+                row.enabled = ui_props.toggle_node_dots_vis # Enable/disable based on toggle
+                row.prop(ui_props, 'node_dot_size') # Draw the property in the new row
+                # --- End Node Dot Visualization --- (Comment adjusted for clarity
+
+                node_vis_col.separator() # <<< ADDED: Separator before Node Group Text
+                # <<< MOVED: Toggle for Node Group Text >>>
                 row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'toggle_node_group_text')
                 # --- Node Group Filter Section ---
                 node_vis_col.prop(ui_props, 'toggle_node_group_filter')
                 row = node_vis_col.row()
                 row.enabled = ui_props.toggle_node_ids_text and ui_props.toggle_node_group_filter # Enable dropdown only if master toggle and filter toggle are on
                 row.prop(ui_props, 'node_group_to_show', text="") # Text label provided by the property itself ("Group to Show")
-                node_vis_col.separator() # <<< MOVED: Empty line underneath the selection box
+                node_vis_col.separator()
                 # --- End Node Group Filter Section ---
 
                 node_vis_col.prop(ui_props, 'toggle_cross_part_node_ids_vis')
 
                 # --- Dynamic Node Coloring Section ---
                 node_vis_col.separator()
-                node_vis_col.prop(ui_props, 'use_dynamic_node_coloring')
-                dyn_box = node_vis_col.box()
-                dyn_box.enabled = ui_props.use_dynamic_node_coloring
-                dyn_col = dyn_box.column(align=True)
-                dyn_col.label(text="Parameter: nodeWeight") # <<< REMOVED ICON
-                dyn_col.prop(ui_props, 'use_auto_node_thresholds', text="Auto Thresholds")
-                # <<< MODIFIED: Display auto thresholds or manual inputs >>>
-                if ui_props.use_auto_node_thresholds:
-                    dyn_col.label(text=f"Min: {ui_props.auto_node_threshold_min_display}") # Display Min
-                    dyn_col.label(text=f"Max: {ui_props.auto_node_threshold_max_display}") # Display Max
-                else:
-                    row_low = dyn_col.row(); row_low.prop(ui_props, 'dynamic_node_color_threshold_low', text="Low Threshold") # Keep text for manual input
-                    row_high = dyn_col.row(); row_high.prop(ui_props, 'dynamic_node_color_threshold_high', text="High Threshold")
-                # <<< END MODIFIED >>>
-                node_vis_col.separator() # Separator before dot settings
-                # --- Node Dot Visualization ---
-                node_vis_col.prop(ui_props, 'toggle_node_dots_vis', text="Show Node Dots")
-                dot_box = node_vis_col.box()
-                dot_box.enabled = ui_props.toggle_node_dots_vis # Enable/disable based on toggle
-                dot_col = dot_box.column(align=True)
-                dot_col.prop(ui_props, 'node_dot_size') # Keep dot size customization
-                # --- End Dynamic Node Coloring Section ---
+                # <<< MOVED: Toggle for Node Weight Text >>>
+                row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'toggle_node_weight_text')
+                node_vis_col.prop(ui_props, 'use_dynamic_node_coloring') # Toggle for the coloring feature
 
+                # Box for settings specific to the dynamic coloring feature
+                coloring_feature_box = node_vis_col.box()
+                coloring_feature_box.enabled = ui_props.use_dynamic_node_coloring # Enable/disable based on the master toggle
+                coloring_feature_col = coloring_feature_box.column(align=True)
+
+                coloring_feature_col.label(text="Coloring Parameter: nodeWeight") # Explains what is being colored
+                coloring_feature_col.prop(ui_props, 'use_auto_node_thresholds', text="Auto Thresholds")
+                if ui_props.use_auto_node_thresholds:
+                    coloring_feature_col.label(text=f"Min: {ui_props.auto_node_threshold_min_display}")
+                    coloring_feature_col.label(text=f"Max: {ui_props.auto_node_threshold_max_display}")
+                else:
+                    row_low = coloring_feature_col.row(); row_low.prop(ui_props, 'dynamic_node_color_threshold_low', text="Low Threshold")
+                    row_high = coloring_feature_col.row(); row_high.prop(ui_props, 'dynamic_node_color_threshold_high', text="High Threshold")
+                coloring_feature_col.prop(ui_props, 'dynamic_node_color_distribution_bias') # Bias for coloring
+
+                # --- Sum Visible Node Weight (Moved Here) ---
+                node_vis_col.separator() # Separator after dynamic coloring, before sum
+                row = node_vis_col.row()
+                row.label(text="Total Visible Node Weight:")
+                if ui_props.summed_visible_node_weight_display == "N/A":
+                    row.label(text=ui_props.summed_visible_node_weight_display)
+                else:
+                    row.label(text=f"{ui_props.summed_visible_node_weight_display} kg")
+
+                # --- Node Weight Variable Definition (Now Independent) ---
+                node_vis_col.separator() # Separator before variable definition section
+                # --- Node Weight Variable Selection (Collapsible) ---
+                row = node_vis_col.row(align=True)
+                row.prop(ui_props, "show_node_weight_variable_selection", icon="TRIA_DOWN" if ui_props.show_node_weight_variable_selection else "TRIA_RIGHT", icon_only=True, emboss=False)
+                row.label(text="Select Variables for Node Weight Calculation:")
+
+                if ui_props.show_node_weight_variable_selection:
+                    var_selection_box = node_vis_col.box() # This box is now a direct child of node_vis_col
+                    var_selection_box.operator(JBEAM_EDITOR_OT_force_jbeam_sync.bl_idname, text=" Refresh JBeam Variables", icon='FILE_REFRESH')
+                    if not ui_props.node_weight_variables:
+                        var_selection_box.label(text="No JBeam variables found or cache needs update.")
+                        # var_selection_box.operator("jbeam_editor.force_jbeam_sync", text="Refresh Caches") # Suggest a refresh (already have one above)
+                    else:
+                        # <<< ADDED: Toggle for filename visibility >>>
+                        var_selection_box.prop(ui_props, "show_filename_in_node_weight_instance")
+                        # <<< END ADDED >>>
+                        # Header Row
+                        header_row = var_selection_box.row(align=True) # Keep this row for other headers
+                        header_row.label(text="Variable Name")
+                        header_row.label(text="Value")
+                        header_row.label(text="Instance (File & Part)")
+
+                        # Iterate through UIProperties collection
+                        for item in ui_props.node_weight_variables:
+                            # <<< ADDED: Filter variables based on current usage for nodeWeight sum >>>
+                            if not jb_globals.jbeam_variables_cache.get(item.name): # Still check if var exists in main cache
+                                continue
+                            if item.name not in jb_globals.used_in_node_weight_calculation_vars:
+                                continue
+                            row = var_selection_box.row(align=True)
+                            row.prop(item, "selected", text="")
+                            row.label(text=item.name)
+
+                            # Calculate Value display string first
+                            instances = jb_globals.jbeam_variables_cache.get(item.name, [])
+                            resolved_value_display = "N/A" # Default display
+                            active_instance_data = None
+                            for inst in instances:
+                                if inst.get('unique_id') == item.active_instance_unique_id:
+                                    active_instance_data = inst
+                                    break
+
+                            if active_instance_data:
+                                raw_value = active_instance_data.get('value')
+                                # Pass context and set is_node_weight_context=True
+                                resolved_value = resolve_jbeam_variable_value(
+                                    raw_value,
+                                    jb_globals.jbeam_variables_cache,
+                                    0,  # depth
+                                    context,  # context_for_selection
+                                    True  # is_node_weight_context
+                                )
+                                if isinstance(resolved_value, (float, int)):
+                                    resolved_value_display = utils.to_float_str(resolved_value)
+                                else:
+                                    resolved_value_display = repr(resolved_value)
+                                if isinstance(raw_value, str) and raw_value.startswith('=$') and resolved_value == raw_value:
+                                    resolved_value_display += " (unresolved/failed)"
+
+                            # Create a sub-row for Value and Instance to use split for width control
+                            sub_row = row.row(align=True)
+                            split = sub_row.split(factor=0.3) # Give 30% to Value, 70% to Instance
+
+                            # Value column (narrower, drawn first in the split)
+                            col_value = split.column()
+                            col_value.label(text=resolved_value_display)
+
+                            # Instance (File & Part) column (takes remaining space of the split)
+                            col_instance = split.column()
+                            if len(instances) > 1:
+                                col_instance.prop(item, "instance_choice_dropdown", text="") # Show dropdown
+                            elif instances: # Only one instance
+                                inst = instances[0]
+                                # <<< MODIFIED: Conditionally display filename >>>
+                                if ui_props.show_filename_in_node_weight_instance:
+                                    col_instance.label(text=f"{Path(inst['source_file']).name} ({inst['source_part']})")
+                                else:
+                                    col_instance.label(text=f"({inst['source_part']})")
+                                # <<< END MODIFIED >>>
+                            else:
+                                col_instance.label(text="N/A")
+
+                # --- End Node Weight Variable Selection UI ---
             # --- 3D Lines Box (New Structure) ---
             line_vis_box = layout.box()
             row = line_vis_box.row(align=True)
@@ -520,6 +618,7 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
                     else:
                         row_low = dyn_col.row(); row_low.prop(ui_props, 'dynamic_color_threshold_low', text="Low Threshold") # Keep text for manual input
                         row_high = dyn_col.row(); row_high.prop(ui_props, 'dynamic_color_threshold_high', text="High Threshold")
+                    dyn_col.prop(ui_props, 'dynamic_color_distribution_bias') # <<< ADDED SLIDER FOR BEAMS
                     # <<< END MODIFIED >>>
                     beam_vis_col.separator()
 

@@ -10,7 +10,7 @@
 # The above copyright notice and this permission notice shall be included in all
 # copies or substantial portions of the Software.
 #
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
@@ -45,7 +45,7 @@ from mathutils import Vector, Matrix, Color # <<< ADD Color import
 # Import from local modules
 from . import constants
 from . import globals as jb_globals # Import globals
-from . import text_editor
+from . import text_editor, utils # <<< MODIFIED: Import utils
 from . import sjsonast
 from . import bng_sjson
 from .text_editor import SCENE_SHORT_TO_FULL_FILENAME
@@ -59,6 +59,7 @@ if not constants.UNIT_TESTING:
 
 # <<< NEW: Define white color constant >>>
 WHITE_COLOR = (1.0, 1.0, 1.0, 1.0)
+PINK_COLOR = (1.0, 0.0, 1.0, 0.9) # Pink color for active vertex dot
 
 # <<< ADDED: Global vars for node auto thresholds >>>
 auto_node_weight_min = float('inf')
@@ -760,7 +761,8 @@ def _scroll_editor_to_line(context: bpy.types.Context, filepath: str, line: int)
 def update_all_nodes_cache(context: bpy.types.Context):
     """Scans ALL loaded JBeam text files and caches node positions and part origins."""
     global all_nodes_cache, all_nodes_cache_dirty
-    print("Updating all nodes cache...")
+    ui_props = context.scene.ui_properties
+    if ui_props.show_console_warnings_missing_nodes: print("Updating all nodes cache...")
     all_nodes_cache.clear()
     scene = context.scene
     ui_props = scene.ui_properties
@@ -835,7 +837,7 @@ def update_all_nodes_cache(context: bpy.types.Context):
             print(f"Error processing file {full_filepath} for node cache: {e}", file=sys.stderr)
             traceback.print_exc() # Print traceback for unexpected errors
 
-    print(f"All nodes cache updated with {len(all_nodes_cache)} nodes.")
+    if ui_props.show_console_warnings_missing_nodes: print(f"All nodes cache updated with {len(all_nodes_cache)} nodes.")
     all_nodes_cache_dirty = False
 
 # <<< MODIFIED: Function to update JBeam variables cache >>>
@@ -847,7 +849,10 @@ def update_jbeam_variables_cache(context: bpy.types.Context):
     # Use the global cache and dirty flag from jb_globals
     # Don't clear immediately, merge results instead
     temp_variable_cache = {} # Store findings here first
+    temp_variable_cache_default_indices = {} # { (filepath, partname): index_counter }
     scene = context.scene
+    # <<< ADDED: Import Path for filename extraction >>>
+    from pathlib import Path
 
     short_to_full_map = scene.get(SCENE_SHORT_TO_FULL_FILENAME, {})
     if not short_to_full_map:
@@ -891,14 +896,23 @@ def update_jbeam_variables_cache(context: bpy.types.Context):
                                     var_name = var_entry[0]
                                     default_value = var_entry[4] # 5th element is default value
 
-                                    # Store default value if not already set by a direct assignment later
+                                    # Generate unique_id for default variables
+                                    default_idx_key = (full_filepath, part_name)
+                                    current_default_idx = temp_variable_cache_default_indices.get(default_idx_key, 0)
+                                    unique_id = f"{full_filepath}::{part_name}::default_{current_default_idx}"
+                                    temp_variable_cache_default_indices[default_idx_key] = current_default_idx + 1
+
+                                    # Add to list for this var_name
                                     if var_name not in temp_variable_cache:
-                                        temp_variable_cache[var_name] = {
+                                        temp_variable_cache[var_name] = []
+                                    temp_variable_cache[var_name].append({
                                             'value': default_value, # Store raw default value
                                             'source_file': full_filepath,
+                                            'source_part': part_name, # <<< Store part_name
+                                            'unique_id': unique_id,
                                             'line_number': None, # Line number is harder to get accurately here
                                             'source_type': 'default'
-                                        }
+                                    })
             except SyntaxError as se:
                 print(f"Warning: Skipping variable cache update (Pass 1) for '{full_filepath}' due to syntax error: {se}", file=sys.stderr)
                 continue
@@ -941,13 +955,35 @@ def update_jbeam_variables_cache(context: bpy.types.Context):
                         else: parsed_value = value_str # Store as raw string if other parsing fails
 
                     full_var_name = '$' + var_name_only
-                    # Store or update the variable info (direct assignments overwrite defaults)
-                    temp_variable_cache[full_var_name] = {
+                    unique_id = f"{full_filepath}::assignment::{line_num}"
+
+                    # Check if this assignment should overwrite an existing default from the same file/part
+                    # This is a simplification; true "override" might be more complex if defaults can come from other files.
+                    # For now, assignments always add a new instance or replace an assignment from the exact same line.
+                    # A more robust system might involve a priority order.
+
+                    if full_var_name not in temp_variable_cache:
+                        temp_variable_cache[full_var_name] = []
+
+                    # Check if an assignment from this exact location already exists
+                    existing_assignment_idx = -1
+                    for idx, inst in enumerate(temp_variable_cache[full_var_name]):
+                        if inst.get('unique_id') == unique_id:
+                            existing_assignment_idx = idx
+                            break
+
+                    instance_data = {
                         'value': parsed_value,
                         'source_file': full_filepath,
-                        'line_number': line_num,
+                        'source_part': Path(full_filepath).name, # <<< Use filename as part for globals
+                        'unique_id': unique_id,
+                        'line_number': line_num, # Line number for direct assignments
                         'source_type': 'assignment'
                     }
+                    if existing_assignment_idx != -1:
+                        temp_variable_cache[full_var_name][existing_assignment_idx] = instance_data
+                    else:
+                        temp_variable_cache[full_var_name].append(instance_data)
 
         except Exception as e:
             print(f"Error processing file {full_filepath} for variable cache (Pass 2): {e}", file=sys.stderr)
@@ -956,6 +992,40 @@ def update_jbeam_variables_cache(context: bpy.types.Context):
     # --- Finalize Cache ---
     jb_globals.jbeam_variables_cache.clear()
     jb_globals.jbeam_variables_cache.update(temp_variable_cache) # Update global cache
+
+    # --- Populate UIProperties Collection ---
+    if hasattr(context.scene, 'ui_properties'):
+        ui_props = context.scene.ui_properties
+        # Store current selections to preserve them
+        current_ui_state = {
+            item.name: {'selected': item.selected, 'active_id': item.active_instance_unique_id}
+            for item in ui_props.node_weight_variables
+        }
+        ui_props.node_weight_variables.clear() # Clear existing items
+
+        # Sort variables for consistent UI display (e.g., by name)
+        sorted_var_names = sorted(jb_globals.jbeam_variables_cache.keys())
+
+        for var_name in sorted_var_names:
+            # var_data_list = jb_globals.jbeam_variables_cache[var_name] # Not directly used here
+            item = ui_props.node_weight_variables.add()
+            item.name = var_name
+
+            prev_state = current_ui_state.get(var_name)
+            item.selected = prev_state['selected'] if prev_state else True
+
+            # Set the initial active_instance_unique_id and instance_choice_dropdown
+            instances_for_name = jb_globals.jbeam_variables_cache.get(var_name, [])
+            if instances_for_name:
+                chosen_instance_id = prev_state['active_id'] if prev_state and prev_state['active_id'] != "NONE" else None
+                if chosen_instance_id and any(inst.get('unique_id') == chosen_instance_id for inst in instances_for_name):
+                    item.active_instance_unique_id = chosen_instance_id
+                else: # Default to first instance if previous not found or not set
+                    item.active_instance_unique_id = instances_for_name[0].get('unique_id', 'NONE')
+                item.instance_choice_dropdown = item.active_instance_unique_id # Sync dropdown
+            else:
+                item.active_instance_unique_id = "NONE"
+                item.instance_choice_dropdown = "NONE"
 
     jb_globals.jbeam_variables_cache_dirty = False
 # <<< END MODIFIED FUNCTION >>>
@@ -984,11 +1054,17 @@ class SafeExpressionEvaluator(ast.NodeVisitor):
     Safely evaluates an AST expression node, allowing only basic arithmetic
     and variable lookups from a provided cache.
     """
-    def __init__(self, variable_cache):
+    def __init__(self, variable_cache, ui_props, is_node_weight_context, context_for_selection): # Add context_for_selection
         self.variable_cache = variable_cache
         # Limit recursion depth for variable resolution within the expression
         self._max_depth = 10
         self._current_depth = 0
+        # <<< MODIFIED: Store ui_props and is_node_weight_context >>>
+        # These are passed from the top-level call to resolve_jbeam_variable_value
+        # and are used to determine if a variable should be added to the "used" set.
+        self.ui_props = ui_props
+        self.is_node_weight_context = is_node_weight_context
+        self.context_for_selection = context_for_selection # Store the full context
 
     def visit(self, node):
         """Override visit to check node type and depth."""
@@ -1027,23 +1103,83 @@ class SafeExpressionEvaluator(ast.NodeVisitor):
 
         # Assume it's a JBeam variable (already transformed from $var)
         jbeam_var_name = '$' + node.id.replace('jbeamvar_', '', 1) # Reconstruct original JBeam name
-        cached_var = self.variable_cache.get(jbeam_var_name)
 
-        if cached_var is not None:
-            value = cached_var['value']
+        # <<< ADDED: If in nodeWeight context, mark this variable as used >>>
+        if self.is_node_weight_context:
+            if jbeam_var_name not in jb_globals.used_in_node_weight_calculation_vars:
+                jb_globals.used_in_node_weight_calculation_vars.add(jbeam_var_name)
+        # <<< END ADDED >>>
+        # This check is for the 'Include' checkbox in the UI for nodeWeight.
+        # If this variable is part of an expression being evaluated for nodeWeight,
+        # and the user has un-ticked "Include" for this variable name, its contribution is 0.
+        if self.is_node_weight_context and self.ui_props: # self.is_node_weight_context is True if the top-level expression is for nodeWeight
+            is_selected_for_nodeweight = False
+            for item_in_ui_list in self.ui_props.node_weight_variables:
+                if item_in_ui_list.name == jbeam_var_name: # jbeam_var_name is the current variable being processed in the expression
+                    is_selected_for_nodeweight = item_in_ui_list.selected # Check its 'selected' (Include) status
+                    break
+            if not is_selected_for_nodeweight:
+                return 0.0
+
+        var_instances = self.variable_cache.get(jbeam_var_name, [])
+        if not var_instances:
+            if self.ui_props and self.ui_props.show_console_warnings_missing_nodes and jbeam_var_name not in _reported_missing_vars_this_rebuild:
+                print(f"Evaluation Error: Variable '{jbeam_var_name}' not found in cache (no instances) during expression evaluation.", file=sys.stderr)
+                _reported_missing_vars_this_rebuild.add(jbeam_var_name)
+            raise NameError(f"Variable '{jbeam_var_name}' not found in cache (no instances)")
+
+        chosen_instance_data = None
+        active_instance_id_from_ui = None
+
+        if self.ui_props: # Get choice from UI
+            ui_var_item = None
+            for item_in_ui_list in self.ui_props.node_weight_variables:
+                if item_in_ui_list.name == jbeam_var_name:
+                    ui_var_item = item_in_ui_list
+                    active_instance_id_from_ui = ui_var_item.active_instance_unique_id
+                    break
+            if active_instance_id_from_ui and active_instance_id_from_ui != "NONE":
+                for inst_data in var_instances:
+                    if inst_data.get('unique_id') == active_instance_id_from_ui:
+                        chosen_instance_data = inst_data
+                        break
+        
+        if not chosen_instance_data and var_instances: # Fallback to first instance
+            chosen_instance_data = var_instances[0]
+            # active_instance_id_from_ui = chosen_instance_data.get('unique_id') # For error message if needed
+
+        if chosen_instance_data:
+            value_from_instance = chosen_instance_data['value']
             # Recursively resolve if the value is another expression string or simple variable
-            # Pass depth + 1 for recursion control
-            resolved_value = resolve_jbeam_variable_value(value, self.variable_cache, self._current_depth + 1) # Use main resolver
+            resolved_value = resolve_jbeam_variable_value(
+                value_from_instance,
+                self.variable_cache,
+                self._current_depth + 1, # Pass depth + 1 for recursion control
+                self.context_for_selection, # Pass the stored context
+                False, # For components of an expression, is_node_weight_context is False
+                None   # target_instance_id_override is None for evaluation
+            )
 
             if isinstance(resolved_value, (int, float)):
                 return resolved_value
             elif isinstance(resolved_value, bool):
                  return 1.0 if resolved_value else 0.0 # Example: Treat bools as 1.0/0.0
             else:
-                # If nested resolution didn't return a number or bool, raise error
-                raise ValueError(f"Nested variable '{jbeam_var_name}' did not resolve to a number or boolean (got {type(resolved_value).__name__})")
+                err_msg = (f"Nested variable '{jbeam_var_name}' "
+                           f"(instance: {chosen_instance_data.get('unique_id', 'N/A')}, raw value: {value_from_instance!r}) "
+                           f"did not resolve to a number or boolean (got {type(resolved_value).__name__}, resolved to: {resolved_value!r})")
+                if self.ui_props and self.ui_props.show_console_warnings_missing_nodes:
+                    error_key = (jbeam_var_name, chosen_instance_data.get('unique_id'), str(type(resolved_value)))
+                    if error_key not in _reported_unsupported_ops_this_rebuild:
+                        print(f"Evaluation Error: {err_msg}", file=sys.stderr)
+                        _reported_unsupported_ops_this_rebuild.add(error_key)
+                raise ValueError(err_msg)
         else:
-            raise NameError(f"Variable '{jbeam_var_name}' not found in cache")
+            err_msg_detail = "no instances found" if not var_instances else f"selected instance '{active_instance_id_from_ui}' not valid"
+            if self.ui_props and self.ui_props.show_console_warnings_missing_nodes and jbeam_var_name not in _reported_missing_vars_this_rebuild:
+                print(f"Evaluation Error: Variable '{jbeam_var_name}' ({err_msg_detail}) not usable in expression.", file=sys.stderr)
+                _reported_missing_vars_this_rebuild.add(jbeam_var_name)
+            raise NameError(f"Variable '{jbeam_var_name}' ({err_msg_detail}) not usable in expression.")
 
     # Handles binary operators (+, -, *, /, **)
     def visit_BinOp(self, node):
@@ -1074,7 +1210,7 @@ class SafeExpressionEvaluator(ast.NodeVisitor):
         return result
 
 # <<< MODIFIED FUNCTION >>>
-def _evaluate_jbeam_expression(expression_str: str, variable_cache: dict, depth: int = 0):
+def _evaluate_jbeam_expression(expression_str: str, variable_cache: dict, depth: int = 0, ui_props=None, is_node_weight_context=False, context_for_selection=None): # Add context_for_selection
     """
     Safely evaluates a JBeam arithmetic expression string (e.g., '$var * 1.1').
     """
@@ -1099,7 +1235,7 @@ def _evaluate_jbeam_expression(expression_str: str, variable_cache: dict, depth:
         tree = ast.parse(python_expr, mode='eval')
 
         # 3. Evaluate the AST using the safe visitor
-        evaluator = SafeExpressionEvaluator(variable_cache)
+        evaluator = SafeExpressionEvaluator(variable_cache, ui_props, is_node_weight_context, context_for_selection) # Pass context_for_selection
         evaluator._current_depth = depth # Pass current depth for recursion control
         result = evaluator.visit(tree)
 
@@ -1113,12 +1249,15 @@ def _evaluate_jbeam_expression(expression_str: str, variable_cache: dict, depth:
     except NameError as e:
         # Extract the original JBeam variable name if possible
         name_match = re.search(r"Variable '(\$[a-zA-Z_][a-zA-Z0-9_]*)' not found", str(e)) # Adjusted regex
-        original_var = name_match.group(1) if name_match else "unknown variable"
-        # <<< MODIFIED: Check if already reported this rebuild >>>
-        if original_var not in _reported_missing_vars_this_rebuild:
-            print(f"Evaluation Error: Variable not found - {original_var} (in expression '{expression_str}')", file=sys.stderr)
-            # Add to set *after* reporting it the first time
-            _reported_missing_vars_this_rebuild.add(original_var)
+        original_var = name_match.group(1) if name_match else "unknown variable" # Keep this line
+        # <<< MODIFIED: Check console warning toggle >>>
+        # ui_props is now passed as an argument
+        if ui_props.show_console_warnings_missing_nodes: # Check toggle
+            # Use the expression string as the key to track if this specific expression's error was reported
+            if original_var not in _reported_missing_vars_this_rebuild: # Keep this check
+                print(f"Evaluation Error: Variable not found - {original_var} (in expression '{expression_str}')", file=sys.stderr)
+                # Add to set *after* reporting it the first time
+                _reported_missing_vars_this_rebuild.add(original_var) # Keep this line
         # <<< END MODIFIED >>>
         return None # Indicate failure
 
@@ -1127,13 +1266,19 @@ def _evaluate_jbeam_expression(expression_str: str, variable_cache: dict, depth:
         error_str = str(e)
         # Check if it's the specific "AST node type ... not allowed" error
         if "AST node type" in error_str and "is not allowed" in error_str:
-            # Use the expression string as the key to track if this specific expression's error was reported
-            if expression_str not in _reported_unsupported_ops_this_rebuild:
-                print(f"Evaluation Error: Could not evaluate expression '{expression_str}': {e}", file=sys.stderr)
-                _reported_unsupported_ops_this_rebuild.add(expression_str)
+            # <<< MODIFIED: Check console warning toggle >>>
+            # ui_props is now passed as an argument
+            if ui_props.show_console_warnings_missing_nodes:
+                # Use the expression string as the key to track if this specific expression's error was reported
+                if expression_str not in _reported_unsupported_ops_this_rebuild:
+                    print(f"Evaluation Error: Could not evaluate expression '{expression_str}': {e}", file=sys.stderr)
+                    _reported_unsupported_ops_this_rebuild.add(expression_str)
+            # <<< END MODIFIED >>>
         else:
-            # For other TypeErrors, report them normally (as they might be different issues)
-            print(f"Evaluation Error: Could not evaluate expression '{expression_str}': {e}", file=sys.stderr)
+            # For other TypeErrors, report them normally if the toggle is on
+            # ui_props is now passed as an argument
+            if ui_props.show_console_warnings_missing_nodes:
+                print(f"Evaluation Error: Could not evaluate expression '{expression_str}': {e}", file=sys.stderr)
         return None # Indicate failure
     # <<< END MODIFIED ERROR HANDLING >>>
 
@@ -1148,7 +1293,7 @@ def _evaluate_jbeam_expression(expression_str: str, variable_cache: dict, depth:
 # <<< END MODIFIED FUNCTION >>>
 
 # <<< MODIFIED: Function for variable resolution and expression evaluation >>>
-def resolve_jbeam_variable_value(value, variable_cache=None, depth=0):
+def resolve_jbeam_variable_value(value, variable_cache=None, depth=0, context_for_selection=None, is_node_weight_context=False, target_instance_id_override=None):
     """
     Resolves JBeam variable references like '$variable', '=$variable' or evaluates
     simple arithmetic expressions like '=$variable * 1.1', '"$=$variable * 1.1"',
@@ -1157,6 +1302,8 @@ def resolve_jbeam_variable_value(value, variable_cache=None, depth=0):
     Args:
         value: The value to resolve (can be any type).
         variable_cache: The cache to use (defaults to global cache).
+        context_for_selection: bpy.context, needed to access UI properties for variable selection.
+        target_instance_id_override: If provided, forces resolution of this specific instance.
         depth: Current recursion depth (internal use).
 
     Returns:
@@ -1165,6 +1312,7 @@ def resolve_jbeam_variable_value(value, variable_cache=None, depth=0):
     """
     if variable_cache is None:
         variable_cache = jb_globals.jbeam_variables_cache
+    ui_props = context_for_selection.scene.ui_properties if context_for_selection and hasattr(context_for_selection, 'scene') else None
 
     # Limit overall recursion depth
     if depth >= 10:
@@ -1174,6 +1322,12 @@ def resolve_jbeam_variable_value(value, variable_cache=None, depth=0):
     # --- Check if it's a string that needs processing ---
     if not isinstance(value, str):
         return value # Not a string, return original value
+    
+    # <<< ADDED: If this is a top-level call for nodeWeight and value is a direct variable, mark it as used >>>
+    if is_node_weight_context and value.startswith('$') and not value.startswith(('=$', '$=$')):
+        if value not in jb_globals.used_in_node_weight_calculation_vars:
+            jb_globals.used_in_node_weight_calculation_vars.add(value)
+    # <<< END ADDED >>>
 
     stripped_value = value.strip() # <<< STRIP the value here
 
@@ -1210,7 +1364,7 @@ def resolve_jbeam_variable_value(value, variable_cache=None, depth=0):
 
     # --- Evaluate if it's an expression ---
     if is_expression and expression_part is not None:
-        evaluated_result = _evaluate_jbeam_expression(expression_part, variable_cache, depth + 1)
+        evaluated_result = _evaluate_jbeam_expression(expression_part, variable_cache, depth + 1, ui_props, is_node_weight_context, context_for_selection) # Pass context_for_selection
         if evaluated_result is not None:
             return evaluated_result # Successfully evaluated
         else:
@@ -1222,21 +1376,58 @@ def resolve_jbeam_variable_value(value, variable_cache=None, depth=0):
     # and doesn't have the quote wrappers.
     elif stripped_value.startswith('$') and not stripped_value.startswith(('=$', '$=$')):
         var_name = stripped_value # The stripped value is the variable name
-        cached_var = variable_cache.get(var_name)
 
-        if cached_var is not None:
-            cached_value = cached_var['value']
+        # If this is the top-level call for nodeWeight itself (e.g. nodeWeight = "$someVar")
+        # and "$someVar" is NOT selected in the UI, then this whole nodeWeight should be considered 0.
+        if is_node_weight_context and ui_props:
+            is_selected_for_nodeweight = False
+            for item in ui_props.node_weight_variables:
+                if item.name == var_name:
+                    is_selected_for_nodeweight = item.selected
+                    break
+            if not is_selected_for_nodeweight:
+                return 0.0 # This variable is not selected for nodeWeight calculation
+
+        var_instances = variable_cache.get(var_name, [])
+        if not var_instances:
+            if ui_props and ui_props.show_console_warnings_missing_nodes and var_name not in _reported_missing_vars_this_rebuild:
+                print(f"Warning: Variable '{var_name}' not found in cache (no instances).", file=sys.stderr)
+                _reported_missing_vars_this_rebuild.add(var_name)
+            return value # Return original UNSTRIPPED value
+
+        chosen_instance_data = None
+        if target_instance_id_override: # Direct override for display purposes
+            for inst_data in var_instances:
+                if inst_data.get('unique_id') == target_instance_id_override:
+                    chosen_instance_data = inst_data
+                    break
+        elif ui_props: # Get choice from UI
+            ui_var_item = None
+            for item_in_ui_list in ui_props.node_weight_variables:
+                if item_in_ui_list.name == var_name:
+                    ui_var_item = item_in_ui_list
+                    break
+            if ui_var_item and ui_var_item.active_instance_unique_id != "NONE":
+                for inst_data in var_instances:
+                    if inst_data.get('unique_id') == ui_var_item.active_instance_unique_id:
+                        chosen_instance_data = inst_data
+                        break
+        
+        if not chosen_instance_data and var_instances: # Fallback to first instance
+            chosen_instance_data = var_instances[0]
+
+        if chosen_instance_data:
+            cached_value = chosen_instance_data['value']
             # Recursively resolve if the cached value is another expression or variable
             # Pass depth + 1 for recursion control
-            return resolve_jbeam_variable_value(cached_value, variable_cache, depth + 1)
+            return resolve_jbeam_variable_value(cached_value, variable_cache, depth + 1, context_for_selection, False, None) # Override is not passed down
         else:
             # Variable not found in cache
-            if var_name not in _reported_missing_vars_this_rebuild:
+            if ui_props and ui_props.show_console_warnings_missing_nodes and var_name not in _reported_missing_vars_this_rebuild:
                 print(f"Warning: Variable '{var_name}' not found in cache.", file=sys.stderr)
                 _reported_missing_vars_this_rebuild.add(var_name)
             return value # Return original UNSTRIPPED value on failure
     # --- END NEW ---
-
     else:
         # Not an expression string or simple variable, return the original value
         return value # Return original UNSTRIPPED value
@@ -2186,10 +2377,10 @@ def draw_callback_px(context: bpy.types.Context):
                                 node_actual_groups = set() # Store lowercase group names
                                 if node_data_for_filter and isinstance(node_data_for_filter, dict):
                                     group_attr = node_data_for_filter.get('group')
-                                    if isinstance(group_attr, str):
+                                    if isinstance(group_attr, str) and group_attr.strip(): # Check if non-empty
                                         node_actual_groups.add(group_attr.lower())
                                     elif isinstance(group_attr, list):
-                                        node_actual_groups.update(g.lower() for g in group_attr if isinstance(g, str))
+                                        node_actual_groups.update(g.lower() for g in group_attr if isinstance(g, str) and g.strip()) # Check if non-empty
 
                                 if selected_group_for_filter == "__NODES_WITHOUT_GROUPS__":
                                     if node_actual_groups: # If node has any group
@@ -2233,14 +2424,12 @@ def draw_callback_px(context: bpy.types.Context):
                                         low_thresh = auto_node_weight_min if use_auto_node_thresh and auto_node_thresholds_valid else node_low_thresh
                                         high_thresh = auto_node_weight_max if use_auto_node_thresh and auto_node_thresholds_valid else node_high_thresh
 
-                                        dynamic_color = _calculate_dynamic_color(node_weight_raw, low_thresh, high_thresh)
-                                        if dynamic_color:
-                                            text_color = dynamic_color # Apply dynamic color
-                                        # <<< MODIFICATION START >>>
-                                        else:
-                                            # Calculation failed, mark this node to NOT be drawn
-                                            should_draw_node = False
-                                        # <<< MODIFICATION END >>>
+                                        # Attempt to get dynamic color
+                                        dynamic_color_val = _calculate_dynamic_color(node_weight_raw, low_thresh, high_thresh, 'node')
+                                        if dynamic_color_val: # If successful, apply it
+                                            text_color = dynamic_color_val
+                                        # If dynamic_color_val is None (evaluation failed), text_color remains as previously set (default, selected, or highlighted)
+                                        # should_draw_node is not set to False, so the node ID will still be drawn.
 
                             # Override dynamic color with selection/highlight colors (only if drawing)
                             # <<< ADDED CHECK >>>
@@ -2271,6 +2460,14 @@ def draw_callback_px(context: bpy.types.Context):
                                             if group_text_suffix:
                                                 node_id_display_string += group_text_suffix
                                 # --- END ADDED ---
+                                # --- ADDED: Node Weight Display ---
+                                if ui_props.toggle_node_weight_text:
+                                    node_data_for_weight = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
+                                    if node_data_for_weight and isinstance(node_data_for_weight, dict):
+                                        node_weight_raw = node_data_for_weight.get('nodeWeight')
+                                        if node_weight_raw is not None:
+                                            resolved_weight = resolve_jbeam_variable_value(node_weight_raw, jb_globals.jbeam_variables_cache, 0, context, True)
+                                            node_id_display_string += f" [{resolved_weight:.2f}kg]" # Format to 2 decimal places
                                 draw_text_with_outline(font_id, node_id_display_string, pos_text[0], pos_text[1], text_color)
                             # <<< MODIFICATION END >>>
                 except Exception as e: print(f"Error processing part {obj_iter_local.name} for drawing: {e}", file=sys.stderr) # Use obj_iter_local
@@ -2302,10 +2499,10 @@ def draw_callback_px(context: bpy.types.Context):
                             node_actual_groups = set() # Store lowercase group names
                             if node_data_for_filter and isinstance(node_data_for_filter, dict):
                                 group_attr = node_data_for_filter.get('group')
-                                if isinstance(group_attr, str):
+                                if isinstance(group_attr, str) and group_attr.strip(): # Check if non-empty
                                     node_actual_groups.add(group_attr.lower())
                                 elif isinstance(group_attr, list):
-                                    node_actual_groups.update(g.lower() for g in group_attr if isinstance(g, str))
+                                    node_actual_groups.update(g.lower() for g in group_attr if isinstance(g, str) and g.strip()) # Check if non-empty
 
                             if selected_group_for_filter == "__NODES_WITHOUT_GROUPS__":
                                 if node_actual_groups:
@@ -2338,14 +2535,12 @@ def draw_callback_px(context: bpy.types.Context):
                                     low_thresh = auto_node_weight_min if use_auto_node_thresh and auto_node_thresholds_valid else node_low_thresh
                                     high_thresh = auto_node_weight_max if use_auto_node_thresh and auto_node_thresholds_valid else node_high_thresh
 
-                                    dynamic_color = _calculate_dynamic_color(node_weight_raw, low_thresh, high_thresh)
-                                    if dynamic_color:
-                                        text_color = dynamic_color # Apply dynamic color
-                                    # <<< MODIFICATION START >>>
-                                    else:
-                                        # Calculation failed, mark this node to NOT be drawn
-                                        should_draw_node = False
-                                    # <<< MODIFICATION END >>>
+                                    # Attempt to get dynamic color
+                                    dynamic_color_val = _calculate_dynamic_color(node_weight_raw, low_thresh, high_thresh, 'node')
+                                    if dynamic_color_val: # If successful, apply it
+                                        text_color = dynamic_color_val
+                                    # If dynamic_color_val is None (evaluation failed), text_color remains as previously set (default, selected, or highlighted)
+                                    # should_draw_node is not set to False, so the node ID will still be drawn.
 
                         # Override dynamic color with selection/highlight colors (only if drawing)
                         # <<< ADDED CHECK >>>
@@ -2376,6 +2571,14 @@ def draw_callback_px(context: bpy.types.Context):
                                         if group_text_suffix:
                                             node_id_display_string += group_text_suffix
                             # --- END ADDED ---
+                            # --- ADDED: Node Weight Display (Single Part) ---
+                            if ui_props.toggle_node_weight_text:
+                                node_data_for_weight = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
+                                if node_data_for_weight and isinstance(node_data_for_weight, dict):
+                                    node_weight_raw = node_data_for_weight.get('nodeWeight')
+                                    if node_weight_raw is not None:
+                                        resolved_weight = resolve_jbeam_variable_value(node_weight_raw, jb_globals.jbeam_variables_cache, 0, context, True)
+                                        node_id_display_string += f" [{resolved_weight:.2f}kg]"
                             draw_text_with_outline(font_id, node_id_display_string, pos_text[0], pos_text[1], text_color)
                         # <<< MODIFICATION END >>>
 
@@ -2384,7 +2587,7 @@ def draw_callback_px(context: bpy.types.Context):
         cross_part_color = ui_props.cross_part_beam_color # Use the same color as cross-part beams for now
         target_other_part_node_ids = set()
         active_part_name = active_obj_data.get(constants.MESH_JBEAM_PART)
-        active_filepath = active_obj_data.get(constants.MESH_JBEAM_FILE_PATH)
+        active_filepath = active_obj_data.get(constants.MESH_JBEAM_FILE_PATH) # Get active file path
         highlighted_nodes = jb_globals.highlighted_node_ids # Use the set here
 
         # Logic to populate target_other_part_node_ids remains the same
@@ -2429,6 +2632,16 @@ def draw_callback_px(context: bpy.types.Context):
                             for node_id in rail_node_ids:
                                 cache_data = all_nodes_cache.get(node_id)
                                 if cache_data and cache_data[2] != active_part_name: target_other_part_node_ids.add(node_id)
+                # Check Slidenodes
+                if 'slidenodes' in part_data and isinstance(part_data['slidenodes'], list):
+                    for slidenode_entry in part_data['slidenodes']:
+                        if isinstance(slidenode_entry, list) and len(slidenode_entry) > 0:
+                            # The first element is the node ID
+                            node_id = slidenode_entry[0]
+                            if isinstance(node_id, str): # Ensure it's a string
+                                cache_data = all_nodes_cache.get(node_id)
+                                # If node exists in cache and its origin is not the active part
+                                if cache_data and cache_data[2] != active_part_name: target_other_part_node_ids.add(node_id)
 
         # Iterate through cache to draw cross-part nodes
         for node_id, (world_pos, _, part_origin) in all_nodes_cache.items():
@@ -2447,10 +2660,10 @@ def draw_callback_px(context: bpy.types.Context):
                         node_actual_groups = set() # Store lowercase group names
                         if node_data_for_filter and isinstance(node_data_for_filter, dict):
                             group_attr = node_data_for_filter.get('group')
-                            if isinstance(group_attr, str):
+                            if isinstance(group_attr, str) and group_attr.strip(): # Check if non-empty
                                 node_actual_groups.add(group_attr.lower())
                             elif isinstance(group_attr, list):
-                                node_actual_groups.update(g.lower() for g in group_attr if isinstance(g, str))
+                                node_actual_groups.update(g.lower() for g in group_attr if isinstance(g, str) and g.strip()) # Check if non-empty
                         if selected_group_for_filter == "__NODES_WITHOUT_GROUPS__":
                             if node_actual_groups:
                                 continue
@@ -2604,25 +2817,31 @@ def draw_callback_px(context: bpy.types.Context):
         bm.free()
 
 # <<< MODIFIED HELPER FUNCTION _calculate_dynamic_color >>>
-def _calculate_dynamic_color(value, low_threshold, high_threshold):
+def _calculate_dynamic_color(value, low_threshold, high_threshold, element_type: str):
+    # <<< ADDED: Access UI properties for distribution bias >>>
+    ui_props = bpy.context.scene.ui_properties
     """
     Calculates a color based on a value relative to low and high thresholds,
     interpolating linearly through a Blue -> Cyan -> Green -> Yellow -> Red gradient.
     Values <= low_threshold are Blue.
     Values >= high_threshold are Red.
+    element_type: 'node' or 'beam', to determine which bias property to use.
     Handles basic '=$variable' resolution and expression evaluation for the input value.
-
+    Uses a bias property to control color distribution.
     Args:
         value: The raw value from the JBeam data (can be number, string, expression).
         low_threshold (float): The lower bound for the color gradient.
         high_threshold (float): The upper bound for the color gradient.
+        element_type (str): Specifies if calculating for 'node' or 'beam'.
 
     Returns:
         A tuple (R, G, B, A) representing the calculated color, or None if the value
         could not be resolved to a finite number.
     """
     # --- MODIFIED: Resolve/Evaluate variable/expression before conversion ---
-    resolved_value = resolve_jbeam_variable_value(value, jb_globals.jbeam_variables_cache)
+    # <<< MODIFIED: Pass context for selection and is_node_weight_context >>>
+    is_node_weight_ctx = (element_type == 'node')
+    resolved_value = resolve_jbeam_variable_value(value, jb_globals.jbeam_variables_cache, 0, bpy.context, is_node_weight_ctx)
     # --- END MODIFIED ---
 
     # --- Attempt conversion to float using the resolved value ---
@@ -2652,7 +2871,16 @@ def _calculate_dynamic_color(value, low_threshold, high_threshold):
     # Normalize the numeric_value within the range [low_threshold, high_threshold] to [0, 1]
     clamped_value = max(low_threshold, min(numeric_value, high_threshold))
     value_range = high_threshold - low_threshold
-    normalized_value = (clamped_value - low_threshold) / value_range if value_range != 0 else 0.5
+    linear_normalized_value = (clamped_value - low_threshold) / value_range if value_range != 0 else 0.5
+
+    # Apply distribution bias
+    if element_type == 'node':
+        bias_prop_name = 'dynamic_node_color_distribution_bias'
+    else: # Default to beam if not 'node'
+        bias_prop_name = 'dynamic_color_distribution_bias'
+    distribution_bias = getattr(ui_props, bias_prop_name, 0.5)
+    exponent = 2**(1 - 2 * distribution_bias) # Maps bias [0,1] to exponent [2, 0.5]
+    normalized_value = linear_normalized_value ** exponent
 
     # Interpolate color across 4 segments: Blue -> Cyan, Cyan -> Green, Green -> Yellow, Yellow -> Red
     segment_size = 0.25
@@ -2685,7 +2913,7 @@ def _format_number_for_display(value, is_category_valid, no_value_text="No relev
     if not math.isfinite(value):
         return no_value_text
     # Otherwise, format the finite number as a string
-    return str(value)
+    return utils.to_float_str(value)
 # <<< END ADDED HELPER >>>
 
 
@@ -2866,9 +3094,14 @@ def draw_callback_view(context: bpy.types.Context):
 
     # --- Rebuild Logic (Main Beams/Nodes) ---
     if veh_render_dirty:
-        warned_missing_nodes_this_rebuild.clear()
-        _reported_missing_vars_this_rebuild.clear() # Clear this set as well
-        _reported_unsupported_ops_this_rebuild.clear() # Clear this set
+        # Clearing of warned_missing_nodes_this_rebuild, _reported_missing_vars_this_rebuild,
+        # and _reported_unsupported_ops_this_rebuild is now primarily handled by
+        # refresh_curr_vdata when a significant data change occurs (object switch, forced refresh).
+        # This prevents spamming console errors for persistent data issues during UI interactions
+        # <<< ADDED: Clear the set of used variables before recalculating the sum >>>
+        jb_globals.used_in_node_weight_calculation_vars.clear()
+        # <<< END ADDED >>>
+        # like dragging a slider that only trigger veh_render_dirty.
 
         # --- ADDED: Force update of selection globals if in edit mode ---
         # This ensures that jb_globals.selected_beam_edge_indices (and others)
@@ -2997,8 +3230,8 @@ def draw_callback_view(context: bpy.types.Context):
                                             node_actual_groups = set()
                                             if node_data_for_filter and isinstance(node_data_for_filter, dict):
                                                 group_attr = node_data_for_filter.get('group')
-                                                if isinstance(group_attr, str): node_actual_groups.add(group_attr.lower())
-                                                elif isinstance(group_attr, list): node_actual_groups.update(g.lower() for g in group_attr if isinstance(g, str))
+                                                if isinstance(group_attr, str) and group_attr.strip(): node_actual_groups.add(group_attr.lower())
+                                                elif isinstance(group_attr, list): node_actual_groups.update(g.lower() for g in group_attr if isinstance(g, str) and g.strip())
 
                                             selected_group_for_filter_dots = ui_props.node_group_to_show
                                             if selected_group_for_filter_dots == "__NODES_WITHOUT_GROUPS__":
@@ -3007,14 +3240,25 @@ def draw_callback_view(context: bpy.types.Context):
                                                 if selected_group_for_filter_dots.lower() not in node_actual_groups: passes_group_filter = False
                                         # --- End Node Group Filter Logic for Dots (Vehicle) ---
 
+
                                         if passes_group_filter:
-                                            # Determine dot color based on selection/highlight state
+                                            # Determine dot color
                                             is_selected_vp = obj_iter_local == active_obj and v.index in (jb_globals.selected_nodes[i][0] for i in range(len(jb_globals.selected_nodes)))
                                             is_highlighted_txt = node_id in jb_globals.highlighted_node_ids
                                             is_slidenode_hl_dot = jb_globals.highlighted_element_type == 'slidenode' and is_highlighted_txt
                                             dot_color = WHITE_COLOR # Default
+
                                             if is_selected_vp: # If selected in viewport, color it yellow
                                                 dot_color = (1.0, 1.0, 0.0, 0.9) # Yellow
+
+                                            # Check if this is the active vertex in edit mode
+                                            active_edit_vert = None
+                                            if obj_iter_local == active_obj and active_obj.mode == 'EDIT' and bm and bm.select_history:
+                                                active_element = bm.select_history.active
+                                                if isinstance(active_element, bmesh.types.BMVert):
+                                                    active_edit_vert = active_element
+                                            if active_edit_vert == v:
+                                                dot_color = PINK_COLOR
                                             node_dots_coords_colors.append((obj_matrix_copy @ v.co.copy(), dot_color))
                                     node_id_to_pos_matrix_map[node_id] = (v.co.copy(), obj_matrix_copy)
 
@@ -3030,7 +3274,8 @@ def draw_callback_view(context: bpy.types.Context):
                                                 # <<< END ADDED >>>
                                                 node_weight_raw = node_data.get('nodeWeight')
                                                 if node_weight_raw is not None:
-                                                    resolved_value = resolve_jbeam_variable_value(node_weight_raw, jb_globals.jbeam_variables_cache)
+                                                    # <<< MODIFIED: Pass context for selection and is_node_weight_context=True >>>
+                                                    resolved_value = resolve_jbeam_variable_value(node_weight_raw, jb_globals.jbeam_variables_cache, 0, context, True)
                                                     try:
                                                         numeric_value = float(resolved_value)
                                                         if math.isfinite(numeric_value):
@@ -3067,8 +3312,8 @@ def draw_callback_view(context: bpy.types.Context):
                                         node_actual_groups = set()
                                         if node_data_for_filter and isinstance(node_data_for_filter, dict):
                                             group_attr = node_data_for_filter.get('group')
-                                            if isinstance(group_attr, str): node_actual_groups.add(group_attr.lower())
-                                            elif isinstance(group_attr, list): node_actual_groups.update(g.lower() for g in group_attr if isinstance(g, str))
+                                            if isinstance(group_attr, str) and group_attr.strip(): node_actual_groups.add(group_attr.lower())
+                                            elif isinstance(group_attr, list): node_actual_groups.update(g.lower() for g in group_attr if isinstance(g, str) and g.strip())
 
                                         selected_group_for_filter_dots = ui_props.node_group_to_show
                                         if selected_group_for_filter_dots == "__NODES_WITHOUT_GROUPS__":
@@ -3078,13 +3323,22 @@ def draw_callback_view(context: bpy.types.Context):
                                     # --- End Node Group Filter Logic for Dots (Single Part) ---
 
                                     if passes_group_filter:
-                                        # Determine dot color based on selection/highlight state
+                                        # Determine dot color
                                         is_selected_vp = v.index in (jb_globals.selected_nodes[i][0] for i in range(len(jb_globals.selected_nodes)))
                                         is_highlighted_txt = node_id in jb_globals.highlighted_node_ids
                                         is_slidenode_hl_dot = jb_globals.highlighted_element_type == 'slidenode' and is_highlighted_txt
                                         dot_color = WHITE_COLOR # Default
+
                                         if is_selected_vp: # If selected in viewport, color it yellow
                                             dot_color = (1.0, 1.0, 0.0, 0.9) # Yellow
+
+                                        active_edit_vert = None
+                                        if active_obj.mode == 'EDIT' and bm and bm.select_history: # bm is for active_obj here
+                                            active_element = bm.select_history.active
+                                            if isinstance(active_element, bmesh.types.BMVert):
+                                                active_edit_vert = active_element
+                                        if active_edit_vert == v:
+                                            dot_color = PINK_COLOR
                                         node_dots_coords_colors.append((obj_matrix_copy @ v.co.copy(), dot_color))
                                 node_id_to_pos_matrix_map[node_id] = (v.co.copy(), obj_matrix_copy)
 
@@ -3100,7 +3354,9 @@ def draw_callback_view(context: bpy.types.Context):
                                             # <<< END ADDED >>>
                                             node_weight_raw = node_data.get('nodeWeight')
                                             if node_weight_raw is not None:
-                                                resolved_value = resolve_jbeam_variable_value(node_weight_raw, jb_globals.jbeam_variables_cache)
+                                                # <<< MODIFIED: Pass context for selection and is_node_weight_context=True >>>
+                                                resolved_value = resolve_jbeam_variable_value(node_weight_raw, jb_globals.jbeam_variables_cache, 0, context, True)
+
                                                 try:
                                                     numeric_value = float(resolved_value)
                                                     if math.isfinite(numeric_value):
@@ -3173,7 +3429,8 @@ def draw_callback_view(context: bpy.types.Context):
                         if type_visible: # Only process if visible
                             param_value_raw = beam_data.get(param_name)
                             if param_value_raw is not None:
-                                resolved_value = resolve_jbeam_variable_value(param_value_raw, jb_globals.jbeam_variables_cache)
+                                # For beam parameters, is_node_weight_context is False
+                                resolved_value = resolve_jbeam_variable_value(param_value_raw, jb_globals.jbeam_variables_cache, 0, context, False)
                                 try:
                                     numeric_value = float(resolved_value)
                                     if math.isfinite(numeric_value):
@@ -3235,7 +3492,7 @@ def draw_callback_view(context: bpy.types.Context):
                                                     # Use FINALIZED auto thresholds
                                                     low_thresh = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
                                                     high_thresh = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
-                                                    color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh)
+                                                    color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh, 'beam')
                                             if color_to_use is not None:
                                                 dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use))
                                         else:
@@ -3323,30 +3580,22 @@ def draw_callback_view(context: bpy.types.Context):
 
             if ui_props.toggle_cross_part_beams_vis and jb_globals.curr_vdata and 'beams' in jb_globals.curr_vdata:
                 for beam_data in jb_globals.curr_vdata['beams']:
-                    if not isinstance(beam_data, dict) or beam_data.get('partOrigin') != current_part_name: continue
+                    # Only process beams defined in the active part for this cross-part section
+                    if not isinstance(beam_data, dict) or beam_data.get('partOrigin') != current_part_name:
+                        continue
+
                     id1, id2 = beam_data.get('id1:'), beam_data.get('id2:')
                     if not id1 or not id2: continue
-                    id1_in_active_geom = id1 in node_id_to_pos_matrix_map
-                    id2_in_active_geom = id2 in node_id_to_pos_matrix_map
-                    if id1_in_active_geom and id2_in_active_geom: continue
+
+                    # Skip if either node is hidden
                     if node_id_to_hide_status.get(id1, False) or node_id_to_hide_status.get(id2, False): continue
 
                     cache1_data = all_nodes_cache.get(id1); cache2_data = all_nodes_cache.get(id2)
-                    world_pos1, world_pos2 = None, None; is_truly_cross_part = False; missing_nodes = []
-                    origin1 = cache1_data[2] if cache1_data else '?'; origin2 = cache2_data[2] if cache2_data else '?'
-                    if origin1 != origin2 and '?' not in {origin1, origin2}: is_truly_cross_part = True
-                    elif (id1_in_active_geom and not id2_in_active_geom) or (not id1_in_active_geom and id2_in_active_geom): is_truly_cross_part = True
-
-                    if is_truly_cross_part:
-                        if id1_in_active_geom: pos1_data = node_id_to_pos_matrix_map[id1]; world_pos1 = pos1_data[1] @ pos1_data[0]
-                        elif cache1_data: world_pos1 = cache1_data[0]
-                        else: missing_nodes.append(id1)
-                        if id2_in_active_geom: pos2_data = node_id_to_pos_matrix_map[id2]; world_pos2 = pos2_data[1] @ pos2_data[0]
-                        elif cache2_data: world_pos2 = cache2_data[0]
-                        else: missing_nodes.append(id2)
-
-                        if missing_nodes:
-                            if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes): # <<< ADDED CHECK
+                    if not cache1_data or not cache2_data:
+                        missing_nodes_for_this_beam = []
+                        if not cache1_data: missing_nodes_for_this_beam.append(id1)
+                        if not cache2_data: missing_nodes_for_this_beam.append(id2)
+                        if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes_for_this_beam):
                                 if ui_props.show_console_warnings_missing_nodes:
                                     line_num_str = ""
                                     beam_part_origin = beam_data.get('partOrigin', current_part_name)
@@ -3354,8 +3603,25 @@ def draw_callback_view(context: bpy.types.Context):
                                     if beam_filepath:
                                         line_num = find_beam_line_number(beam_filepath, beam_part_origin, id1, id2)
                                         if line_num is not None: line_num_str = f" (Line: {line_num})"
-                                    print(f"Warning: Could not find position data for cross-part beam nodes {missing_nodes} (Beam: {id1}-{id2}, defined in {beam_filepath or '?'} [Part: {beam_part_origin}]{line_num_str})", file=sys.stderr)
-                                warned_missing_nodes_this_rebuild.update(missing_nodes)
+                                    print(f"Warning: Could not find position data for cross-part beam nodes {missing_nodes_for_this_beam} (Beam: {id1}-{id2}, defined in {beam_filepath or '?'} [Part: {beam_part_origin}]{line_num_str})", file=sys.stderr)
+                                warned_missing_nodes_this_rebuild.update(missing_nodes_for_this_beam)
+                        continue
+
+                    origin1 = cache1_data[2]
+                    origin2 = cache2_data[2]
+
+                    # Draw if defined in current_part_name AND it's not an intra-part beam of current_part_name
+                    if not (origin1 == current_part_name and origin2 == current_part_name):
+                        # Prioritize current bmesh positions, fallback to cache
+                        wp1_from_map = node_id_to_pos_matrix_map.get(id1)
+                        world_pos1 = (wp1_from_map[1] @ wp1_from_map[0]) if wp1_from_map else (cache1_data[0] if cache1_data else None)
+
+                        wp2_from_map = node_id_to_pos_matrix_map.get(id2)
+                        world_pos2 = (wp2_from_map[1] @ wp2_from_map[0]) if wp2_from_map else (cache2_data[0] if cache2_data else None)
+
+                        if world_pos1 is None or world_pos2 is None:
+                            # Error handling for missing positions was done when checking cache1_data/cache2_data
+                            # If we reach here and a position is None, it means it wasn't in node_id_to_pos_matrix_map either.
                             continue
 
                         if ui_props.use_dynamic_beam_coloring:
@@ -3367,7 +3633,7 @@ def draw_callback_view(context: bpy.types.Context):
                                     # Use FINALIZED auto thresholds
                                     low_thresh = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
                                     high_thresh = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
-                                    color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh)
+                                    color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh, 'beam')
                             if color_to_use is not None:
                                 dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use))
                         else:
@@ -3423,7 +3689,7 @@ def draw_callback_view(context: bpy.types.Context):
                                                 # Use FINALIZED auto thresholds
                                                 low_thresh = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
                                                 high_thresh = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
-                                                color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh)
+                                                color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh, 'beam')
                                         if color_to_use is not None:
                                             dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use))
                                     else:
@@ -3509,29 +3775,18 @@ def draw_callback_view(context: bpy.types.Context):
                         obj_matrix = active_obj.matrix_world
                         for beam_data in jb_globals.curr_vdata['beams']:
                             if not isinstance(beam_data, dict) or beam_data.get('partOrigin') != current_part_name: continue
+
                             id1, id2 = beam_data.get('id1:'), beam_data.get('id2:')
                             if not id1 or not id2: continue
-                            id1_in_active_geom = id1 in node_id_to_pos_matrix_map
-                            id2_in_active_geom = id2 in node_id_to_pos_matrix_map
-                            if id1_in_active_geom and id2_in_active_geom: continue
+
                             if node_id_to_hide_status.get(id1, False) or node_id_to_hide_status.get(id2, False): continue
 
                             cache1_data = all_nodes_cache.get(id1); cache2_data = all_nodes_cache.get(id2)
-                            world_pos1, world_pos2 = None, None; is_truly_cross_part = False; missing_nodes = []
-                            origin1 = cache1_data[2] if cache1_data else '?'; origin2 = cache2_data[2] if cache2_data else '?'
-                            if origin1 != origin2 and '?' not in {origin1, origin2}: is_truly_cross_part = True
-                            elif (id1_in_active_geom and not id2_in_active_geom) or (not id1_in_active_geom and id2_in_active_geom): is_truly_cross_part = True
-
-                            if is_truly_cross_part:
-                                if id1_in_active_geom: pos1_data = node_id_to_pos_matrix_map[id1]; world_pos1 = obj_matrix @ pos1_data[0]
-                                elif cache1_data: world_pos1 = cache1_data[0]
-                                else: missing_nodes.append(id1)
-                                if id2_in_active_geom: pos2_data = node_id_to_pos_matrix_map[id2]; world_pos2 = obj_matrix @ pos2_data[0]
-                                elif cache2_data: world_pos2 = cache2_data[0]
-                                else: missing_nodes.append(id2)
-
-                                if missing_nodes:
-                                    if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes): # <<< ADDED CHECK
+                            if not cache1_data or not cache2_data:
+                                missing_nodes_for_this_beam = []
+                                if not cache1_data: missing_nodes_for_this_beam.append(id1)
+                                if not cache2_data: missing_nodes_for_this_beam.append(id2)
+                                if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_nodes_for_this_beam):
                                         if ui_props.show_console_warnings_missing_nodes:
                                             line_num_str = ""
                                             beam_part_origin = beam_data.get('partOrigin', current_part_name)
@@ -3539,8 +3794,25 @@ def draw_callback_view(context: bpy.types.Context):
                                             if active_filepath:
                                                 line_num = find_beam_line_number(active_filepath, beam_part_origin, id1, id2)
                                                 if line_num is not None: line_num_str = f" (Line: {line_num})"
-                                            print(f"Warning: Could not find position data for cross-part beam nodes {missing_nodes} (Beam: {id1}-{id2}, defined in {active_filepath or '?'} [Part: {beam_part_origin}]{line_num_str})", file=sys.stderr)
-                                        warned_missing_nodes_this_rebuild.update(missing_nodes)
+                                            print(f"Warning: Could not find position data for cross-part beam nodes {missing_nodes_for_this_beam} (Beam: {id1}-{id2}, defined in {active_filepath or '?'} [Part: {beam_part_origin}]{line_num_str})", file=sys.stderr)
+                                        warned_missing_nodes_this_rebuild.update(missing_nodes_for_this_beam)
+                                continue
+
+                            origin1 = cache1_data[2]
+                            origin2 = cache2_data[2]
+
+                            # Draw if defined in current_part_name AND it's not an intra-part beam of current_part_name
+                            if not (origin1 == current_part_name and origin2 == current_part_name):
+                                # Prioritize current bmesh positions, fallback to cache
+                                wp1_from_map = node_id_to_pos_matrix_map.get(id1)
+                                world_pos1 = (wp1_from_map[1] @ wp1_from_map[0]) if wp1_from_map else (cache1_data[0] if cache1_data else None)
+
+                                wp2_from_map = node_id_to_pos_matrix_map.get(id2)
+                                world_pos2 = (wp2_from_map[1] @ wp2_from_map[0]) if wp2_from_map else (cache2_data[0] if cache2_data else None)
+
+                                if world_pos1 is None or world_pos2 is None:
+                                    # Error handling for missing positions was done when checking cache1_data/cache2_data
+                                    # If we reach here and a position is None, it means it wasn't in node_id_to_pos_matrix_map either.
                                     continue
 
                                 if ui_props.use_dynamic_beam_coloring:
@@ -3552,7 +3824,7 @@ def draw_callback_view(context: bpy.types.Context):
                                             # Use FINALIZED auto thresholds
                                             low_thresh = auto_min_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_low
                                             high_thresh = auto_max_val if ui_props.use_auto_thresholds and auto_thresholds_valid else ui_props.dynamic_color_threshold_high
-                                            color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh)
+                                            color_to_use = _calculate_dynamic_color(param_value_raw, low_thresh, high_thresh, 'beam')
                                     if color_to_use is not None:
                                         dynamic_beam_coords_colors.append((world_pos1, world_pos2, color_to_use))
                                 else:
@@ -3691,6 +3963,48 @@ def draw_callback_view(context: bpy.types.Context):
         # --- 9. Reset dirty flags ---
         veh_render_dirty = False
         # _highlight_dirty was already reset if it was true.
+
+        # --- Calculate and Update Summed Visible Node Weight ---
+        current_sum_node_weight = 0.0
+        valid_weights_found_for_sum = False
+
+        filter_by_group_active_sum = ui_props.toggle_node_group_filter
+        selected_group_for_filter_sum = ui_props.node_group_to_show if filter_by_group_active_sum else None
+
+        # Iterate through nodes that are considered for drawing (respecting object visibility and hide status)
+        for node_id, (local_pos, matrix) in node_id_to_pos_matrix_map.items():
+            if node_id_to_hide_status.get(node_id, False): # Skip if hidden in bmesh
+                continue
+
+            # Apply Node Group Filter for the sum
+            if filter_by_group_active_sum:
+                node_data_for_filter_sum = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
+                node_actual_groups_sum = set()
+                if node_data_for_filter_sum and isinstance(node_data_for_filter_sum, dict):
+                    group_attr_sum = node_data_for_filter_sum.get('group')
+                    if isinstance(group_attr_sum, str):
+                        node_actual_groups_sum.add(group_attr_sum.lower())
+                    elif isinstance(group_attr_sum, list):
+                        node_actual_groups_sum.update(g.lower() for g in group_attr_sum if isinstance(g, str))
+
+                if selected_group_for_filter_sum == "__NODES_WITHOUT_GROUPS__":
+                    if node_actual_groups_sum:
+                        continue # Skip this node
+                elif selected_group_for_filter_sum and selected_group_for_filter_sum not in ["__ALL_WITH_GROUPS__", "_SEPARATOR_", "_NO_SPECIFIC_GROUPS_"]:
+                    if selected_group_for_filter_sum.lower() not in node_actual_groups_sum:
+                        continue # Skip if node doesn't have the filtered group
+
+            node_data = jb_globals.curr_vdata['nodes'].get(node_id) if jb_globals.curr_vdata and 'nodes' in jb_globals.curr_vdata else None
+            if node_data and isinstance(node_data, dict):
+                node_weight_raw = node_data.get('nodeWeight')
+                if node_weight_raw is not None: # <<< MODIFIED: Pass context and is_node_weight_context=True >>>
+                    resolved_weight = resolve_jbeam_variable_value(node_weight_raw, jb_globals.jbeam_variables_cache, 0, context, True)
+                    try:
+                        numeric_weight = float(resolved_weight)
+                        if math.isfinite(numeric_weight):
+                            current_sum_node_weight += numeric_weight
+                            valid_weights_found_for_sum = True
+                    except (ValueError, TypeError): pass # Ignore if not a number
         # If it wasn't true, it should remain false.
 
         # --- 10. Update UI Properties for Display --- <<< MODIFIED >>>
@@ -3700,6 +4014,12 @@ def draw_callback_view(context: bpy.types.Context):
         # For Nodes
         ui_props.auto_node_threshold_min_display = _format_number_for_display(auto_node_weight_min, auto_node_thresholds_valid)
         ui_props.auto_node_threshold_max_display = _format_number_for_display(auto_node_weight_max, auto_node_thresholds_valid)
+
+        if valid_weights_found_for_sum:
+            ui_props.summed_visible_node_weight_display = utils.to_float_str(current_sum_node_weight) # Format using utils
+        else:
+            ui_props.summed_visible_node_weight_display = "N/A"
+
         # <<< END ADDED >>>
 
         # Tag UI for redraw after updating display properties
