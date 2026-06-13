@@ -22,6 +22,7 @@ import bpy
 
 import hashlib
 import re
+import traceback # Ensure traceback is imported
 
 from . import constants
 from . import import_vehicle
@@ -29,7 +30,6 @@ from . import import_jbeam
 from . import utils
 
 SCENE_PREV_TEXTS = 'jbeam_editor_text_editor_files_text'
-#SCENE_FULL_TO_SHORT_FILENAME = 'jbeam_editor_text_editor_full_to_short_filename'
 SCENE_SHORT_TO_FULL_FILENAME = 'jbeam_editor_text_editor_short_to_full_filename'
 
 HISTORY_STACK_SIZE = 250
@@ -81,10 +81,8 @@ def write_int_file(filename: str, text: str):
 
     short_filename = _to_short_filename(filename)
     if SCENE_SHORT_TO_FULL_FILENAME not in scene:
-        #scene[SCENE_FULL_TO_SHORT_FILENAME] = {}
         scene[SCENE_SHORT_TO_FULL_FILENAME] = {}
 
-    #scene[SCENE_FULL_TO_SHORT_FILENAME][filename] = short_filename
     scene[SCENE_SHORT_TO_FULL_FILENAME][short_filename] = filename
 
     if short_filename not in bpy.data.texts:
@@ -160,9 +158,12 @@ def check_open_int_file_for_changes(context: bpy.types.Context, undoing_redoing=
     short_filename, curr_file_text = text.name, text.as_string()
     last_file_text = scene[SCENE_PREV_TEXTS].get(short_filename, False)
     if last_file_text == False:
-        return False
-    filename = scene[SCENE_SHORT_TO_FULL_FILENAME].get(short_filename)
-    if filename is None:
+        # This might be the first time checking after load, store initial state
+        scene[SCENE_PREV_TEXTS][short_filename] = curr_file_text
+        last_file_text = curr_file_text # Treat current as last for comparison below
+
+    filename_full = scene[SCENE_SHORT_TO_FULL_FILENAME].get(short_filename)
+    if filename_full is None:
         return False
 
     file_changed = False
@@ -170,24 +171,35 @@ def check_open_int_file_for_changes(context: bpy.types.Context, undoing_redoing=
     if curr_file_text != last_file_text:
         # File changed!
         if constants.DEBUG:
-            print('file changed!', filename)
+            print('file changed!', filename_full)
+
+        # Store the state *before* the change for potential initial history push
+        state_before_change = last_file_text
 
         scene[SCENE_PREV_TEXTS][short_filename] = curr_file_text
 
-        import_vehicle.on_files_change(context, {filename: curr_file_text}, True)
-        import_jbeam.on_file_change(context, filename, True)
+        import_vehicle.on_files_change(context, {filename_full: curr_file_text}, True)
+        import_jbeam.on_file_change(context, filename_full, True)
         file_changed = True
 
     if not undoing_redoing and file_changed:
         # Insert new history into history stack
-        # Overwrite history when stack idx is len(stack) - 1
         global history_stack, history_stack_idx
-        history_stack_idx += 1
-        history_stack.insert(history_stack_idx, {short_filename: curr_file_text})
-        history_stack = history_stack[:history_stack_idx + 1]
 
+        # If history is empty, push the initial state (state before the first change)
+        if not history_stack:
+             history_stack.insert(0, {short_filename: state_before_change}) # Push initial state at index 0
+             history_stack_idx = 0 # Index now points to initial state
+
+        history_stack_idx += 1
+        # Push the state *after* the change onto the stack
+        history_stack.insert(history_stack_idx, {short_filename: curr_file_text})
+        history_stack = history_stack[:history_stack_idx + 1] # Truncate if needed
+
+        # Limit history stack size
         if len(history_stack) > HISTORY_STACK_SIZE:
             history_stack.pop(0)
+            history_stack_idx -= 1 # Adjust index if we removed the first element
 
         if constants.DEBUG:
             print('len(history_stack)', len(history_stack))
@@ -199,52 +211,82 @@ def check_open_int_file_for_changes(context: bpy.types.Context, undoing_redoing=
 def check_int_files_for_changes(context: bpy.types.Context, filenames: list, undoing_redoing=False, reimport=True, regenerate_mesh=True):
     scene = context.scene
 
-    if SCENE_PREV_TEXTS not in scene:
+    if SCENE_PREV_TEXTS not in scene or SCENE_SHORT_TO_FULL_FILENAME not in scene:
         return
 
     files_changed_short_names = None
     files_changed = None
+    any_file_changed = False # Flag to track if any relevant file changed
+    states_before_change = {} # Collect states before change for this step
 
     for filename in filenames:
         short_filename = _to_short_filename(filename)
-        text = bpy.data.texts[short_filename]
+        text = bpy.data.texts.get(short_filename)
+        if not text:
+            continue
+
         curr_file_text = text.as_string()
         last_file_text = scene[SCENE_PREV_TEXTS].get(short_filename, False)
         if last_file_text == False:
-            continue
-        filename = scene[SCENE_SHORT_TO_FULL_FILENAME].get(short_filename)
-        if filename is None:
+            # This might be the first time checking after load, store initial state
+            scene[SCENE_PREV_TEXTS][short_filename] = curr_file_text
+            last_file_text = curr_file_text # Treat current as last for comparison below
+
+        filename_full = scene[SCENE_SHORT_TO_FULL_FILENAME].get(short_filename)
+        if filename_full is None:
             continue
 
         if curr_file_text != last_file_text:
+            any_file_changed = True # Mark change
             # File changed!
             if constants.DEBUG:
-                print('file changed!', filename)
+                print('file changed!', filename_full)
+
+            # Store the state *before* the change for history
+            states_before_change[short_filename] = last_file_text
 
             scene[SCENE_PREV_TEXTS][short_filename] = curr_file_text
 
             if reimport:
-                import_jbeam.on_file_change(context, filename, regenerate_mesh)
+                # Check if it's the active file before calling single part reimport
+                active_obj = context.active_object
+                active_filepath = None
+                if active_obj and active_obj.data and active_obj.data.get(constants.MESH_JBEAM_FILE_PATH):
+                     active_filepath = active_obj.data.get(constants.MESH_JBEAM_FILE_PATH)
+
+                if filename_full == active_filepath:
+                    import_jbeam.on_file_change(context, filename_full, regenerate_mesh)
 
             if files_changed_short_names is None:
                 files_changed_short_names = {}
                 files_changed = {}
+            # Store the current text for reimport map
             files_changed_short_names[short_filename] = curr_file_text
-            files_changed[filename] = curr_file_text
+            files_changed[filename_full] = curr_file_text
 
     if reimport and files_changed is not None:
+        # Vehicle reimport handles multiple file changes
         import_vehicle.on_files_change(context, files_changed, regenerate_mesh)
 
-    if not undoing_redoing and files_changed_short_names is not None:
+    if not undoing_redoing and any_file_changed: # Check if any file actually changed
         # Insert new history into history stack
-        # Overwrite history when stack idx is less than len(stack) - 1
         global history_stack, history_stack_idx
-        history_stack_idx += 1
-        history_stack.insert(history_stack_idx, files_changed_short_names)
-        history_stack = history_stack[:history_stack_idx + 1]
 
+        # If history is empty, push the initial state(s) (state before the first change)
+        if not history_stack:
+             history_stack.insert(0, states_before_change.copy()) # Push initial state(s) at index 0
+             history_stack_idx = 0 # Index now points to initial state
+
+        history_stack_idx += 1
+        # Push the dictionary of states *after* the changes onto the stack
+        # files_changed_short_names contains the current states
+        history_stack.insert(history_stack_idx, files_changed_short_names.copy()) # Push a copy
+        history_stack = history_stack[:history_stack_idx + 1] # Truncate if needed
+
+        # Limit history stack size
         if len(history_stack) > HISTORY_STACK_SIZE:
             history_stack.pop(0)
+            history_stack_idx -= 1 # Adjust index if we removed the first element
 
         if constants.DEBUG:
             print('len(history_stack)', len(history_stack))
@@ -253,7 +295,10 @@ def check_int_files_for_changes(context: bpy.types.Context, filenames: list, und
 
 def check_all_int_files_for_changes(context: bpy.types.Context, undoing_redoing=False, reimport=True):
     scene = context.scene
-    check_int_files_for_changes(context, scene[SCENE_SHORT_TO_FULL_FILENAME].values(), undoing_redoing, reimport)
+    if SCENE_SHORT_TO_FULL_FILENAME not in scene:
+        return
+    # Pass a list copy of values to avoid issues if the dictionary changes during iteration
+    check_int_files_for_changes(context, list(scene[SCENE_SHORT_TO_FULL_FILENAME].values()), undoing_redoing, reimport)
 
 
 def on_undo_redo(context: bpy.types.Context, undoing: bool):
@@ -262,36 +307,105 @@ def on_undo_redo(context: bpy.types.Context, undoing: bool):
     if SCENE_SHORT_TO_FULL_FILENAME not in scene or SCENE_PREV_TEXTS not in scene:
         return
 
-    global history_stack_idx
+    global history_stack_idx, history_stack # Need history_stack too
 
-    if history_stack_idx == -1:
+    if not history_stack: # Cannot undo/redo if history is empty
+        print("History stack is empty.")
         return
 
-    if undoing:
-        history_stack_idx -= 1
-    else:
-        history_stack_idx += 1
+    target_idx = -1
 
-    history_stack_idx = utils.clamp(history_stack_idx, 0, len(history_stack) - 1)
+    if undoing:
+        if history_stack_idx > 0: # Can only undo if not at the initial state (index 0)
+            target_idx = history_stack_idx - 1
+        else:
+            print("Cannot undo further.")
+            return # Cannot undo initial state
+    else: # Redoing
+        if history_stack_idx < len(history_stack) - 1: # Can only redo if not at the last state
+            target_idx = history_stack_idx + 1
+        else:
+            print("Cannot redo further.")
+            return # Cannot redo last state
 
     if constants.DEBUG:
+        print(f"{'Undoing' if undoing else 'Redoing'} to index: {target_idx}")
         print('len(history_stack)', len(history_stack))
-        print('history_stack_idx', history_stack_idx)
+        print('history_stack_idx before', history_stack_idx)
 
-    entry = history_stack[history_stack_idx]
-    filepaths = []
+    # Update the global index *after* determining the target
+    history_stack_idx = target_idx
 
-    for short_filename, text in entry.items():
-        if short_filename not in bpy.data.texts:
-            return
+    if constants.DEBUG:
+        print('history_stack_idx after', history_stack_idx)
 
-        file = bpy.data.texts[short_filename]
+    try: # Add try-except block for safety during state application
+        entry = history_stack[history_stack_idx] # Retrieve state at the new index
+        filepaths = []
+        files_changed_for_reimport = {} # Collect changes for reimport call
 
-        curr_line, curr_char = file.current_line_index, file.current_character
-        file.clear()
-        file.write(text)
-        file.cursor_set(curr_line, character=curr_char)
+        for short_filename, text_content in entry.items():
+            if short_filename not in bpy.data.texts:
+                print(f"Warning: Text object {short_filename} not found during undo/redo.")
+                continue
 
-        filepaths.append(scene[SCENE_SHORT_TO_FULL_FILENAME].get(short_filename))
+            file = bpy.data.texts[short_filename]
 
-    check_int_files_for_changes(context, filepaths, True)
+            # Check if the content actually needs changing to avoid unnecessary updates
+            if file.as_string() != text_content:
+                curr_line, curr_char = file.current_line_index, file.current_character
+                file.clear()
+                file.write(text_content)
+                file.cursor_set(curr_line, character=curr_char)
+
+            # Update the 'previous' text state to match the state we just restored
+            # This prevents the next check_..._for_changes from thinking a change occurred
+            scene[SCENE_PREV_TEXTS][short_filename] = text_content # <<< IMPORTANT
+
+            full_filepath = scene[SCENE_SHORT_TO_FULL_FILENAME].get(short_filename)
+            if full_filepath:
+                filepaths.append(full_filepath)
+                files_changed_for_reimport[full_filepath] = text_content # Use full path for reimport
+
+        # Reimport based on the restored state, but don't trigger history push
+        # Pass regenerate_mesh=True because the mesh should reflect the restored text state
+        # Pass reimport=True to actually trigger the reimport logic
+        # Pass undoing_redoing=True to prevent history push
+        if filepaths:
+            # Single part reimport (if active object matches one of the changed files)
+            active_obj = context.active_object
+            active_filepath = None
+            if active_obj and active_obj.data and active_obj.data.get(constants.MESH_JBEAM_FILE_PATH):
+                 active_filepath = active_obj.data.get(constants.MESH_JBEAM_FILE_PATH)
+
+            if active_filepath in files_changed_for_reimport:
+                # Call reimport directly, regenerate mesh
+                import_jbeam.reimport_jbeam(context, None, active_obj, active_filepath, True)
+
+            # Vehicle reimport (handles multiple files)
+            # Find the relevant vehicle collection based on the changed files
+            veh_collection_to_reimport = None
+            for coll in bpy.data.collections:
+                if coll.get(constants.COLLECTION_VEHICLE_MODEL):
+                    coll_files = coll.get(constants.COLLECTION_VEH_FILES, [])
+                    # Check if any of the changed files belong to this vehicle collection
+                    if any(fp in coll_files for fp in files_changed_for_reimport):
+                        veh_collection_to_reimport = coll
+                        break # Assume a file belongs to only one vehicle collection
+
+            if veh_collection_to_reimport:
+                 # Call reimport directly, regenerate mesh
+                 import_vehicle.reimport_vehicle(context, veh_collection_to_reimport, files_changed_for_reimport, True)
+
+        if constants.DEBUG:
+            print(f"Applied state from index {history_stack_idx}")
+
+    except IndexError:
+        print(f"Error: History index {history_stack_idx} out of bounds.", file=sys.stderr)
+        # Attempt to recover the index? Maybe clamp it?
+        history_stack_idx = utils.clamp(history_stack_idx, 0, len(history_stack) - 1)
+        print(f"History index clamped to: {history_stack_idx}")
+    except Exception as e:
+        print(f"Error applying undo/redo state: {e}", file=sys.stderr)
+        traceback.print_exc()
+
