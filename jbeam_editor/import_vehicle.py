@@ -100,7 +100,7 @@ def load_vehicle(vehicle_directories: list[str], vehicle_config: dict, model_nam
 
     jbeam_node_beam.process(vehicle)
 
-    # <<< FIX START: Attempt to add partOrigin post-hoc >>>
+    # Attempt to add partOrigin post-hoc >>>
     # This is a workaround assuming jbeam_node_beam.process should have done this.
     # It relies on the 'nodes' still having partOrigin after processing.
     if 'nodes' in vehicle and 'beams' in vehicle:
@@ -141,7 +141,6 @@ def load_vehicle(vehicle_directories: list[str], vehicle_config: dict, model_nam
         # Commented out the original message:
         # if beams_missing_origin > 0:
         #     print(f"Attempted to fix missing 'partOrigin' in {beams_missing_origin} beams. Successfully updated: {beams_updated_count}. Unable to fix: {beams_unable_to_fix}")
-    # <<< FIX END >>>
 
     vehicle['vehicleDirectory'] = vehicle_directories[0]
     vehicle['activeParts'] = active_parts_orig
@@ -476,7 +475,7 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
                         except (ValueError, IndexError):
                              print(f"Warning: Could not parse beam index for storing hidden state (vehicle): {indices_str}", file=sys.stderr)
 
-            # --- ADDED: Store Vertex Hidden State ---
+            # Store Vertex Hidden State ---
             node_id_layer = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
             # Get node origin layer for vertex state key >>>
             node_origin_layer = temp_bm.verts.layers.string.get(constants.VL_NODE_PART_ORIGIN)
@@ -490,7 +489,6 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
                         # Use part_origin from vertex layer for key >>>
                         part_origin = vert[node_origin_layer].decode('utf-8')
                         all_hidden_verts_state[(part_origin, node_id)] = vert.hide
-            # --- END ADDED ---
 
         except Exception as e:
             print(f"Error storing hidden state for {part}: {e}", file=sys.stderr)
@@ -550,7 +548,7 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
                         print(f"Warning: Could not parse beam index for applying hidden state (vehicle): {indices_str}", file=sys.stderr)
         # Apply hidden edge states ---
 
-        # --- ADDED: Apply hidden vertex states ---
+        # Apply hidden vertex states ---
         node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
         # Get node origin layer for vertex state key >>>
         node_origin_layer = bm.verts.layers.string.get(constants.VL_NODE_PART_ORIGIN)
@@ -565,7 +563,6 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
                     part_origin = vert[node_origin_layer].decode('utf-8')
                     if (part_origin, node_id) in all_hidden_verts_state:
                         vert.hide = all_hidden_verts_state[(part_origin, node_id)]
-        # --- END ADDED ---
 
         bm.normal_update()
 

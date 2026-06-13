@@ -23,11 +23,16 @@ import bpy
 import hashlib
 import re
 import traceback # Ensure traceback is imported
+import sys # <<< Import sys
 
 from . import constants
 from . import import_vehicle
 from . import import_jbeam
 from . import utils
+# <<< Import drawing module >>>
+from . import drawing
+# <<< Import globals >>>
+from . import globals as jb_globals
 
 SCENE_PREV_TEXTS = 'jbeam_editor_text_editor_files_text'
 SCENE_SHORT_TO_FULL_FILENAME = 'jbeam_editor_text_editor_short_to_full_filename'
@@ -174,36 +179,79 @@ def check_open_int_file_for_changes(context: bpy.types.Context, undoing_redoing=
             print('file changed!', filename_full)
 
         # Store the state *before* the change for potential initial history push
-        state_before_change = last_file_text
+        # state_before_change = last_file_text # <<< REMOVED >>>
 
         scene[SCENE_PREV_TEXTS][short_filename] = curr_file_text
 
+        # <<< MOVED: Reimport BEFORE highlighting >>>
         import_vehicle.on_files_change(context, {filename_full: curr_file_text}, True)
         import_jbeam.on_file_change(context, filename_full, True)
         file_changed = True
+        # <<< END MOVE >>>
 
-    if not undoing_redoing and file_changed:
-        # Insert new history into history stack
-        global history_stack, history_stack_idx
+        # <<< Trigger highlight update AFTER text change and reimport >>>
+        ui_props = scene.ui_properties
+        if ui_props.highlight_element_on_click:
+            try:
+                # <<< ADD EXPLICIT REFRESH >>>
+                drawing.refresh_curr_vdata(True)
+                # <<< END ADD >>>
+                # Trigger highlight update based on current cursor position after text change
+                current_line_index = text.current_line_index # Get current line
+                # <<< Use drawing. prefix >>>
+                drawing.find_and_highlight_element_for_line(context, text, current_line_index)
+            except Exception as e:
+                print(f"Error during highlight update on text change: {e}", file=sys.stderr)
+                traceback.print_exc()
+        # <<< End highlight update trigger >>>
 
-        # If history is empty, push the initial state (state before the first change)
-        if not history_stack:
-             history_stack.insert(0, {short_filename: state_before_change}) # Push initial state at index 0
-             history_stack_idx = 0 # Index now points to initial state
+        # <<< MODIFIED History Push Logic >>>
+        if not undoing_redoing:
+            global history_stack, history_stack_idx
 
-        history_stack_idx += 1
-        # Push the state *after* the change onto the stack
-        history_stack.insert(history_stack_idx, {short_filename: curr_file_text})
-        history_stack = history_stack[:history_stack_idx + 1] # Truncate if needed
+            # If history is empty, push the state *before* this change as the initial state.
+            if not history_stack:
+                history_stack.insert(0, {short_filename: last_file_text}) # Use last_file_text
+                history_stack_idx = 0
 
-        # Limit history stack size
-        if len(history_stack) > HISTORY_STACK_SIZE:
-            history_stack.pop(0)
-            history_stack_idx -= 1 # Adjust index if we removed the first element
+            # Now, push the *current* state (after the change)
+            history_stack_idx += 1
+            history_stack.insert(history_stack_idx, {short_filename: curr_file_text}) # Use curr_file_text
+            history_stack = history_stack[:history_stack_idx + 1] # Truncate if needed
 
-        if constants.DEBUG:
-            print('len(history_stack)', len(history_stack))
-            print('history_stack_idx', history_stack_idx)
+            # Limit history stack size
+            if len(history_stack) > HISTORY_STACK_SIZE:
+                history_stack.pop(0)
+                history_stack_idx -= 1
+
+            if constants.DEBUG:
+                print('len(history_stack)', len(history_stack))
+                print('history_stack_idx', history_stack_idx)
+        # <<< END MODIFIED History Push Logic >>>
+
+    # <<< REMOVED Original History Push Block >>>
+    # if not undoing_redoing and file_changed:
+    #     # Insert new history into history stack
+    #     global history_stack, history_stack_idx
+    #
+    #     # If history is empty, push the initial state (state before the first change)
+    #     if not history_stack:
+    #          history_stack.insert(0, {short_filename: state_before_change}) # Push initial state at index 0
+    #          history_stack_idx = 0 # Index now points to initial state
+    #
+    #     history_stack_idx += 1
+    #     # Push the state *after* the change onto the stack
+    #     history_stack.insert(history_stack_idx, {short_filename: curr_file_text})
+    #     history_stack = history_stack[:history_stack_idx + 1] # Truncate if needed
+    #
+    #     # Limit history stack size
+    #     if len(history_stack) > HISTORY_STACK_SIZE:
+    #         history_stack.pop(0)
+    #         history_stack_idx -= 1 # Adjust index if we removed the first element
+    #
+    #     if constants.DEBUG:
+    #         print('len(history_stack)', len(history_stack))
+    #         print('history_stack_idx', history_stack_idx)
 
     return file_changed
 
@@ -214,10 +262,11 @@ def check_int_files_for_changes(context: bpy.types.Context, filenames: list, und
     if SCENE_PREV_TEXTS not in scene or SCENE_SHORT_TO_FULL_FILENAME not in scene:
         return
 
-    files_changed_short_names = None
+    files_changed_short_names = None # Initialize as None
     files_changed = None
     any_file_changed = False # Flag to track if any relevant file changed
     states_before_change = {} # Collect states before change for this step
+    active_text_to_highlight = None # Store active text if it changed
 
     for filename in filenames:
         short_filename = _to_short_filename(filename)
@@ -237,49 +286,86 @@ def check_int_files_for_changes(context: bpy.types.Context, filenames: list, und
             continue
 
         if curr_file_text != last_file_text:
-            any_file_changed = True # Mark change
+            if not any_file_changed: # First change detected in this run
+                any_file_changed = True # Mark change
+                # <<< FIX: Initialize files_changed_short_names here >>>
+                files_changed_short_names = {}
+                if reimport:
+                    files_changed = {}
+                # <<< END FIX >>>
+
             # File changed!
             if constants.DEBUG:
                 print('file changed!', filename_full)
 
             # Store the state *before* the change for history
-            states_before_change[short_filename] = last_file_text
+            states_before_change[short_filename] = last_file_text # <<< Keep this
 
             scene[SCENE_PREV_TEXTS][short_filename] = curr_file_text
 
-            if reimport:
-                # Check if it's the active file before calling single part reimport
-                active_obj = context.active_object
-                active_filepath = None
-                if active_obj and active_obj.data and active_obj.data.get(constants.MESH_JBEAM_FILE_PATH):
-                     active_filepath = active_obj.data.get(constants.MESH_JBEAM_FILE_PATH)
+            # Check if this is the active file *before* reimporting
+            active_text = None
+            for area in context.screen.areas:
+                if area.type == "TEXT_EDITOR":
+                    if area.spaces.active and area.spaces.active.text == text:
+                        active_text = text
+                        active_text_to_highlight = active_text # Mark for highlighting later
+                        break
 
-                if filename_full == active_filepath:
-                    import_jbeam.on_file_change(context, filename_full, regenerate_mesh)
-
-            if files_changed_short_names is None:
-                files_changed_short_names = {}
-                files_changed = {}
-            # Store the current text for reimport map
+            # <<< MOVED: Reimport logic moved down, but collect changes here >>>
+            # Store the current text for reimport map and history map
+            # files_changed_short_names is guaranteed to be a dict here if any_file_changed is True
             files_changed_short_names[short_filename] = curr_file_text
-            files_changed[filename_full] = curr_file_text
+            if reimport and files_changed is not None: # Check files_changed as well
+                files_changed[filename_full] = curr_file_text
 
+
+    # <<< MOVED: Perform reimport AFTER checking all files for changes >>>
     if reimport and files_changed is not None:
+        # Check if it's the active file before calling single part reimport
+        active_obj = context.active_object
+        active_filepath = None
+        if active_obj and active_obj.data and active_obj.data.get(constants.MESH_JBEAM_FILE_PATH):
+             active_filepath = active_obj.data.get(constants.MESH_JBEAM_FILE_PATH)
+
+        # Perform single part reimport if active file changed
+        if active_filepath in files_changed:
+            import_jbeam.on_file_change(context, active_filepath, regenerate_mesh)
+
         # Vehicle reimport handles multiple file changes
         import_vehicle.on_files_change(context, files_changed, regenerate_mesh)
+    # <<< END MOVE >>>
 
+    # <<< MOVED: Trigger highlight update AFTER reimport >>>
+    if active_text_to_highlight:
+        ui_props = scene.ui_properties
+        if ui_props.highlight_element_on_click:
+            try:
+                # <<< ADD EXPLICIT REFRESH >>>
+                drawing.refresh_curr_vdata(True)
+                # <<< END ADD >>>
+                current_line_index = active_text_to_highlight.current_line_index
+                # <<< Use drawing. prefix >>>
+                drawing.find_and_highlight_element_for_line(context, active_text_to_highlight, current_line_index)
+            except Exception as e:
+                print(f"Error during highlight update on text change (multi-file check): {e}", file=sys.stderr)
+                traceback.print_exc()
+    # <<< End highlight update trigger >>>
+
+    # <<< MODIFIED History Push Logic >>>
     if not undoing_redoing and any_file_changed: # Check if any file actually changed
-        # Insert new history into history stack
         global history_stack, history_stack_idx
 
-        # If history is empty, push the initial state(s) (state before the first change)
+        # If history is empty, push the collected states *before* this change batch.
         if not history_stack:
-             history_stack.insert(0, states_before_change.copy()) # Push initial state(s) at index 0
-             history_stack_idx = 0 # Index now points to initial state
+            # states_before_change was collected earlier in the loop
+            history_stack.insert(0, states_before_change.copy())
+            history_stack_idx = 0
 
+        # Now, push the *current* states (after the changes in this batch)
         history_stack_idx += 1
-        # Push the dictionary of states *after* the changes onto the stack
         # files_changed_short_names contains the current states
+        # files_changed_short_names is guaranteed to be a dict here
         history_stack.insert(history_stack_idx, files_changed_short_names.copy()) # Push a copy
         history_stack = history_stack[:history_stack_idx + 1] # Truncate if needed
 
@@ -291,6 +377,33 @@ def check_int_files_for_changes(context: bpy.types.Context, filenames: list, und
         if constants.DEBUG:
             print('len(history_stack)', len(history_stack))
             print('history_stack_idx', history_stack_idx)
+    # <<< END MODIFIED History Push Logic >>>
+
+    # <<< REMOVED Original History Push Block >>>
+    # if not undoing_redoing and any_file_changed: # Check if any file actually changed
+    #     # Insert new history into history stack
+    #     global history_stack, history_stack_idx
+    #
+    #     # If history is empty, push the initial state(s) (state before the first change)
+    #     if not history_stack:
+    #          history_stack.insert(0, states_before_change.copy()) # Push initial state(s) at index 0
+    #          history_stack_idx = 0 # Index now points to initial state
+    #
+    #     history_stack_idx += 1
+    #     # Push the dictionary of states *after* the changes onto the stack
+    #     # files_changed_short_names contains the current states
+    #     # files_changed_short_names is guaranteed to be a dict here
+    #     history_stack.insert(history_stack_idx, files_changed_short_names.copy()) # Push a copy
+    #     history_stack = history_stack[:history_stack_idx + 1] # Truncate if needed
+    #
+    #     # Limit history stack size
+    #     if len(history_stack) > HISTORY_STACK_SIZE:
+    #         history_stack.pop(0)
+    #         history_stack_idx -= 1 # Adjust index if we removed the first element
+    #
+    #     if constants.DEBUG:
+    #         print('len(history_stack)', len(history_stack))
+    #         print('history_stack_idx', history_stack_idx)
 
 
 def check_all_int_files_for_changes(context: bpy.types.Context, undoing_redoing=False, reimport=True):
@@ -343,6 +456,7 @@ def on_undo_redo(context: bpy.types.Context, undoing: bool):
         entry = history_stack[history_stack_idx] # Retrieve state at the new index
         filepaths = []
         files_changed_for_reimport = {} # Collect changes for reimport call
+        active_text_restored = None # Track if the active text editor file was restored
 
         for short_filename, text_content in entry.items():
             if short_filename not in bpy.data.texts:
@@ -367,6 +481,15 @@ def on_undo_redo(context: bpy.types.Context, undoing: bool):
                 filepaths.append(full_filepath)
                 files_changed_for_reimport[full_filepath] = text_content # Use full path for reimport
 
+            # Check if this is the active text editor file
+            for area in context.screen.areas:
+                if area.type == "TEXT_EDITOR":
+                    if area.spaces.active and area.spaces.active.text == file:
+                        active_text_restored = file
+                        break
+            if active_text_restored: break # Found the active one
+
+        # <<< MOVED: Reimport BEFORE highlighting >>>
         # Reimport based on the restored state, but don't trigger history push
         # Pass regenerate_mesh=True because the mesh should reflect the restored text state
         # Pass reimport=True to actually trigger the reimport logic
@@ -396,6 +519,24 @@ def on_undo_redo(context: bpy.types.Context, undoing: bool):
             if veh_collection_to_reimport:
                  # Call reimport directly, regenerate mesh
                  import_vehicle.reimport_vehicle(context, veh_collection_to_reimport, files_changed_for_reimport, True)
+        # <<< END MOVE >>>
+
+        # <<< Trigger highlight update AFTER reimport >>>
+        if active_text_restored:
+            ui_props = scene.ui_properties
+            if ui_props.highlight_element_on_click:
+                try:
+                    # <<< ADD EXPLICIT REFRESH >>>
+                    drawing.refresh_curr_vdata(True)
+                    # <<< END ADD >>>
+                    current_line_index = active_text_restored.current_line_index
+                    # <<< Use drawing. prefix >>>
+                    drawing.find_and_highlight_element_for_line(context, active_text_restored, current_line_index)
+                except Exception as e:
+                    print(f"Error during highlight update on undo/redo: {e}", file=sys.stderr)
+                    traceback.print_exc()
+        # <<< End highlight update trigger >>>
+
 
         if constants.DEBUG:
             print(f"Applied state from index {history_stack_idx}")

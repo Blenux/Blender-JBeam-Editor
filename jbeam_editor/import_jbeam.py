@@ -235,7 +235,7 @@ def import_jbeam_part(context: bpy.types.Context, jbeam_file_path: str, jbeam_fi
             raise Exception('JBeam processing error.')
         jbeam_node_beam.process(part_data)
 
-        # <<< FIX START: Ensure partOrigin is set for single part import >>>
+        # Ensure partOrigin is set for single part import >>>
         if 'beams' in part_data:
             beams_updated_count = 0
             for beam in part_data['beams']:
@@ -246,7 +246,6 @@ def import_jbeam_part(context: bpy.types.Context, jbeam_file_path: str, jbeam_fi
             # Commented out the print statement
             # if beams_updated_count > 0:
             #      print(f"Assigned missing 'partOrigin' to {beams_updated_count} beams in '{chosen_part}'.")
-        # <<< FIX END >>>
 
         vertices, edges, tris, quads, node_ids = get_vertices_edges_faces(part_data)
 
@@ -303,7 +302,7 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
             raise Exception('JBeam processing error.')
         jbeam_node_beam.process(part_data)
 
-        # <<< FIX START: Ensure partOrigin is set for single part reimport >>>
+        # Ensure partOrigin is set for single part reimport >>>
         if 'beams' in part_data:
             beams_updated_count = 0
             for beam in part_data['beams']:
@@ -314,7 +313,6 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
             # Commented out the print statement
             # if beams_updated_count > 0:
             #      print(f"Assigned missing 'partOrigin' to {beams_updated_count} beams in '{chosen_part}' during reimport.")
-        # <<< FIX END >>>
 
         if regenerate_mesh:
             vertices, edges, tris, quads, node_ids = get_vertices_edges_faces(part_data)
@@ -349,7 +347,7 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
                             except (ValueError, IndexError):
                                 print(f"Warning: Could not parse beam index for storing hidden state: {indices_str}", file=sys.stderr)
 
-                # --- ADDED: Store Vertex Hidden State ---
+                # Store Vertex Hidden State ---
                 node_id_layer = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
                 # Get node origin layer for vertex state key >>>
                 node_origin_layer = temp_bm.verts.layers.string.get(constants.VL_NODE_PART_ORIGIN)
@@ -363,7 +361,6 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
                             # Use part_origin from vertex layer for key >>>
                             part_origin = vert[node_origin_layer].decode('utf-8')
                             hidden_verts_state[(part_origin, node_id)] = vert.hide
-                # --- END ADDED ---
 
             except Exception as e:
                  print(f"Error storing hidden states: {e}", file=sys.stderr) # Combined error message
@@ -403,7 +400,7 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
                             # Should not happen often if storing worked, but good practice
                             print(f"Warning: Could not parse beam index for applying hidden state: {indices_str}", file=sys.stderr)
 
-            # --- ADDED: Apply Vertex Hidden State ---
+            # Apply Vertex Hidden State ---
             node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
             # Get node origin layer for vertex state key >>>
             node_origin_layer = bm.verts.layers.string.get(constants.VL_NODE_PART_ORIGIN)
@@ -418,7 +415,6 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
                         part_origin = vert[node_origin_layer].decode('utf-8')
                         if (part_origin, node_id) in hidden_verts_state:
                             vert.hide = hidden_verts_state[(part_origin, node_id)]
-            # --- END ADDED ---
 
             bm.normal_update()
 
