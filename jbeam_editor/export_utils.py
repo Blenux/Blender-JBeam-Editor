@@ -21,6 +21,7 @@
 from mathutils import Vector
 import sys
 import traceback
+import uuid # <<< Import uuid
 
 import bpy
 
@@ -194,9 +195,33 @@ def add_jbeam_nodes(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 def add_jbeam_beams(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, beams_to_add: list):
     i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx)
 
-    # Insert new beams at bottom of beams section
+    # Check if "//ADDED BEAMS BY EDITOR" comment exists within the current beam section
+    comment_text = '//ADDED BEAMS BY EDITOR'
+    comment_already_exists_in_section = False
+    # Iterate only within the bounds of the current beam section
+    for k in range(jbeam_section_start_node_idx, jbeam_section_end_node_idx):
+        node = ast_nodes[k]
+        if node.data_type == 'wsc' and comment_text in node.value:
+            comment_already_exists_in_section = True
+            break # Found it within the section, no need to check further
 
+    # Add "//ADDED BEAMS BY EDITOR" comment only if beams are being added and comment doesn't already exist in this section
+    if beams_to_add and not comment_already_exists_in_section:
+        # Add an extra newline before the standard indent and comment text
+        comment_wsc_value = '\n' + NL_TWO_INDENT + comment_text
+        if node_after_entry:
+            # Append comment to the existing whitespace node before the first new beam's indent
+            node_after_entry.value += comment_wsc_value
+            # Don't set node_after_entry to None here, the loop needs it for the first beam's indent
+        else:
+            # Insert comment as a new whitespace node. The loop will handle the first beam's indent.
+            ast_nodes.insert(i, ASTNode('wsc', comment_wsc_value))
+            i += 1 # Adjust insertion index because we added a node
+
+    # Insert new beams at bottom of beams section (Original Loop Logic)
     for (node_id_1, node_id_2) in beams_to_add:
+        # This logic correctly adds the NL_TWO_INDENT *after* the comment (if added),
+        # or as a new node for subsequent beams.
         if node_after_entry:
             node_after_entry.value += NL_TWO_INDENT
             node_after_entry = None
@@ -206,15 +231,23 @@ def add_jbeam_beams(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 
         ast_nodes.insert(i + 0, ASTNode('['))
         ast_nodes.insert(i + 1, ASTNode('"', node_id_1))
-        ast_nodes.insert(i + 2, ASTNode('wsc', ','))
+        ast_nodes.insert(i + 2, ASTNode('wsc', ',')) # Keep comma wsc separate for clarity
         ast_nodes.insert(i + 3, ASTNode('"', node_id_2))
         ast_nodes.insert(i + 4, ASTNode(']'))
-        ast_nodes.insert(i + 5, ASTNode('wsc', ','))
+        ast_nodes.insert(i + 5, ASTNode('wsc', ',')) # Keep comma wsc separate
         i += 6
 
     # Add modified original last WSCS back to end of section
     if node_2_after_entry:
-        ast_nodes[i - 1].value += node_2_after_entry.value
+        # Append the original trailing whitespace after the last added comma's whitespace node
+        if i > 0 and ast_nodes[i - 1].data_type == 'wsc':
+             ast_nodes[i - 1].value += node_2_after_entry.value
+        # If no beams were added, but setup modified whitespace, handle it?
+        # This case seems unlikely if node_2_after_entry exists and beams_to_add was empty.
+        # If beams_to_add was empty and comment was not added, node_after_entry might still exist.
+        elif node_after_entry:
+             node_after_entry.value += node_2_after_entry.value
+
 
     #print_ast_nodes(ast_nodes, i, 10, True)
     return i
@@ -444,26 +477,57 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
         node_part_origin = v[part_origin_layer].decode('utf-8')
         pos: Vector = obj.matrix_world @ v.co
 
+        # --- MODIFICATION START: Handle TEMP nodes ---
+        if node_id.startswith('TEMP_'):
+            # Determine prefix based on local X coordinate
+            if v.co.x < -1e-6: prefix = "R"
+            elif v.co.x > 1e-6: prefix = "L"
+            else: prefix = "M"
+
+            # Generate final ID and update layers
+            final_node_id = f"{prefix}_{uuid.uuid4()}"
+            final_node_id_bytes = bytes(final_node_id, 'utf-8')
+            v[node_id_layer] = final_node_id_bytes
+            v[init_node_id_layer] = final_node_id_bytes # Update init ID as well
+
+            # Update local variables for further processing
+            init_node_id = final_node_id
+            node_id = final_node_id
+
+            # Add this node to the 'add' list for the correct part
+            part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
+            part_actions.nodes_to_add[node_id] = pos # Use final ID and world position
+            # Skip rename/move checks for this newly finalized node
+            blender_nodes[init_node_id] = {'curr_node_id': node_id, 'pos': pos.to_tuple(), 'partOrigin': node_part_origin} # Store final pos
+            continue # Go to next vertex
+        # --- MODIFICATION END ---
+
         init_node_data = init_nodes_data.get(init_node_id)
         if init_node_data is None:
-            part_actions: PartNodesActions = parts_actions.setdefault(jbeam_part, PartNodesActions())
-            part_actions.nodes_to_add[init_node_id] = pos
+            # This case should ideally not happen for non-TEMP nodes if logic is correct,
+            # but handle it as an addition just in case.
+            part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
+            part_actions.nodes_to_add[node_id] = pos
+            blender_nodes[init_node_id] = {'curr_node_id': node_id, 'pos': pos.to_tuple(), 'partOrigin': node_part_origin}
             continue
 
+        # Check for movement
         init_pos = init_node_data['pos']
         if abs(pos.x - init_pos[0]) > 0.000001 or abs(pos.y - init_pos[1]) > 0.000001 or abs(pos.z - init_pos[2]) > 0.000001:
             part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
             part_actions.nodes_to_move[node_id] = pos
 
+        # Calculate position considering expressions (for SJSON data update)
         new_pos_tup = undo_node_move_offset_and_apply_translation_to_expr(init_node_data, pos)
 
+        # Check for rename
         if init_node_id != node_id:
             affected_part = True if affect_node_references else node_part_origin
             part_actions: PartNodesActions = parts_actions.setdefault(affected_part, PartNodesActions())
             part_actions.nodes_to_rename[init_node_id] = node_id
 
         blender_nodes[init_node_id] = {'curr_node_id': node_id, 'pos': new_pos_tup, 'partOrigin': node_part_origin}
-        #v[init_node_id_layer] = bytes(node_id, 'utf-8')
+        #v[init_node_id_layer] = bytes(node_id, 'utf-8') # Don't change init_node_id here anymore
 
     # Get nodes to delete
     for init_node_id, init_node_data in init_nodes_data.items():
@@ -482,6 +546,7 @@ def get_beams_add_remove(obj: bpy.types.Object, bm: bmesh.types.BMesh, init_beam
     beams_to_add, beams_to_delete = set(), set()
 
     init_node_id_layer = bm.verts.layers.string[constants.VL_INIT_NODE_ID]
+    node_id_layer = bm.verts.layers.string[constants.VL_NODE_ID] # <<< Get current node ID layer
     beam_indices_layer = bm.edges.layers.string[constants.EL_BEAM_INDICES]
 
     blender_beams = set()
@@ -495,7 +560,8 @@ def get_beams_add_remove(obj: bpy.types.Object, bm: bmesh.types.BMesh, init_beam
             continue
         if beam_indices == '-1': # Newly added beam
             v1, v2 = e.verts[0], e.verts[1]
-            v1_node_id, v2_node_id = v1[init_node_id_layer].decode('utf-8'), v2[init_node_id_layer].decode('utf-8')
+            # <<< Use current node ID layer for newly added beams >>>
+            v1_node_id, v2_node_id = v1[node_id_layer].decode('utf-8'), v2[node_id_layer].decode('utf-8')
             beam_tup = (v1_node_id, v2_node_id)
             beams_to_add.add(beam_tup)
             continue
@@ -524,6 +590,7 @@ def get_faces_add_remove(obj: bpy.types.Object, bm: bmesh.types.BMesh, init_tris
     quads_to_add, quads_to_delete, quads_flipped = set(), set(), set()
 
     init_node_id_layer = bm.verts.layers.string[constants.VL_INIT_NODE_ID]
+    node_id_layer = bm.verts.layers.string[constants.VL_NODE_ID] # <<< Get current node ID layer
     face_idx_layer = bm.faces.layers.int[constants.FL_FACE_IDX]
     face_flip_flag_layer = bm.faces.layers.int[constants.FL_FACE_FLIP_FLAG]
 
@@ -541,7 +608,10 @@ def get_faces_add_remove(obj: bpy.types.Object, bm: bmesh.types.BMesh, init_tris
                 continue
             if tri_idx == -1: # Newly added triangle
                 v1, v2, v3 = f.verts[0], f.verts[1], f.verts[2]
-                v1_node_id, v2_node_id, v3_node_id = v1[init_node_id_layer].decode('utf-8'), v2[init_node_id_layer].decode('utf-8'), v3[init_node_id_layer].decode('utf-8')
+                # <<< Use current node ID layer for newly added faces >>>
+                v1_node_id = v1[node_id_layer].decode('utf-8')
+                v2_node_id = v2[node_id_layer].decode('utf-8')
+                v3_node_id = v3[node_id_layer].decode('utf-8')
                 tri_tup = (v1_node_id, v2_node_id, v3_node_id)
                 tris_to_add.add(tri_tup)
                 continue
@@ -567,7 +637,11 @@ def get_faces_add_remove(obj: bpy.types.Object, bm: bmesh.types.BMesh, init_tris
                 continue
             if quad_idx == -1: # Newly added quad
                 v1, v2, v3, v4 = f.verts[0], f.verts[1], f.verts[2], f.verts[3]
-                v1_node_id, v2_node_id, v3_node_id, v4_node_id = v1[init_node_id_layer].decode('utf-8'), v2[init_node_id_layer].decode('utf-8'), v3[init_node_id_layer].decode('utf-8'), v4[init_node_id_layer].decode('utf-8')
+                # <<< Use current node ID layer for newly added faces >>>
+                v1_node_id = v1[node_id_layer].decode('utf-8')
+                v2_node_id = v2[node_id_layer].decode('utf-8')
+                v3_node_id = v3[node_id_layer].decode('utf-8')
+                v4_node_id = v4[node_id_layer].decode('utf-8')
                 quad_tup = (v1_node_id, v2_node_id, v3_node_id, v4_node_id)
                 quads_to_add.add(quad_tup)
                 continue
@@ -1180,6 +1254,20 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
             bm = bmesh.new()
             bm.from_mesh(obj_data)
 
+        # <<< Call get_nodes_add_delete_rename FIRST to finalize TEMP nodes >>>
+        # This function now handles TEMP node renaming internally
+        part_blender_nodes, current_part_actions_map = get_nodes_add_delete_rename(obj, bm, jbeam_part, data.get('nodes', {}), affect_node_references)
+        # Merge the actions determined here with the global parts_nodes_actions
+        for part_key, actions in current_part_actions_map.items():
+            global_actions = parts_nodes_actions.setdefault(part_key, PartNodesActions())
+            global_actions.nodes_to_add.update(actions.nodes_to_add)
+            global_actions.nodes_to_delete.update(actions.nodes_to_delete)
+            global_actions.nodes_to_rename.update(actions.nodes_to_rename)
+            global_actions.nodes_to_move.update(actions.nodes_to_move)
+        # Update the main blender_nodes dictionary as well
+        blender_nodes.update(part_blender_nodes)
+        # <<< END TEMP node handling >>>
+
         part_nodes_actions: PartNodesActions | None = parts_nodes_actions.get(jbeam_part)
         if part_nodes_actions is not None:
             nodes_to_add, nodes_to_delete, node_renames, node_moves = part_nodes_actions.nodes_to_add, part_nodes_actions.nodes_to_delete, part_nodes_actions.nodes_to_rename, part_nodes_actions.nodes_to_move
@@ -1187,16 +1275,16 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
             nodes_to_add, nodes_to_delete, node_renames, node_moves = {}, set(), {}, {}
 
         # Add "all parts" actions also
-        part_nodes_actions: PartNodesActions | None = parts_nodes_actions.get(True)
-        if part_nodes_actions is not None:
-            for node, pos in part_nodes_actions.nodes_to_add.items():
+        part_nodes_actions_all: PartNodesActions | None = parts_nodes_actions.get(True)
+        if part_nodes_actions_all is not None:
+            for node, pos in part_nodes_actions_all.nodes_to_add.items():
                 nodes_to_add[node] = pos
-            for node in part_nodes_actions.nodes_to_delete:
+            for node in part_nodes_actions_all.nodes_to_delete:
                 nodes_to_delete.add(node)
-            for old_id, new_id in part_nodes_actions.nodes_to_rename.items():
+            for old_id, new_id in part_nodes_actions_all.nodes_to_rename.items():
                 node_renames[old_id] = new_id
 
-        #init_nodes_data = data.get('nodes')
+        #init_nodes_data = data.get('nodes') # Already got this earlier
         init_beams_data = data.get('beams')
         init_tris_data = data.get('triangles', [])
         init_quads_data = data.get('quads', [])
@@ -1256,6 +1344,10 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
                 len(quads_to_delete) > 0 or
                 len(quads_flipped) > 0
             )
+
+        # Free bmesh if it was created temporarily
+        if obj.mode != 'EDIT':
+            bm.free()
 
     return reimport_needed
 
