@@ -44,6 +44,10 @@ _selected_node_line_info = None # Dict: {'line': int, 'pos': Vector}
 # Operator states
 batch_node_renaming_enabled = False
 # _last_op is managed in handlers.py
+# <<< ADDED: Map for node overlap remapping >>>
+# Stores {new_overlapping_node_id: existing_node_id}
+node_overlap_remap = {}
+# <<< END ADDED >>>
 confirm_delete_pending = False # <<< ADDED: Flag to indicate confirmation dialog is active
 
 # Highlight on Click state

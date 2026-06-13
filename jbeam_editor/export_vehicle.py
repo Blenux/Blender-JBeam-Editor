@@ -125,6 +125,8 @@ def export(veh_collection: bpy.types.Collection, active_obj: bpy.types.Object):
 
     except:
         traceback.print_exc()
+    finally:
+        export_utils.end_export_cycle() # Ensure cleanup happens
 
 
 def auto_export(obj: bpy.types.Object, veh_model: str):

@@ -39,7 +39,8 @@ from .drawing import (
 )
 
 # <<< ADDED: Import the helper function >>>
-from .operators import _find_and_select_node_id_logic
+# <<< MODIFIED: Import renamed helper >>>
+from .operators import _find_and_frame_element_logic
 # <<< ADDED: Import globals >>>
 from . import globals as jb_globals
 
@@ -126,7 +127,8 @@ def _update_master_toggle_vis(self, context):
     setattr(drawing, 'veh_render_dirty', True)
 
 # <<< START MODIFIED FUNCTION _update_search_node_id >>>
-def _update_search_node_id(self, context):
+# <<< RENAMED FUNCTION >>>
+def _update_search_element_id(self, context):
     """
     Called when the search_node_id property changes.
     Attempts to find and select the node, unless the update was triggered
@@ -141,10 +143,11 @@ def _update_search_node_id(self, context):
 
     # If the flag was not set, proceed with the normal search logic
     # (likely triggered by user pressing Enter in the UI field).
-    search_id = self.search_node_id.strip()
-    if search_id: # Only attempt search if the field is not empty
+    # <<< MODIFIED: Use renamed property >>>
+    search_input = self.search_node_id.strip()
+    if search_input: # Only attempt search if the field is not empty
         # Call the helper logic. Feedback is handled by the helper.
-        _find_and_select_node_id_logic(context, search_id)
+        _find_and_frame_element_logic(context, search_input) # <<< MODIFIED: Call renamed helper
     # No return needed for update callbacks
 # <<< END MODIFIED FUNCTION _update_search_node_id >>>
 
@@ -200,10 +203,11 @@ class UIProperties(bpy.types.PropertyGroup):
 
     # Node Search Property
     search_node_id: bpy.props.StringProperty(
-        name="Search Node ID",
-        description="Enter the Node ID to find and select (Press Enter to search)",
+        name="Search Element ID", # <<< MODIFIED NAME
+        # <<< MODIFIED DESCRIPTION >>>
+        description="Enter Node ID or Beam ID (node1-node2) to find and frame (Press Enter)",
         default="",
-        update=_update_search_node_id # Keep the update callback assigned
+        update=_update_search_element_id # <<< MODIFIED: Assign renamed update callback
     )
 
     batch_node_renaming_naming_scheme: bpy.props.StringProperty(

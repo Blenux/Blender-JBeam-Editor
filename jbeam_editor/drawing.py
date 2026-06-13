@@ -1412,298 +1412,299 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
             _tag_redraw_3d_views(context) # Always tag redraw for highlight update
             # <<< ADDED: Mark highlight dirty >>>
             _highlight_dirty = True
+            highlight_set = True # <<< ADDED: Set highlight_set for node >>>
 
-            # <<< START MODIFIED LOGIC >>>
-            # If exactly one node is highlighted, update the search field
-            if len(node_ids) == 1:
+        else: # Logic for beams, rails, torsionbars, slidenodes
+            # --- Find Node Positions (For Beams, Rails, Torsionbars, Slidenodes) ---
+            active_obj = context.active_object
+            active_part_name = None
+            collection = None
+            is_vehicle_part = False
+            if active_obj and active_obj.data:
+                active_part_name = active_obj.data.get(constants.MESH_JBEAM_PART)
+                collection = active_obj.users_collection[0] if active_obj.users_collection else None
+                is_vehicle_part = collection is not None and collection.get(constants.COLLECTION_VEHICLE_MODEL) is not None
+
+            temp_node_map = {}
+            if is_vehicle_part and collection:
+                if not part_name_to_obj:
+                     for obj_iter in collection.all_objects:
+                        if obj_iter.data and obj_iter.data.get(constants.MESH_JBEAM_PART):
+                            part_name_to_obj[obj_iter.data[constants.MESH_JBEAM_PART]] = obj_iter
+
+                for obj_iter in collection.all_objects:
+                     if obj_iter.visible_get() and obj_iter.data and obj_iter.data.get(constants.MESH_JBEAM_PART) is not None:
+                        obj_iter_data = obj_iter.data
+                        temp_bm = None
+                        try:
+                            # <<< START MODIFICATION >>>
+                            if obj_iter == active_obj and active_obj.mode == 'EDIT':
+                                try:
+                                    temp_bm = bmesh.from_edit_mesh(obj_iter_data)
+                                except ValueError:
+                                    # Mesh not ready for edit mode access yet, skip this object for now
+                                    _tag_redraw_3d_views(context) # Ensure redraw if highlight was previously active
+                                    # <<< ADDED: Mark highlight dirty if it was previously active >>>
+                                    if prev_highlight_type is not None: _highlight_dirty = True
+                                    return False # Abort highlight attempt for this cycle
+                            # <<< END MODIFICATION >>>
+                            else: # Object mode or not the active object
+                                temp_bm = bmesh.new(); temp_bm.from_mesh(obj_iter_data)
+
+                            node_id_layer = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
+                            is_fake_layer = temp_bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+                            if node_id_layer and is_fake_layer:
+                                temp_bm.verts.ensure_lookup_table()
+                                obj_matrix_copy = obj_iter.matrix_world.copy()
+                                for v in temp_bm.verts:
+                                    if v[is_fake_layer] == 0:
+                                        nid = v[node_id_layer].decode('utf-8')
+                                        temp_node_map[nid] = (v.co.copy(), obj_matrix_copy)
+                        finally:
+                            if temp_bm and not (obj_iter == active_obj and active_obj.mode == 'EDIT'): temp_bm.free()
+            elif active_obj and active_part_name: # Single part import
+                 temp_bm = None
+                 try:
+                    # <<< START MODIFICATION >>>
+                    if active_obj.mode == 'EDIT':
+                        try:
+                            temp_bm = bmesh.from_edit_mesh(active_obj.data)
+                        except ValueError:
+                            # Mesh not ready for edit mode access yet, skip highlight
+                            _tag_redraw_3d_views(context) # Ensure redraw if highlight was previously active
+                            # <<< ADDED: Mark highlight dirty if it was previously active >>>
+                            if prev_highlight_type is not None: _highlight_dirty = True
+                            return False # Abort highlight attempt for this cycle
+                    # <<< END MODIFICATION >>>
+                    else: # Object mode
+                        temp_bm = bmesh.new(); temp_bm.from_mesh(active_obj.data)
+
+                    node_id_layer = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
+                    is_fake_layer = temp_bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+                    if node_id_layer and is_fake_layer:
+                        temp_bm.verts.ensure_lookup_table()
+                        obj_matrix_copy = active_obj.matrix_world.copy()
+                        for v in temp_bm.verts:
+                            if v[is_fake_layer] == 0:
+                                nid = v[node_id_layer].decode('utf-8')
+                                temp_node_map[nid] = (v.co.copy(), obj_matrix_copy)
+                 finally:
+                     if temp_bm and not (active_obj.mode == 'EDIT'): temp_bm.free()
+
+            # --- Get World Positions and Check Origins ---
+            world_positions = [] # Used for beams, rails, torsionbars
+            missing_nodes = []
+            node_origins = {} # Used for beams, rails, torsionbars
+            highlight_set = False # <<< Initialize highlight_set >>>
+
+            # <<< ADDED: Slidenode specific position finding >>>
+            if element_type == 'slidenode':
+                rail_node_id1 = None
+                rail_node_id2 = None
+                # Find the rail definition in curr_vdata
+                if jb_globals.curr_vdata and 'rails' in jb_globals.curr_vdata:
+                    rails_data = jb_globals.curr_vdata['rails']
+                    if isinstance(rails_data, dict):
+                        rail_info = rails_data.get(slidenode_rail_name)
+                        if isinstance(rail_info, list) and len(rail_info) == 2:
+                            rail_node_id1, rail_node_id2 = rail_info[0], rail_info[1]
+                        elif isinstance(rail_info, dict):
+                            links = rail_info.get('links:')
+                            if isinstance(links, list) and len(links) == 2:
+                                rail_node_id1, rail_node_id2 = links[0], links[1]
+
+                if rail_node_id1 is None or rail_node_id2 is None:
+                    print(f"Warning: Could not find rail definition for '{slidenode_rail_name}' referenced by slidenode '{slidenode_node_id}'.") # <<< Added slidenode_node_id for context
+                    _tag_redraw_3d_views(context) # Always tag redraw for highlight update
+                    # <<< ADDED: Mark highlight dirty if it was previously active >>>
+                    if prev_highlight_type is not None: _highlight_dirty = True
+                    return False # Cannot highlight if rail nodes not found
+
+                # <<< START: MODIFIED CHECK - Use all_nodes_cache >>>
+                # Check if the slidenode's own node and the rail nodes exist in the global cache
+                slidenode_id_valid = slidenode_node_id in all_nodes_cache
+                rail_node1_valid = rail_node_id1 in all_nodes_cache
+                rail_node2_valid = rail_node_id2 in all_nodes_cache
+
+                if not slidenode_id_valid:
+                    print(f"Warning: Slidenode's own node ID '{slidenode_node_id}' not found in node cache.")
+                    _tag_redraw_3d_views(context)
+                    if prev_highlight_type is not None: _highlight_dirty = True
+                    return False
+                if not rail_node1_valid:
+                    print(f"Warning: Rail node '{rail_node_id1}' (for slidenode '{slidenode_node_id}') not found in node cache.")
+                    _tag_redraw_3d_views(context)
+                    if prev_highlight_type is not None: _highlight_dirty = True
+                    return False
+                if not rail_node2_valid:
+                    print(f"Warning: Rail node '{rail_node_id2}' (for slidenode '{slidenode_node_id}') not found in node cache.")
+                    _tag_redraw_3d_views(context)
+                    if prev_highlight_type is not None: _highlight_dirty = True
+                    return False
+                # <<< END: MODIFIED CHECK >>>
+
+                # Now find positions for slidenode_node_id, rail_node_id1, rail_node_id2
+                node_ids_to_find = [slidenode_node_id, rail_node_id1, rail_node_id2]
+                slidenode_world_positions = {} # Use a dict for slidenode specific positions
+
+                for node_id in node_ids_to_find:
+                    wp = None
+                    pos_data = temp_node_map.get(node_id)
+                    cache_data = all_nodes_cache.get(node_id) # Use the cache directly
+                    if pos_data:
+                        wp = pos_data[1] @ pos_data[0]
+                    elif cache_data:
+                        wp = cache_data[0] # Get position from cache
+
+                    if wp is None:
+                        # This check should ideally not be hit if the cache checks above passed,
+                        # but keep it as a fallback for geometry/cache issues.
+                        missing_nodes.append(node_id)
+                    slidenode_world_positions[node_id] = wp
+
+                if missing_nodes:
+                    # Print a different warning if nodes were found in cache but not in geometry
+                    print(f"Warning: Could not find geometry position for slidenode nodes: {missing_nodes}")
+                    _tag_redraw_3d_views(context) # Always tag redraw for highlight update
+                    # <<< ADDED: Mark highlight dirty if it was previously active >>>
+                    if prev_highlight_type is not None: _highlight_dirty = True
+                    return False
+
+                # Populate highlight data for slidenode
+                jb_globals.highlighted_element_type = 'slidenode'
+                jb_globals.highlighted_node_ids.add(slidenode_node_id) # Add only the slidenode's ID for text coloring
+                # Store the rail node IDs for highlight coordinate population during rebuild
+                jb_globals.highlighted_element_ordered_node_ids = [rail_node_id1, rail_node_id2]
+                # Add rail segment coordinates
+                highlight_coords.extend([slidenode_world_positions[rail_node_id1], slidenode_world_positions[rail_node_id2]])
+                jb_globals.highlighted_element_color = original_color # Use rail color set earlier
+                highlight_set = True
+            # <<< END ADDED: Slidenode specific position finding >>>
+            else: # Logic for beams, rails, torsionbars
+                for node_id in node_ids: # Use the ordered list
+                    wp = None
+                    pos_data = temp_node_map.get(node_id)
+                    cache_data = all_nodes_cache.get(node_id)
+
+                    if pos_data:
+                        wp = pos_data[1] @ pos_data[0]
+                        found_origin = None
+                        if is_vehicle_part and collection:
+                            for obj_iter in collection.all_objects:
+                                if (obj_iter.matrix_world - pos_data[1]).is_zero(1e-5):
+                                     if obj_iter.data and obj_iter.data.get(constants.MESH_JBEAM_PART):
+                                         found_origin = obj_iter.data[constants.MESH_JBEAM_PART]; break
+                        elif active_part_name: found_origin = active_part_name
+                        node_origins[node_id] = found_origin if found_origin else '?'
+
+                    elif cache_data:
+                        wp = cache_data[0]
+                        node_origins[node_id] = cache_data[2]
+
+                    if wp is None: missing_nodes.append(node_id)
+                    world_positions.append(wp)
+
+                if missing_nodes:
+                    _tag_redraw_3d_views(context) # Always tag redraw for highlight update
+                    # <<< ADDED: Mark highlight dirty if it was previously active >>>
+                    if prev_highlight_type is not None: _highlight_dirty = True
+                    return False
+
+                # --- Populate Coordinate Lists and Finalize Highlight ---
+                if element_type == 'beam':
+                    is_cross_part_candidate = False
+                    if len(node_origins) == 2:
+                        origin1 = node_origins.get(node_ids[0], '?')
+                        origin2 = node_origins.get(node_ids[1], '?')
+                        if origin1 != origin2 and '?' not in {origin1, origin2}:
+                            is_cross_part_candidate = True
+
+                    id1_in_active_geom = node_ids[0] in temp_node_map
+                    id2_in_active_geom = node_ids[1] in temp_node_map
+
+                    if is_cross_part_candidate and id1_in_active_geom and id2_in_active_geom:
+                         # Use correct normal color based on beamType (determined earlier)
+                         # The original_color/width are already set correctly for the beam type
+                         highlight_coords.extend([world_positions[0], world_positions[1]])
+                         highlight_set = True
+                    elif is_cross_part_candidate:
+                        element_type = 'cross_part_beam' # Reclassify for drawing
+                        original_color = ui_props.cross_part_beam_color # Use cross-part color
+                        highlight_coords.extend([world_positions[0], world_positions[1]])
+                        highlight_set = True
+                    else: # Normal beam within the same part
+                        # Use the color/width determined earlier based on beamType
+                        highlight_coords.extend([world_positions[0], world_positions[1]])
+                        highlight_set = True
+
+                elif element_type == 'torsionbar':
+                    highlight_torsionbar_outer_coords.extend([world_positions[0], world_positions[1]])
+                    highlight_torsionbar_mid_coords.extend([world_positions[1], world_positions[2]])
+                    highlight_torsionbar_outer_coords.extend([world_positions[2], world_positions[3]])
+                    highlight_set = True
+                    # Colors/width already set
+
+                elif element_type == 'rail':
+                     # Cross-part check for rails
+                     is_cross_part_candidate = False
+                     if len(node_origins) == 2:
+                         origin1 = node_origins.get(node_ids[0], '?')
+                         origin2 = node_origins.get(node_ids[1], '?')
+                         if origin1 != origin2 and '?' not in {origin1, origin2}:
+                             is_cross_part_candidate = True
+
+                     id1_in_active_geom = node_ids[0] in temp_node_map
+                     id2_in_active_geom = node_ids[1] in temp_node_map
+
+                     if is_cross_part_candidate and id1_in_active_geom and id2_in_active_geom:
+                         # Still a rail, just happens to use nodes from different parts' geometry
+                         original_color = ui_props.rail_color # Use rail color
+                         highlight_coords.extend([world_positions[0], world_positions[1]])
+                         highlight_set = True
+                     elif is_cross_part_candidate:
+                          element_type = 'cross_part_beam' # Reclassify for drawing as cross-part
+                          # original_color = ui_props.cross_part_beam_color
+                          original_color = ui_props.rail_color # Use rail color
+                          highlight_coords.extend([world_positions[0], world_positions[1]])
+                          highlight_set = True
+                     else: # Normal rail within the same part
+                         # Colors/width already set
+                         highlight_coords.extend([world_positions[0], world_positions[1]])
+                         highlight_set = True
+
+            # --- Finalize Highlight State ---
+            if highlight_set:
+                jb_globals.highlighted_element_type = element_type
+                jb_globals.highlighted_element_color = original_color
+                jb_globals.highlighted_element_mid_color = original_mid_color
+                # Only add node IDs for non-slidenode types here, slidenode handled above
+                if element_type != 'slidenode':
+                    jb_globals.highlighted_node_ids.update(node_ids) # Use the parsed node_ids list
+                    jb_globals.highlighted_element_ordered_node_ids = node_ids
+                _tag_redraw_3d_views(context) # Always tag redraw for highlight update
+                # <<< ADDED: Mark highlight dirty >>>
+                _highlight_dirty = True
+            else:
+                 _tag_redraw_3d_views(context) # Always tag redraw for highlight update
+                 # <<< ADDED: Mark highlight dirty if it was previously active >>>
+                 if prev_highlight_type is not None: _highlight_dirty = True
+
+        # <<< CORRECTED PLACEMENT for UI Search Box Update >>>
+        if highlight_set:
+            if element_type == 'node' and len(node_ids) == 1:
                 single_node_id = node_ids[0]
-                # Check if the UI property exists and update it
+                if hasattr(ui_props, 'search_node_id') and ui_props.search_node_id != single_node_id:
+                    jb_globals._populating_search_id_from_highlight = True
+                    ui_props.search_node_id = single_node_id
+            elif element_type == 'beam' and len(node_ids) == 2:
+                beam_id_str = f"{node_ids[0]}-{node_ids[1]}"
                 if hasattr(ui_props, 'search_node_id'):
-                    # Only update if the value is different to avoid unnecessary updates
-                    # and redundant flag setting.
-                    if ui_props.search_node_id != single_node_id:
+                    if ui_props.search_node_id != beam_id_str:
                         # Set the flag *before* assigning the value
                         jb_globals._populating_search_id_from_highlight = True
                         # Assign the value (this will trigger the update callback)
-                        ui_props.search_node_id = single_node_id
-                        # The flag will be reset within the update callback itself
-            # <<< END MODIFIED LOGIC >>>
-
-            return True
-
-        # --- Find Node Positions (For Beams, Rails, Torsionbars, Slidenodes) ---
-        active_obj = context.active_object
-        active_part_name = None
-        collection = None
-        is_vehicle_part = False
-        if active_obj and active_obj.data:
-            active_part_name = active_obj.data.get(constants.MESH_JBEAM_PART)
-            collection = active_obj.users_collection[0] if active_obj.users_collection else None
-            is_vehicle_part = collection is not None and collection.get(constants.COLLECTION_VEHICLE_MODEL) is not None
-
-        temp_node_map = {}
-        if is_vehicle_part and collection:
-            if not part_name_to_obj:
-                 for obj_iter in collection.all_objects:
-                    if obj_iter.data and obj_iter.data.get(constants.MESH_JBEAM_PART):
-                        part_name_to_obj[obj_iter.data[constants.MESH_JBEAM_PART]] = obj_iter
-
-            for obj_iter in collection.all_objects:
-                 if obj_iter.visible_get() and obj_iter.data and obj_iter.data.get(constants.MESH_JBEAM_PART) is not None:
-                    obj_iter_data = obj_iter.data
-                    temp_bm = None
-                    try:
-                        # <<< START MODIFICATION >>>
-                        if obj_iter == active_obj and active_obj.mode == 'EDIT':
-                            try:
-                                temp_bm = bmesh.from_edit_mesh(obj_iter_data)
-                            except ValueError:
-                                # Mesh not ready for edit mode access yet, skip this object for now
-                                _tag_redraw_3d_views(context) # Ensure redraw if highlight was previously active
-                                # <<< ADDED: Mark highlight dirty if it was previously active >>>
-                                if prev_highlight_type is not None: _highlight_dirty = True
-                                return False # Abort highlight attempt for this cycle
-                        # <<< END MODIFICATION >>>
-                        else: # Object mode or not the active object
-                            temp_bm = bmesh.new(); temp_bm.from_mesh(obj_iter_data)
-
-                        node_id_layer = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
-                        is_fake_layer = temp_bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
-                        if node_id_layer and is_fake_layer:
-                            temp_bm.verts.ensure_lookup_table()
-                            obj_matrix_copy = obj_iter.matrix_world.copy()
-                            for v in temp_bm.verts:
-                                if v[is_fake_layer] == 0:
-                                    nid = v[node_id_layer].decode('utf-8')
-                                    temp_node_map[nid] = (v.co.copy(), obj_matrix_copy)
-                    finally:
-                        if temp_bm and not (obj_iter == active_obj and active_obj.mode == 'EDIT'): temp_bm.free()
-        elif active_obj and active_part_name: # Single part import
-             temp_bm = None
-             try:
-                # <<< START MODIFICATION >>>
-                if active_obj.mode == 'EDIT':
-                    try:
-                        temp_bm = bmesh.from_edit_mesh(active_obj.data)
-                    except ValueError:
-                        # Mesh not ready for edit mode access yet, skip highlight
-                        _tag_redraw_3d_views(context) # Ensure redraw if highlight was previously active
-                        # <<< ADDED: Mark highlight dirty if it was previously active >>>
-                        if prev_highlight_type is not None: _highlight_dirty = True
-                        return False # Abort highlight attempt for this cycle
-                # <<< END MODIFICATION >>>
-                else: # Object mode
-                    temp_bm = bmesh.new(); temp_bm.from_mesh(active_obj.data)
-
-                node_id_layer = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
-                is_fake_layer = temp_bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
-                if node_id_layer and is_fake_layer:
-                    temp_bm.verts.ensure_lookup_table()
-                    obj_matrix_copy = active_obj.matrix_world.copy()
-                    for v in temp_bm.verts:
-                        if v[is_fake_layer] == 0:
-                            nid = v[node_id_layer].decode('utf-8')
-                            temp_node_map[nid] = (v.co.copy(), obj_matrix_copy)
-             finally:
-                 if temp_bm and not (active_obj.mode == 'EDIT'): temp_bm.free()
-
-        # --- Get World Positions and Check Origins ---
-        world_positions = [] # Used for beams, rails, torsionbars
-        missing_nodes = []
-        node_origins = {} # Used for beams, rails, torsionbars
-        highlight_set = False # <<< Initialize highlight_set >>>
-
-        # <<< ADDED: Slidenode specific position finding >>>
-        if element_type == 'slidenode':
-            rail_node_id1 = None
-            rail_node_id2 = None
-            # Find the rail definition in curr_vdata
-            if jb_globals.curr_vdata and 'rails' in jb_globals.curr_vdata:
-                rails_data = jb_globals.curr_vdata['rails']
-                if isinstance(rails_data, dict):
-                    rail_info = rails_data.get(slidenode_rail_name)
-                    if isinstance(rail_info, list) and len(rail_info) == 2:
-                        rail_node_id1, rail_node_id2 = rail_info[0], rail_info[1]
-                    elif isinstance(rail_info, dict):
-                        links = rail_info.get('links:')
-                        if isinstance(links, list) and len(links) == 2:
-                            rail_node_id1, rail_node_id2 = links[0], links[1]
-
-            if rail_node_id1 is None or rail_node_id2 is None:
-                print(f"Warning: Could not find rail definition for '{slidenode_rail_name}' referenced by slidenode '{slidenode_node_id}'.") # <<< Added slidenode_node_id for context
-                _tag_redraw_3d_views(context) # Always tag redraw for highlight update
-                # <<< ADDED: Mark highlight dirty if it was previously active >>>
-                if prev_highlight_type is not None: _highlight_dirty = True
-                return False # Cannot highlight if rail nodes not found
-
-            # <<< START: MODIFIED CHECK - Use all_nodes_cache >>>
-            # Check if the slidenode's own node and the rail nodes exist in the global cache
-            slidenode_id_valid = slidenode_node_id in all_nodes_cache
-            rail_node1_valid = rail_node_id1 in all_nodes_cache
-            rail_node2_valid = rail_node_id2 in all_nodes_cache
-
-            if not slidenode_id_valid:
-                print(f"Warning: Slidenode's own node ID '{slidenode_node_id}' not found in node cache.")
-                _tag_redraw_3d_views(context)
-                if prev_highlight_type is not None: _highlight_dirty = True
-                return False
-            if not rail_node1_valid:
-                print(f"Warning: Rail node '{rail_node_id1}' (for slidenode '{slidenode_node_id}') not found in node cache.")
-                _tag_redraw_3d_views(context)
-                if prev_highlight_type is not None: _highlight_dirty = True
-                return False
-            if not rail_node2_valid:
-                print(f"Warning: Rail node '{rail_node_id2}' (for slidenode '{slidenode_node_id}') not found in node cache.")
-                _tag_redraw_3d_views(context)
-                if prev_highlight_type is not None: _highlight_dirty = True
-                return False
-            # <<< END: MODIFIED CHECK >>>
-
-            # Now find positions for slidenode_node_id, rail_node_id1, rail_node_id2
-            node_ids_to_find = [slidenode_node_id, rail_node_id1, rail_node_id2]
-            slidenode_world_positions = {} # Use a dict for slidenode specific positions
-
-            for node_id in node_ids_to_find:
-                wp = None
-                pos_data = temp_node_map.get(node_id)
-                cache_data = all_nodes_cache.get(node_id) # Use the cache directly
-                if pos_data:
-                    wp = pos_data[1] @ pos_data[0]
-                elif cache_data:
-                    wp = cache_data[0] # Get position from cache
-
-                if wp is None:
-                    # This check should ideally not be hit if the cache checks above passed,
-                    # but keep it as a fallback for geometry/cache issues.
-                    missing_nodes.append(node_id)
-                slidenode_world_positions[node_id] = wp
-
-            if missing_nodes:
-                # Print a different warning if nodes were found in cache but not in geometry
-                print(f"Warning: Could not find geometry position for slidenode nodes: {missing_nodes}")
-                _tag_redraw_3d_views(context) # Always tag redraw for highlight update
-                # <<< ADDED: Mark highlight dirty if it was previously active >>>
-                if prev_highlight_type is not None: _highlight_dirty = True
-                return False
-
-            # Populate highlight data for slidenode
-            jb_globals.highlighted_element_type = 'slidenode'
-            jb_globals.highlighted_node_ids.add(slidenode_node_id) # Add only the slidenode's ID for text coloring
-            # Store the rail node IDs for highlight coordinate population during rebuild
-            jb_globals.highlighted_element_ordered_node_ids = [rail_node_id1, rail_node_id2]
-            # Add rail segment coordinates
-            highlight_coords.extend([slidenode_world_positions[rail_node_id1], slidenode_world_positions[rail_node_id2]])
-            jb_globals.highlighted_element_color = original_color # Use rail color set earlier
-            highlight_set = True
-        # <<< END ADDED: Slidenode specific position finding >>>
-        else: # Logic for beams, rails, torsionbars
-            for node_id in node_ids: # Use the ordered list
-                wp = None
-                pos_data = temp_node_map.get(node_id)
-                cache_data = all_nodes_cache.get(node_id)
-
-                if pos_data:
-                    wp = pos_data[1] @ pos_data[0]
-                    found_origin = None
-                    if is_vehicle_part and collection:
-                        for obj_iter in collection.all_objects:
-                            if (obj_iter.matrix_world - pos_data[1]).is_zero(1e-5):
-                                 if obj_iter.data and obj_iter.data.get(constants.MESH_JBEAM_PART):
-                                     found_origin = obj_iter.data[constants.MESH_JBEAM_PART]; break
-                    elif active_part_name: found_origin = active_part_name
-                    node_origins[node_id] = found_origin if found_origin else '?'
-
-                elif cache_data:
-                    wp = cache_data[0]
-                    node_origins[node_id] = cache_data[2]
-
-                if wp is None: missing_nodes.append(node_id)
-                world_positions.append(wp)
-
-            if missing_nodes:
-                _tag_redraw_3d_views(context) # Always tag redraw for highlight update
-                # <<< ADDED: Mark highlight dirty if it was previously active >>>
-                if prev_highlight_type is not None: _highlight_dirty = True
-                return False
-
-            # --- Populate Coordinate Lists and Finalize Highlight ---
-            if element_type == 'beam':
-                is_cross_part_candidate = False
-                if len(node_origins) == 2:
-                    origin1 = node_origins.get(node_ids[0], '?')
-                    origin2 = node_origins.get(node_ids[1], '?')
-                    if origin1 != origin2 and '?' not in {origin1, origin2}:
-                        is_cross_part_candidate = True
-
-                id1_in_active_geom = node_ids[0] in temp_node_map
-                id2_in_active_geom = node_ids[1] in temp_node_map
-
-                if is_cross_part_candidate and id1_in_active_geom and id2_in_active_geom:
-                     # Use correct normal color based on beamType (determined earlier)
-                     # The original_color/width are already set correctly for the beam type
-                     highlight_coords.extend([world_positions[0], world_positions[1]])
-                     highlight_set = True
-                elif is_cross_part_candidate:
-                    element_type = 'cross_part_beam' # Reclassify for drawing
-                    original_color = ui_props.cross_part_beam_color # Use cross-part color
-                    highlight_coords.extend([world_positions[0], world_positions[1]])
-                    highlight_set = True
-                else: # Normal beam within the same part
-                    # Use the color/width determined earlier based on beamType
-                    highlight_coords.extend([world_positions[0], world_positions[1]])
-                    highlight_set = True
-
-            elif element_type == 'torsionbar':
-                highlight_torsionbar_outer_coords.extend([world_positions[0], world_positions[1]])
-                highlight_torsionbar_mid_coords.extend([world_positions[1], world_positions[2]])
-                highlight_torsionbar_outer_coords.extend([world_positions[2], world_positions[3]])
-                highlight_set = True
-                # Colors/width already set
-
-            elif element_type == 'rail':
-                 # Cross-part check for rails
-                 is_cross_part_candidate = False
-                 if len(node_origins) == 2:
-                     origin1 = node_origins.get(node_ids[0], '?')
-                     origin2 = node_origins.get(node_ids[1], '?')
-                     if origin1 != origin2 and '?' not in {origin1, origin2}:
-                         is_cross_part_candidate = True
-
-                 id1_in_active_geom = node_ids[0] in temp_node_map
-                 id2_in_active_geom = node_ids[1] in temp_node_map
-
-                 if is_cross_part_candidate and id1_in_active_geom and id2_in_active_geom:
-                     # Still a rail, just happens to use nodes from different parts' geometry
-                     original_color = ui_props.rail_color # Use rail color
-                     highlight_coords.extend([world_positions[0], world_positions[1]])
-                     highlight_set = True
-                 elif is_cross_part_candidate:
-                      element_type = 'cross_part_beam' # Reclassify for drawing as cross-part
-                      # original_color = ui_props.cross_part_beam_color
-                      original_color = ui_props.rail_color # Use rail color
-                      highlight_coords.extend([world_positions[0], world_positions[1]])
-                      highlight_set = True
-                 else: # Normal rail within the same part
-                     # Colors/width already set
-                     highlight_coords.extend([world_positions[0], world_positions[1]])
-                     highlight_set = True
-
-        # --- Finalize Highlight State ---
-        if highlight_set:
-            jb_globals.highlighted_element_type = element_type
-            jb_globals.highlighted_element_color = original_color
-            jb_globals.highlighted_element_mid_color = original_mid_color
-            # Only add node IDs for non-slidenode types here, slidenode handled above
-            if element_type != 'slidenode':
-                jb_globals.highlighted_node_ids.update(node_ids)
-                jb_globals.highlighted_element_ordered_node_ids = node_ids
-            _tag_redraw_3d_views(context) # Always tag redraw for highlight update
-            # <<< ADDED: Mark highlight dirty >>>
-            _highlight_dirty = True
-        else:
-             _tag_redraw_3d_views(context) # Always tag redraw for highlight update
-             # <<< ADDED: Mark highlight dirty if it was previously active >>>
-             if prev_highlight_type is not None: _highlight_dirty = True
+                        ui_props.search_node_id = beam_id_str
+        # <<< END CORRECTED PLACEMENT >>>
 
         return highlight_set
 

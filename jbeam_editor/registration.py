@@ -38,6 +38,7 @@ from .operators import (
     JBEAM_EDITOR_OT_confirm_node_deletion,
     JBEAM_EDITOR_OT_warn_native_undo,
     JBEAM_EDITOR_OT_warn_native_redo,
+    JBEAM_EDITOR_OT_reload_jbeam_from_disk, # <<< ADDED: Import new operator
 )
 from .panels import (
     JBEAM_EDITOR_PT_transform_panel_ext,
@@ -82,6 +83,7 @@ classes = (
     JBEAM_EDITOR_OT_confirm_node_deletion,
     JBEAM_EDITOR_OT_warn_native_undo,
     JBEAM_EDITOR_OT_warn_native_redo,
+    JBEAM_EDITOR_OT_reload_jbeam_from_disk, # <<< ADDED: Add new operator to registration list
     JBEAM_EDITOR_PT_transform_panel_ext,
     JBEAM_EDITOR_PT_jbeam_panel,
     JBEAM_EDITOR_PT_find_node,

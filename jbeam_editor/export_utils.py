@@ -23,6 +23,12 @@ import sys
 import traceback
 import uuid # <<< Import uuid
 import json # <<< ADDED: Import json
+import re # <<< ADDED: Import re
+# <<< ADDED: Import TYPE_CHECKING >>>
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .properties import UIProperties
 
 import bpy
 
@@ -96,6 +102,24 @@ def get_prev_node(ast_nodes, start_idx, data_types):
         i -= 1
     return -1
 
+# <<< ADDED HELPER: Get indentation string from preceding WSC node >>>
+def _get_indentation_from_previous_wsc(ast_nodes: list, element_start_index: int) -> str:
+    """
+    Finds the whitespace node immediately preceding the given index and
+    returns the indentation part (characters after the last newline).
+    Defaults to NL_TWO_INDENT if not found or formatted unexpectedly.
+    """
+    if element_start_index > 0:
+        prev_node = ast_nodes[element_start_index - 1]
+        if prev_node.data_type == 'wsc':
+            wsc_value = prev_node.value
+            last_newline_pos = wsc_value.rfind('\n')
+            if last_newline_pos != -1:
+                # Return newline plus the indentation characters
+                return wsc_value[last_newline_pos:]
+    # Fallback to default indent if preceding WSC or newline not found
+    return NL_TWO_INDENT
+# <<< END ADDED HELPER >>>
 
 def get_next_non_wsc_node(ast_nodes, start_idx):
     i = start_idx
@@ -519,7 +543,7 @@ def set_node_renames_positions(jbeam_file_data_modified: dict, jbeam_part: str, 
 
 
 # <<< MODIFIED HELPER FUNCTION >>>
-def get_base_node_name(node_id: str, ui_props: 'UIProperties'): # Pass ui_props
+def get_base_node_name(node_id: str, ui_props: 'UIProperties'): # Keep hint as string literal
     """Removes L_, R_, or M_ prefix/suffix if present, based on settings."""
     # <<< ADDED: Check if prefixing is enabled >>>
     if not ui_props.use_node_naming_prefixes:
@@ -543,7 +567,39 @@ def get_base_node_name(node_id: str, ui_props: 'UIProperties'): # Pass ui_props
     return node_id # Return original if no prefix/suffix found or applicable
 # <<< END MODIFIED HELPER FUNCTION >>>
 
+# <<< START ADDED HELPER FUNCTION >>>
+def get_symmetrical_node_id(node_id: str, ui_props: 'UIProperties'):
+    """
+    Finds the symmetrical counterpart node ID based on prefix/suffix settings.
+    Returns the counterpart ID string, or None if no symmetry is applicable.
+    """
+    if not ui_props.use_node_naming_prefixes:
+        return None # Symmetry disabled
 
+    prefix_pos = ui_props.new_node_prefix_position
+    left_id = ui_props.new_node_prefix_left
+    right_id = ui_props.new_node_prefix_right
+    middle_id = ui_props.new_node_prefix_middle
+
+    base_name = get_base_node_name(node_id, ui_props)
+    if base_name == node_id: # No prefix/suffix was removed, likely middle or no identifier
+        return None
+
+    if prefix_pos == 'FRONT':
+        if node_id.startswith(left_id): return f"{right_id}{base_name}"
+        if node_id.startswith(right_id): return f"{left_id}{base_name}"
+    elif prefix_pos == 'BACK':
+        if node_id.endswith(left_id): return f"{base_name}{right_id}"
+        if node_id.endswith(right_id): return f"{base_name}{left_id}"
+
+    return None # No symmetry found (e.g., original had middle identifier)
+# <<< END ADDED HELPER FUNCTION >>>
+
+
+
+
+
+# <<< START REPLACED FUNCTION >>>
 def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jbeam_part: str, init_nodes_data: dict, affect_node_references: bool):
     context = bpy.context
     ui_props = context.scene.ui_properties # Already getting ui_props
@@ -557,7 +613,7 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
 
     blender_nodes = {}
     processed_new_node_positions = set() # Store tuples (x, y, z)
-    nodes_requiring_confirmation = [] # Store tuples: (node_id, display_name_for_dialog, position_tuple)
+    nodes_requiring_confirmation = [] # Store tuples: (node_id, display_name_for_dialog, position_tuple, existing_collided_id)
 
     # Ensure lookup table before iterating
     bm.verts.ensure_lookup_table()
@@ -659,12 +715,16 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
                 display_name_for_dialog = mirrored_name if mirrored_name else uuid_name
                 print(f"Overlap detected: New node '{display_name_for_dialog}' at {pos.to_tuple()} overlaps with '{collided_with_id}'. Queued for deletion confirmation.", file=sys.stderr)
                 # <<< MODIFIED: Always use UUID name for internal tracking if collision >>>
-                final_node_id_collision = uuid_name # This is the UUID-based name
+                final_node_id_collision = uuid_name # This is the UUID-based name used for the vertex
                 final_node_id_bytes = bytes(final_node_id_collision, 'utf-8')
                 # <<< END MODIFICATION >>>
                 v[node_id_layer] = final_node_id_bytes
                 v[init_node_id_layer] = final_node_id_bytes # Update init ID as well
-                nodes_requiring_confirmation.append((final_node_id_collision, display_name_for_dialog, pos.to_tuple()))
+                # <<< MODIFIED: Store existing_collided_id >>>
+                nodes_requiring_confirmation.append((final_node_id_collision, display_name_for_dialog, pos.to_tuple(), collided_with_id))
+                v[node_is_fake_layer] = 1 # Mark as fake pending confirmation
+                # <<< ADDED: Store overlap mapping >>>
+                jb_globals.node_overlap_remap[final_node_id_collision] = collided_with_id
 
                 # <<< *** MODIFIED PLACEMENT LOGIC *** >>>
                 part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
@@ -673,8 +733,10 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
                     part_actions.nodes_to_add_symmetrically[final_node_id_collision] = (mirrored_node_id, pos.to_tuple())
                 else:
                     # If it has NO mirror, add to normal list
-                    part_actions.nodes_to_add[final_node_id_collision] = pos.to_tuple()
+                    # part_actions.nodes_to_add[final_node_id_collision] = pos.to_tuple() # Don't add to list yet, handled by confirmation
+                    pass # No action needed here, handled by confirmation operator
                 # <<< *** END MODIFIED PLACEMENT LOGIC *** >>>
+                blender_nodes[final_node_id_collision] = {'curr_node_id': final_node_id_collision, 'pos': pos.to_tuple(), 'partOrigin': node_part_origin} # Still add to blender_nodes for tracking
 
                 continue # Go to next vertex
             else: # No collision
@@ -698,7 +760,7 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
                 rounded_pos = tuple(round(coord, 6) for coord in pos)
                 processed_new_node_positions.add(rounded_pos)
                 init_node_data_placeholder = {
-                    'posNoOffset': pos.to_tuple(), 'pos': pos.to_tuple(), Metadata: Metadata()
+                    'posNoOffset': pos.to_tuple(), 'pos': pos.to_tuple(), Metadata: Metadata() # Use Metadata class as key
                 }
                 new_pos_tup_for_sjson = undo_node_move_offset_and_apply_translation_to_expr(init_node_data_placeholder, pos)
                 blender_nodes[init_node_id] = {'curr_node_id': node_id, 'pos': new_pos_tup_for_sjson, 'partOrigin': node_part_origin}
@@ -761,7 +823,7 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
             }
             new_pos_tup_for_sjson = undo_node_move_offset_and_apply_translation_to_expr(init_node_data_placeholder, pos)
             # Use init_node_id (UUID or original if somehow not TEMP) as the key here,
-            # as that's what the rest of the export process expects for blender_nodes mapping.
+            # as that's what the export process expects for blender_nodes mapping.
             blender_nodes[init_node_id] = {'curr_node_id': node_id, 'pos': new_pos_tup_for_sjson, 'partOrigin': node_part_origin}
             # <<< *** END NEW LOGIC *** >>>
             continue # Go to next vertex
@@ -788,8 +850,8 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
     if nodes_requiring_confirmation and not jb_globals.confirm_delete_pending:
         try:
             jb_globals.confirm_delete_pending = True
-            # Pass node ID list to operator
-            # The list now contains (node_id, display_name, position)
+            # Pass node ID list (including existing_collided_id) to operator
+            # The list now contains (node_id, display_name, position, existing_collided_id)
             nodes_json = json.dumps(nodes_requiring_confirmation)
             bpy.ops.jbeam_editor.confirm_node_deletion('INVOKE_DEFAULT', nodes_data=nodes_json)
         except Exception as e:
@@ -806,47 +868,214 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
             part_actions.nodes_to_delete.add(init_node_id)
 
     return blender_nodes, parts_actions
+# <<< END REPLACED FUNCTION >>>
 
 
 def get_beams_add_remove(obj: bpy.types.Object, bm: bmesh.types.BMesh, init_beams_data: list, jbeam_file_data_modified: dict, jbeam_part: str, nodes_to_delete: set, affect_node_references: bool):
-    beams_to_add, beams_to_delete = set(), set()
+    beams_to_add_tuples = set() # Store (id1, id2) tuples for adding
+    beams_to_delete = set()
 
-    init_node_id_layer = bm.verts.layers.string[constants.VL_INIT_NODE_ID]
-    node_id_layer = bm.verts.layers.string[constants.VL_NODE_ID] # <<< Get current node ID layer
-    beam_indices_layer = bm.edges.layers.string[constants.EL_BEAM_INDICES]
+    # <<< Get node layers needed to check if vertices are valid JBeam nodes >>>
+    init_node_id_layer = bm.verts.layers.string.get(constants.VL_INIT_NODE_ID)
+    node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
+    node_is_fake_layer = bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+    node_part_origin_layer = bm.verts.layers.string.get(constants.VL_NODE_PART_ORIGIN) # To assign origin
 
-    blender_beams = set()
-    # Create dictionary where key is init node id and value is current blender node id and position
+    beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
+    # <<< Get beam origin layer >>>
+    beam_part_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
+
+    # <<< Check if all required layers exist >>>
+    if not all([init_node_id_layer, node_id_layer, node_is_fake_layer, node_part_origin_layer, beam_indices_layer, beam_part_origin_layer]):
+        print("Error: Required BMesh layers for beam processing are missing.", file=sys.stderr)
+        return beams_to_add_tuples, beams_to_delete # Return empty sets on error
+
+    blender_beams_indices = set() # Store indices from existing beams in Blender
+
+    # --- Build a map of beams from the initial data for quick lookup ---
+    # Key: tuple(sorted(id1, id2)), Value: set of original indices within the part
+    init_beams_map = {}
+    temp_beam_idx_in_part = 0
+    if isinstance(init_beams_data, list):
+        for beam_entry in init_beams_data:
+            if isinstance(beam_entry, dict) and beam_entry.get('partOrigin') == jbeam_part:
+                temp_beam_idx_in_part += 1
+                id1 = beam_entry.get('id1:')
+                id2 = beam_entry.get('id2:')
+                if id1 and id2:
+                    key = tuple(sorted((id1, id2)))
+                    if key not in init_beams_map:
+                        init_beams_map[key] = set()
+                    init_beams_map[key].add(temp_beam_idx_in_part)
+    # --- End initial beam map ---
+
     bm.edges.ensure_lookup_table()
+    bm.verts.ensure_lookup_table() # <<< Ensure vertex table is ready >>>
     e: bmesh.types.BMEdge
     for i, e in enumerate(bm.edges):
-        #print('beam:', v1_node_id, v2_node_id)
-        beam_indices = e[beam_indices_layer].decode('utf-8')
-        if beam_indices == '': # Beam doesn't exist in JBeam data and is just part of a Blender face for example
+        beam_indices_str = e[beam_indices_layer].decode('utf-8')
+
+        v1, v2 = e.verts[0], e.verts[1]
+
+        # --- Robust Node Validity Check ---
+        # Check if vertices are non-fake and have received final (non-TEMP) IDs
+        v1_node_id_bytes = v1[node_id_layer]
+        v2_node_id_bytes = v2[node_id_layer]
+        v1_node_id = v1_node_id_bytes.decode('utf-8')
+        v2_node_id = v2_node_id_bytes.decode('utf-8')
+
+        v1_is_valid_jbeam = (v1[node_is_fake_layer] == 0 and
+                             v1_node_id_bytes and not v1_node_id.startswith('TEMP_'))
+        v2_is_valid_jbeam = (v2[node_is_fake_layer] == 0 and
+                             v2_node_id_bytes and not v2_node_id.startswith('TEMP_'))
+
+        if not v1_is_valid_jbeam or not v2_is_valid_jbeam:
+            # print(f"Debug: Skipping edge {i} - Invalid nodes: v1={v1_is_valid_jbeam} ('{v1_node_id}'), v2={v2_is_valid_jbeam} ('{v2_node_id}')")
+            continue # Skip edges not connecting two valid, finalized JBeam nodes
+        # --- End Node Validity Check ---
+
+        # --- Apply Node Remapping ---
+        # Check if either node ID needs remapping based on the global map
+        # This happens *after* getting the IDs from the vertex layers but *before* creating the tuple
+        final_v1_id = jb_globals.node_overlap_remap.get(v1_node_id, v1_node_id)
+        final_v2_id = jb_globals.node_overlap_remap.get(v2_node_id, v2_node_id)
+
+        # Prevent adding beams between the *same* node after remapping
+        if final_v1_id == final_v2_id:
+            # print(f"Debug: Skipping beam between same node after remapping: {final_v1_id}")
             continue
-        if beam_indices == '-1': # Newly added beam
-            v1, v2 = e.verts[0], e.verts[1]
-            # <<< Use current node ID layer for newly added beams >>>
-            v1_node_id, v2_node_id = v1[node_id_layer].decode('utf-8'), v2[node_id_layer].decode('utf-8')
-            beam_tup = (v1_node_id, v2_node_id)
-            beams_to_add.add(beam_tup)
-            continue
+        # --- End Node Remapping ---
 
-        for idx in beam_indices.split(','):
-            blender_beams.add(int(idx))
+        current_beam_tuple = tuple(sorted((final_v1_id, final_v2_id))) # <<< Use remapped IDs
 
-    # Get beams to delete
-    beam_idx_in_part = 1
+        if beam_indices_str == '-1': # Standard case: Explicitly marked as new
+            beams_to_add_tuples.add(current_beam_tuple)
+            continue # Don't add to blender_beams_indices
 
-    for i, beam in enumerate(init_beams_data, 1):
-        if 'partOrigin' in beam and beam['partOrigin'] != jbeam_part:
-            continue
-        if '__virtual' not in beam:
-            delete_nodes = (beam['id1:'] in nodes_to_delete, beam['id2:'] in nodes_to_delete)
-            if (any(delete_nodes) and affect_node_references) or (not any(delete_nodes) and beam_idx_in_part not in blender_beams):
-                beams_to_delete.add(beam_idx_in_part)
+        elif beam_indices_str == '': # Case: Edge exists but has no JBeam data (e.g., Symmetrize didn't copy/set layer)
+            # Treat as new IF nodes are valid (already checked above)
+            beams_to_add_tuples.add(current_beam_tuple)
+            # Mark it so it's handled correctly if export runs again
+            try:
+                e[beam_indices_layer] = b'-1'
+                e[beam_part_origin_layer] = bytes(jbeam_part, 'utf-8')
+            except Exception as layer_err:
+                print(f"Warning: Could not update layers for newly detected beam (empty index): {layer_err}", file=sys.stderr)
+            continue # Don't add to blender_beams_indices
 
-        beam_idx_in_part += 1
+        else: # Case: Edge has existing JBeam indices (e.g., original beam or Symmetrize copied indices)
+            try:
+                indices_in_part = set()
+                valid_indices_found = False
+                for idx_str in beam_indices_str.split(','):
+                    idx = int(idx_str)
+                    if idx > 0: # Only consider valid positive indices
+                        indices_in_part.add(idx)
+                        valid_indices_found = True
+
+                if not valid_indices_found:
+                    # If indices were like "0" or otherwise invalid (e.g., non-integer),
+                    # treat it like the '' case if nodes are valid.
+                    print(f"Warning: Edge {i} had non-empty but invalid indices '{beam_indices_str}'. Treating as new beam {current_beam_tuple}.")
+                    beams_to_add_tuples.add(current_beam_tuple)
+                    try:
+                        e[beam_indices_layer] = b'-1' # Mark as new
+                        e[beam_part_origin_layer] = bytes(jbeam_part, 'utf-8')
+                    except Exception as layer_err:
+                        print(f"Warning: Could not update layers for beam with invalid indices: {layer_err}", file=sys.stderr)
+                    continue # Don't add to blender_beams_indices
+
+                # Check if this beam (defined by current node IDs) exists in the initial data
+                if current_beam_tuple not in init_beams_map:
+                    # Beam exists in Blender with valid indices, but doesn't match any beam in the original data using CURRENT node IDs.
+                    # This is likely a new beam (e.g., from Symmetrize which copied indices, or nodes were renamed). Treat as new.
+                    beams_to_add_tuples.add(current_beam_tuple)
+                    # Mark it as new for future runs
+                    try:
+                        e[beam_indices_layer] = b'-1'
+                        e[beam_part_origin_layer] = bytes(jbeam_part, 'utf-8')
+                    except Exception as layer_err:
+                        print(f"Warning: Could not update layers for newly detected beam (copied index): {layer_err}", file=sys.stderr)
+                    # Don't add its indices to blender_beams_indices, it's being added.
+                else:
+                    # Beam exists in Blender AND matches an initial beam. Add its indices for deletion check.
+                    blender_beams_indices.update(indices_in_part)
+
+            except ValueError:
+                print(f"Warning: Invalid beam index found: '{beam_indices_str}' on edge {i}. Skipping.", file=sys.stderr)
+                # Treat as new if nodes are valid
+                print(f"Info: Treating edge {i} with invalid indices '{beam_indices_str}' as new beam {current_beam_tuple}.")
+                beams_to_add_tuples.add(current_beam_tuple)
+                try:
+                    e[beam_indices_layer] = b'-1' # Mark as new
+                    e[beam_part_origin_layer] = bytes(jbeam_part, 'utf-8')
+                except Exception as layer_err:
+                    print(f"Warning: Could not update layers for beam with invalid indices: {layer_err}", file=sys.stderr)
+                continue # Don't add to blender_beams_indices
+
+    # --- Deletion Logic (largely the same, but uses blender_beams_indices) ---
+    beams_to_delete_indices = set()
+    beam_idx_in_part = 0
+
+    # Ensure init_beams_data is a list
+    if not isinstance(init_beams_data, list):
+        print("Warning: Initial beams data is not a list. Cannot process deletions.", file=sys.stderr)
+        init_beams_data = [] # Treat as empty list
+
+    for i, beam in enumerate(init_beams_data):
+        # Check if beam is a dictionary and has partOrigin
+        if isinstance(beam, dict):
+            # Only consider beams originating from the current part being processed
+            if beam.get('partOrigin') != jbeam_part:
+                continue
+
+            beam_idx_in_part += 1 # Increment index *only* for beams belonging to this part
+
+            # Check if beam is virtual or if nodes are marked for deletion
+            if '__virtual' not in beam:
+                id1 = beam.get('id1:')
+                id2 = beam.get('id2:')
+                # Ensure node IDs exist before checking deletion set
+                if id1 is None or id2 is None:
+                    print(f"Warning: Beam at index {i} (part index {beam_idx_in_part}) is missing node IDs. Skipping deletion check.", file=sys.stderr)
+                    continue
+
+                delete_nodes = (id1 in nodes_to_delete, id2 in nodes_to_delete)
+
+                # Condition 1: Delete if affecting references and any node is deleted
+                # Condition 2: Delete if not affecting references OR no nodes deleted, AND the beam index is NOT found in Blender
+                # Check using the populated blender_beams_indices set
+                if (affect_node_references and any(delete_nodes)) or \
+                   (not any(delete_nodes) and beam_idx_in_part not in blender_beams_indices):
+                    beams_to_delete_indices.add(beam_idx_in_part) # Add the index within the part
+        else:
+            # Handle cases where beam entry is not a dictionary (e.g., just the header)
+            # Don't increment beam_idx_in_part for non-dict entries
+            pass
+
+    # Assign final sets
+    beams_to_add = beams_to_add_tuples
+    beams_to_delete = beams_to_delete_indices
+
+    # <<< Keep the check for beams added due to triangles >>>
+    # This might need adjustment if the triangle logic changes, but keep for now.
+    # if 'triangles' in jbeam_file_data_modified.get(jbeam_part, {}):
+    #     tris_to_add_nodes = set()
+    #     # This part is tricky as tris_to_add isn't directly available here.
+    #     # We might need to re-evaluate this filtering step or pass tris_to_add.
+    #     # For now, let's comment it out as it might be incorrect in this context.
+    #     # for tri in tris_to_add: # Assuming tris_to_add is available somehow
+    #     #     tris_to_add_nodes.add(tuple(sorted(tri)))
+    #     #
+    #     # beams_to_add_copy = beams_to_add.copy()
+    #     # for beam_nodes in beams_to_add_copy:
+    #     #     # Check if this beam is part of any triangle being added
+    #     #     for tri_nodes in tris_to_add_nodes:
+    #     #         if set(beam_nodes).issubset(tri_nodes):
+    #     #             if beam_nodes in beams_to_add:
+    #     #                 beams_to_add.remove(beam_nodes)
+    #     #             break # Move to next beam once removed
+    #     pass
 
     return beams_to_add, beams_to_delete
 
@@ -1209,6 +1438,9 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
     add_tris_flag = len(tris_to_add) > 0
     add_quads_flag = len(quads_to_add) > 0
 
+    # <<< Make a mutable copy for beams to add >>>
+    beams_to_add_copy = beams_to_add.copy()
+
     # <<< Make a mutable copy for symmetrical nodes >>>
     nodes_to_add_symmetrically_copy = nodes_to_add_symmetrically.copy()
 
@@ -1383,7 +1615,8 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
 
                                 # Defaults
                                 comma_wsc_for_mirrored = ASTNode('wsc', ',')
-                                indent_wsc_for_new = ASTNode('wsc', NL_TWO_INDENT)
+                                # <<< MODIFIED: Get indentation from mirrored node >>>
+                                mirrored_indentation = _get_indentation_from_previous_wsc(ast_nodes, jbeam_entry_start_node_idx)
                                 trailing_wsc_after_insertion = ''
 
                                 # Check the node immediately following the mirrored node's ']'
@@ -1406,7 +1639,8 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
                                 # --- Insert the new symmetrical nodes ---
                                 for k, (new_node_id, node_pos) in enumerate(nodes_to_insert_here):
                                     # Insert the indentation
-                                    ast_nodes.insert(insert_idx, indent_wsc_for_new)
+                                    # <<< MODIFIED: Use extracted indentation >>>
+                                    ast_nodes.insert(insert_idx, ASTNode('wsc', mirrored_indentation))
                                     insert_idx += 1
 
                                     # --- Copy and Modify Mirrored Node Entry ---
@@ -1464,6 +1698,125 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
                             i = delete_jbeam_entry(ast_nodes, jbeam_section_start_node_idx, jbeam_entry_start_node_idx, jbeam_entry_end_node_idx)
                             jbeam_def_deleted = True
 
+                        # <<< MODIFIED: Symmetrical Beam Insertion Logic >>>
+                        elif not jbeam_def_deleted and beams_to_add_copy:
+                            # Get the node IDs of the current beam being processed in the AST
+                            current_beam_id1 = jbeam_section_def[jbeam_section_header_lookup['id1:']]
+                            current_beam_id2 = jbeam_section_def[jbeam_section_header_lookup['id2:']]
+
+                            # Find the symmetrical counterparts of the current beam's nodes
+                            ui_props = bpy.context.scene.ui_properties # Get UI props
+                            sym_id1 = get_symmetrical_node_id(current_beam_id1, ui_props)
+                            sym_id2 = get_symmetrical_node_id(current_beam_id2, ui_props)
+
+                            beam_to_insert = None
+                            if sym_id1 and sym_id2:
+                                # Check if the symmetrical beam exists in the set of beams to add
+                                potential_sym_beam = tuple(sorted((sym_id1, sym_id2)))
+                                if potential_sym_beam in beams_to_add_copy:
+                                    beam_to_insert = potential_sym_beam
+
+                            if beam_to_insert:
+                                # Found the symmetrical counterpart in the add list! Insert it here.
+                                insert_idx = jbeam_entry_end_node_idx + 1 # Index right after current beam's ']'
+
+                                # --- Whitespace/Comma Handling (Same as previous attempt) ---
+                                # <<< MODIFIED: Get indentation from mirrored beam >>>
+                                mirrored_indentation = _get_indentation_from_previous_wsc(ast_nodes, jbeam_entry_start_node_idx)
+                                comma_part_for_original = ',' # Default comma for original beam
+                                next_element_leading_indent = mirrored_indentation # Default indent for next element
+
+                                node_after_current = ast_nodes[insert_idx] if insert_idx < len(ast_nodes) else None
+
+                                if node_after_current and node_after_current.data_type == 'wsc':
+                                    original_wsc_value = node_after_current.value
+                                    nl_pos = original_wsc_value.find('\n')
+
+                                    if nl_pos != -1: # Found a newline
+                                        comma_part_for_original = original_wsc_value[:nl_pos] # Includes comma and maybe spaces
+                                        next_element_leading_indent = original_wsc_value[nl_pos:] # Includes newline and indent
+                                    else: # No newline, just whitespace (e.g., ', ')
+                                        comma_part_for_original = original_wsc_value
+                                        # next_element_leading_indent remains default (mirrored_indentation)
+
+                                    # Remove the original WSC node that we just split/used
+                                    del ast_nodes[insert_idx]
+                                elif node_after_current and node_after_current.data_type == ']':
+                                    # Current beam was the last in the section.
+                                    # Original beam still needs a comma because we are adding one after it.
+                                    comma_part_for_original = ','
+                                    # Find the WSC node *before* the section ']' to use as the final indent
+                                    section_end_wsc_idx = get_prev_node(ast_nodes, insert_idx, ['wsc']) # Find WSC before the ']'
+                                    if section_end_wsc_idx != -1:
+                                         next_element_leading_indent = ast_nodes[section_end_wsc_idx].value
+                                         # Remove the original end WSC node
+                                         del ast_nodes[section_end_wsc_idx]
+                                         # Adjust insert_idx as we deleted a node before it
+                                         insert_idx -= 1
+                                    else: # Should not happen if formatting is standard
+                                         next_element_leading_indent = NL_INDENT # Fallback indent before section ']'
+                                else:
+                                     # Unexpected node after current beam's ']', default to comma
+                                     comma_part_for_original = ','
+                                     # Assume standard indent for next line if structure is weird
+                                     next_element_leading_indent = mirrored_indentation
+                                # --- End Whitespace/Comma Handling ---
+
+                                # --- Insertion ---
+                                # 1. Insert trailing comma/space for the *original* beam
+                                ast_nodes.insert(insert_idx, ASTNode('wsc', comma_part_for_original))
+                                insert_idx += 1
+
+                                # 2. Insert indentation for the *new* symmetrical beam
+                                ast_nodes.insert(insert_idx, ASTNode('wsc', mirrored_indentation))
+                                insert_idx += 1
+
+                                # 3. <<< MODIFIED: Insert the new beam's AST nodes by copying and modifying the original >>>
+                                copied_beam_nodes = []
+                                id1_found = False
+                                id2_found = False
+                                for node_idx in range(jbeam_entry_start_node_idx, jbeam_entry_end_node_idx + 1):
+                                    original_node = ast_nodes[node_idx]
+                                    # Create a copy of the node
+                                    copied_node = ASTNode(original_node.data_type, original_node.value,
+                                                          precision=original_node.precision,
+                                                          prefix_plus=original_node.prefix_plus,
+                                                          add_post_fix_dot=original_node.add_post_fix_dot)
+                                    copied_node.start_pos = -1 # Reset positions as they are invalid for the new copy
+                                    copied_node.end_pos = -1
+
+                                    # Modify node IDs within the copied nodes
+                                    if copied_node.data_type == '"':
+                                        if not id1_found:
+                                            copied_node.value = beam_to_insert[0] # Use the sorted tuple from beam_to_insert
+                                            id1_found = True
+                                        elif not id2_found:
+                                            copied_node.value = beam_to_insert[1]
+                                            id2_found = True
+
+                                    copied_beam_nodes.append(copied_node)
+
+                                # Insert the copied and modified nodes
+                                ast_nodes[insert_idx:insert_idx] = copied_beam_nodes # Efficient list insertion
+                                insert_idx += len(copied_beam_nodes)
+                                # <<< END MODIFIED STEP 3 >>>
+
+                                # 4. Insert comma for the *new* symmetrical beam
+                                ast_nodes.insert(insert_idx, ASTNode('wsc', ','))
+                                insert_idx += 1
+
+                                # 5. Insert the leading whitespace/indentation for the *next original* element (or section end)
+                                ast_nodes.insert(insert_idx, ASTNode('wsc', next_element_leading_indent))
+                                insert_idx += 1
+                                # --- End Insertion ---
+
+                                # Remove the beam from the copy set
+                                beams_to_add_copy.remove(beam_to_insert)
+
+                                # Adjust the main loop index
+                                i = insert_idx - 1
+                        # <<< END MODIFIED Symmetrical Beam Insertion Logic >>>
+
                 elif stack_head[0] == 'triangles':
                     # If current jbeam tri is part of delete list, remove the tri definition
                     if len(jbeam_section_def) > 0:
@@ -1511,8 +1864,9 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
                     add_nodes_flag = False
 
                 elif prev_stack_head_key == 'beams' and beams_to_add:
-                    i = add_jbeam_beams(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx, beams_to_add)
-                    add_beams_flag = False
+                    # <<< Use the remaining beams in beams_to_add_copy >>>
+                    i = add_jbeam_beams(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx, list(beams_to_add_copy))
+                    add_beams_flag = False # Mark as handled even if copy is empty now
 
                 elif prev_stack_head_key == 'triangles' and tris_to_add:
                     i = add_jbeam_triangles(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx, tris_to_add)
@@ -1540,8 +1894,9 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
                     add_nodes_flag = False
 
                 if add_beams_flag:
+                    # <<< Use the remaining beams in beams_to_add_copy >>>
                     i, jbeam_section_start_node_idx, jbeam_section_end_node_idx = add_beams_section(ast_nodes, jbeam_section_end_node_idx)
-                    i = add_jbeam_beams(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx, beams_to_add)
+                    i = add_jbeam_beams(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx, list(beams_to_add_copy))
                     i = get_next_non_wsc_node(ast_nodes, i + 1)
                     add_beams_flag = False
 
@@ -1752,6 +2107,10 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
 
     # Return the reimport_needed flag calculated in the first loop
     return reimport_needed
+
+def end_export_cycle():
+    """Clears temporary state after an export cycle."""
+    jb_globals.node_overlap_remap.clear()
 
 
 def export_file_to_disk(jbeam_filepath: str):

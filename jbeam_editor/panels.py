@@ -33,6 +33,7 @@ from .operators import ( # Import operators used in panels
     JBEAM_EDITOR_OT_find_node,
     JBEAM_EDITOR_OT_batch_node_renaming,
     JBEAM_EDITOR_OT_open_text_editor_split,
+    JBEAM_EDITOR_OT_reload_jbeam_from_disk, # <<< ADDED: Import new operator
 )
 from .drawing import resolve_jbeam_variable_value
 
@@ -50,7 +51,10 @@ class JBEAM_EDITOR_PT_transform_panel_ext(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        # <<< MOVED: Reload button moved here >>>
+        layout.operator(JBEAM_EDITOR_OT_reload_jbeam_from_disk.bl_idname, text=" Reload JBeam from Disk", icon='FILE_REFRESH')
         layout.operator(JBEAM_EDITOR_OT_force_jbeam_sync.bl_idname, text='Force JBeam Sync')
+        layout.separator() # Add separator after buttons
 
 
 class JBEAM_EDITOR_PT_jbeam_panel(bpy.types.Panel):
@@ -152,7 +156,7 @@ class JBEAM_EDITOR_PT_find_node(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'JBeam'
-    bl_label = 'Find Node by ID (3D Viewport)'
+    bl_label = 'Find Element by ID (3D Viewport)' # <<< MODIFIED LABEL
     bl_icon = 'VIEWZOOM'
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -177,8 +181,11 @@ class JBEAM_EDITOR_PT_find_node(bpy.types.Panel):
         col = box.column(align=True)
         col.enabled = obj.mode == 'EDIT' and editing_enabled
 
+        # Display the label first
+        col.label(text="Element ID:")
+        # Put the text box and button on the next row
         row = col.row(align=True)
-        row.prop(ui_props, 'search_node_id', text="")
+        row.prop(ui_props, 'search_node_id', text="") # Remove text label from prop itself
         row.operator(JBEAM_EDITOR_OT_find_node.bl_idname, text="", icon='VIEWZOOM')
 
 
