@@ -129,14 +129,6 @@ def init_keymaps():
     kmi_redo = km_window.keymap_items.new("jbeam_editor.redo", 'RIGHT_BRACKET', 'PRESS', ctrl=True)
     keymaps_added.extend([(km_window, kmi_undo), (km_window, kmi_redo)])
 
-    # --- Native Undo/Redo Interception (Now in Window context) ---
-    # <<< REMOVE THIS BLOCK - We don't need the 'Mesh' keymap for this anymore >>>
-    # # Find or create keymap for 3D View > Mesh Edit Mode
-    # km_mesh_edit = kc.keymaps.get('Mesh')
-    # if not km_mesh_edit:
-    #     km_mesh_edit = kc.keymaps.new(name='Mesh', space_type='EMPTY') # Use EMPTY if specific context is tricky
-    # <<< END REMOVAL >>>
-
     # <<< MODIFIED: Add the native interceptors to the 'Window' keymap >>>
     # Map Ctrl+Z to our warning operator in the Window context
     kmi_native_undo = km_window.keymap_items.new(JBEAM_EDITOR_OT_warn_native_undo.bl_idname, 'Z', 'PRESS', ctrl=True)

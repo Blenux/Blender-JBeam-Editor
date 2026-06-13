@@ -45,7 +45,6 @@ _selected_node_line_info = None # Dict: {'line': int, 'pos': Vector}
 batch_node_renaming_enabled = False
 # _last_op is managed in handlers.py
 confirm_delete_pending = False # <<< ADDED: Flag to indicate confirmation dialog is active
-# native_undo_redo_warning_shown = False # <<< REMOVE THIS LINE >>>
 
 # Highlight on Click state
 # <<< MODIFIED LINE >>>
@@ -53,7 +52,6 @@ highlighted_element_type = None # 'node', 'beam', 'rail', 'torsionbar', 'cross_p
 # highlighted_element_coords is now managed in drawing.py
 highlighted_element_color = (1.0, 1.0, 1.0, 1.0) # Default white (outer color for torsionbar)
 highlighted_element_mid_color = (1.0, 0.0, 0.0, 1.0) # Default red (middle color for torsionbar)
-highlighted_element_original_width = 1.0
 highlighted_node_ids = set() # For quick membership checks (e.g., text coloring)
 highlighted_element_ordered_node_ids = [] # <<< ADDED: Store IDs in order for drawing
 _populating_search_id_from_highlight = False # <<< ADDED: Flag for search update control

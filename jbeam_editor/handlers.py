@@ -32,7 +32,9 @@ from mathutils import Vector
 # Import from local modules
 from . import constants
 from . import globals as jb_globals # Import globals
+# <<< MODIFIED: Import text_editor module itself >>>
 from . import text_editor
+# <<< END MODIFIED >>>
 from . import export_vehicle
 from . import export_jbeam
 # Import drawing module and specific elements needed
@@ -59,6 +61,8 @@ from .drawing import (
     dynamic_beam_batch,
     # Highlight batches
     highlight_render_batch, highlight_torsionbar_outer_batch, highlight_torsionbar_mid_batch,
+    # <<< ADDED: Import highlight dirty flag >>>
+    _highlight_dirty,
 )
 from .operators import JBEAM_EDITOR_OT_batch_node_renaming # Import operator for bl_idname
 from .text_editor import SCENE_SHORT_TO_FULL_FILENAME
@@ -157,20 +161,25 @@ def draw_callback_text_editor(context: bpy.types.Context):
             highlight_torsionbar_mid_coords.clear()
             jb_globals.highlighted_node_ids.clear() # <<< ADDED: Clear node IDs on error
             jb_globals.highlighted_element_type = None
-            drawing.veh_render_dirty = True
-            _tag_redraw_3d_views(context)
+            _tag_redraw_3d_views(context) # Always tag redraw for highlight update
+            # <<< ADDED: Mark highlight dirty if it was previously active >>>
+            drawing._highlight_dirty = True # Use drawing module's flag
             if text_obj: jb_globals.last_text_area_info['name'] = text_obj.name
             jb_globals.last_text_area_info['line_index'] = current_line_index
 
     # Clear highlight if marked (e.g., toggle turned off)
     elif highlight_needs_clearing:
+        was_highlighted = jb_globals.highlighted_element_type is not None # Check before clearing
         highlight_coords.clear()
         highlight_torsionbar_outer_coords.clear()
         highlight_torsionbar_mid_coords.clear()
         jb_globals.highlighted_node_ids.clear() # <<< ADDED: Clear node IDs when toggled off
+        jb_globals.highlighted_element_ordered_node_ids.clear() # Clear ordered list too
         jb_globals.highlighted_element_type = None
-        drawing.veh_render_dirty = True # Trigger 3D view redraw
-        _tag_redraw_3d_views(context) # Force 3D View redraw
+        _tag_redraw_3d_views(context) # Always tag redraw for highlight update
+        # <<< ADDED: Mark highlight dirty if it was previously active >>>
+        if was_highlighted:
+            drawing._highlight_dirty = True # Use drawing module's flag
 # <<< END DRAW HANDLER FUNCTION >>>
 
 # --- End Highlight on Click Logic ---
@@ -465,32 +474,6 @@ def poll_active_operators_timer():
     wm = context.window_manager
 
     try:
-        # <<< REMOVE Native Undo/Redo Warning Logic >>>
-        # active_obj = context.active_object # Get active object once
-        # is_native_undo_redo = op is not None and op.bl_idname in ('ed.undo', 'ed.redo')
-        #
-        # if is_native_undo_redo:
-        #     # Check context: active object, edit mode, jbeam part, editing enabled
-        #     if (active_obj is not None and
-        #         active_obj.mode == 'EDIT' and
-        #         active_obj.data is not None and
-        #         active_obj.data.get(constants.MESH_JBEAM_PART) is not None and
-        #         active_obj.data.get(constants.MESH_EDITING_ENABLED, False)):
-        #
-        #         # Show popup only if the flag is not set
-        #         if not jb_globals.native_undo_redo_warning_shown:
-        #             utils.show_message_box(
-        #                 icon='ERROR',
-        #                 title="Native Undo/Redo Warning",
-        #                 message="Native Undo/Redo (Ctrl+Z/Ctrl+Shift+Z) is NOT recommended for JBeam editing.\nIt can corrupt data or lead to unexpected behavior.\n\nPlease use the addon's Undo/Redo ([ / ]) instead."
-        #             )
-        #             # Set the flag to prevent showing the popup again for this specific action
-        #             jb_globals.native_undo_redo_warning_shown = True
-        # elif op != _last_op: # Reset flag only if a *different* operator becomes active
-        #     jb_globals.native_undo_redo_warning_shown = False
-        # <<< END REMOVAL >>>
-
-
         # --- Auto Export Logic ---
         active_obj = context.active_object # Get active object here if needed for export
         if active_obj is not None and active_obj.data is not None:
@@ -588,6 +571,12 @@ def load_post_handler(dummy):
     jb_globals.highlighted_element_type = None
     jb_globals.highlighted_node_ids.clear() # <<< ADDED: Clear highlighted node IDs
     jb_globals.last_text_area_info = {'name': None, 'line_index': -1}
+
+    # <<< ADDED: Explicitly reset text editor history >>>
+    text_editor.history_stack.clear()
+    text_editor.history_stack_idx = -1
+    print("JBeam Editor: Cleared text editor undo/redo history.")
+    # <<< END ADDED >>>
 
     # Reset drawing state
     drawing.veh_render_dirty = True # Force redraw on next cycle

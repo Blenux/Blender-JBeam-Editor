@@ -733,7 +733,7 @@ class JBEAM_EDITOR_OT_warn_native_undo(bpy.types.Operator):
     bl_idname = "jbeam_editor.warn_native_undo"
     bl_label = "JBeam Native Undo Warning"
     # bl_description is used in the draw method now
-    bl_description = "Native Undo (Ctrl+Z) is NOT recommended for JBeam editing as it can cause issues.\nProceed anyway?"
+    bl_description = "Native Undo ( Ctrl+Z ) is NOT recommended for JBeam editing as it can cause issues.\nPlease use the addon's Undo ( Ctrl+[ ) instead.\n\nProceed anyway?"
     bl_options = {'REGISTER', 'INTERNAL'}
 
     def invoke(self, context, event):
@@ -778,7 +778,7 @@ class JBEAM_EDITOR_OT_warn_native_redo(bpy.types.Operator):
     bl_idname = "jbeam_editor.warn_native_redo"
     bl_label = "JBeam Native Redo Warning"
     # bl_description is used in the draw method now
-    bl_description = "Native Redo (Ctrl+Shift+Z) is NOT recommended for JBeam editing as it can cause issues.\nProceed anyway?"
+    bl_description = "Native Redo ( Ctrl+Shift+Z ) is NOT recommended for JBeam editing as it can cause issues.\nPlease use the addon's Redo ( Ctrl+] ) instead.\n\nProceed anyway?"
     bl_options = {'REGISTER', 'INTERNAL'}
 
     def invoke(self, context, event):

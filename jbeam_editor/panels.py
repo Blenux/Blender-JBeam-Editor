@@ -444,12 +444,39 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
             row = col.row(); row.enabled = ui_props.show_selected_beam_outline
             row.prop(ui_props, 'selected_beam_thickness_multiplier', text="Selected Beam Multiplier")
 
-            # --- Node Visualization ---
+            # --- Node Visualization --- <<< MODIFIED SECTION START >>>
             col.separator()
-            col.prop(ui_props, 'toggle_node_ids_text', text="Show Node IDs Text")
-            row = col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_font_size', text="Font Size")
-            row = col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_outline_size', text="Outline Size")
-            row = col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_text_offset', text="Text Offset")
+            node_vis_box = col.box() # Put node settings in their own box
+            row = node_vis_box.row(align=True)
+            # <<< ADDED: Toggle for the whole node vis box >>>
+            row.prop(ui_props, "show_node_visualization_panel", icon="TRIA_DOWN" if ui_props.show_node_visualization_panel else "TRIA_RIGHT", icon_only=True, emboss=False)
+            row.label(text="Node Visualization", icon='OUTLINER_OB_POINTCLOUD') # Changed icon
+
+            if ui_props.show_node_visualization_panel: # Check the new toggle
+                node_vis_col = node_vis_box.column(align=True) # Use a new column inside the box
+
+                node_vis_col.prop(ui_props, 'toggle_node_ids_text', text="Show Node IDs Text")
+                row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_font_size', text="Font Size")
+                row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_outline_size', text="Outline Size")
+                row = node_vis_col.row(); row.enabled = ui_props.toggle_node_ids_text; row.prop(ui_props, 'node_id_text_offset', text="Text Offset")
+
+                # --- Dynamic Node Coloring Section ---
+                node_vis_col.separator()
+                node_vis_col.prop(ui_props, 'use_dynamic_node_coloring')
+                dyn_box = node_vis_col.box()
+                # Enable box only if dynamic coloring is on
+                dyn_box.enabled = ui_props.use_dynamic_node_coloring
+                dyn_col = dyn_box.column(align=True)
+                # Parameter is fixed to nodeWeight, so no selection needed
+                dyn_col.label(text="Parameter: nodeWeight")
+                dyn_col.prop(ui_props, 'use_auto_node_thresholds', text="Auto Thresholds")
+                # Disable manual thresholds if auto is on
+                row_low = dyn_col.row(); row_low.enabled = not ui_props.use_auto_node_thresholds
+                row_low.prop(ui_props, 'dynamic_node_color_threshold_low', text="Low Threshold")
+                row_high = dyn_col.row(); row_high.enabled = not ui_props.use_auto_node_thresholds
+                row_high.prop(ui_props, 'dynamic_node_color_threshold_high', text="High Threshold")
+                # --- End Dynamic Node Coloring Section ---
+            # --- Node Visualization --- <<< MODIFIED SECTION END >>>
 
             # --- 3D Lines Panel ---
             col.separator()
