@@ -243,8 +243,9 @@ def import_jbeam_part(context: bpy.types.Context, jbeam_file_path: str, jbeam_fi
                 if beam.get('partOrigin') is None:
                     beam['partOrigin'] = chosen_part
                     beams_updated_count += 1
-            if beams_updated_count > 0:
-                 print(f"Assigned missing 'partOrigin' to {beams_updated_count} beams in '{chosen_part}'.")
+            # Commented out the print statement
+            # if beams_updated_count > 0:
+            #      print(f"Assigned missing 'partOrigin' to {beams_updated_count} beams in '{chosen_part}'.")
         # <<< FIX END >>>
 
         vertices, edges, tris, quads, node_ids = get_vertices_edges_faces(part_data)
@@ -286,6 +287,7 @@ def import_jbeam_part(context: bpy.types.Context, jbeam_file_path: str, jbeam_fi
 
 def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collection, obj: bpy.types.Object, jbeam_file_path: str, regenerate_mesh: bool):
     obj_data: bpy.types.Mesh = obj.data
+    part_data = None # Initialize part_data to None
     try:
         # Reimport object
         jbeam_file_data, cached_changed = jbeam_io.get_jbeam(jbeam_file_path, True, True)
@@ -309,14 +311,15 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
                 if beam.get('partOrigin') is None:
                     beam['partOrigin'] = chosen_part
                     beams_updated_count += 1
-            if beams_updated_count > 0:
-                 print(f"Assigned missing 'partOrigin' to {beams_updated_count} beams in '{chosen_part}' during reimport.")
+            # Commented out the print statement
+            # if beams_updated_count > 0:
+            #      print(f"Assigned missing 'partOrigin' to {beams_updated_count} beams in '{chosen_part}' during reimport.")
         # <<< FIX END >>>
 
         if regenerate_mesh:
             vertices, edges, tris, quads, node_ids = get_vertices_edges_faces(part_data)
 
-            # --- BEGIN MODIFICATION: Store hidden edge AND VERTEX states ---
+            # Store hidden edge AND VERTEX states ---
             hidden_edges_state = {}
             hidden_verts_state = {} # <<< ADDED
             temp_bm = None
@@ -367,7 +370,7 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
             finally:
                 if temp_bm and obj.mode != 'EDIT': # Free temp bmesh if it wasn't the edit mesh
                     temp_bm.free()
-            # --- END MODIFICATION: Store hidden states ---
+            # Store hidden states ---
 
             # Now get the main bm and clear it
             if obj.mode == 'EDIT':
@@ -381,7 +384,7 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
             # Generate the new mesh content
             generate_part_mesh(obj, obj_data, bm, part_data, chosen_part, jbeam_file_path, vertices, edges, tris, quads, node_ids)
 
-            # --- BEGIN MODIFICATION: Apply hidden edge AND VERTEX states ---
+            # Apply hidden edge AND VERTEX states ---
             # --- Apply Edge Hidden State (Existing) ---
             beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
             beam_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
@@ -416,7 +419,6 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
                         if (part_origin, node_id) in hidden_verts_state:
                             vert.hide = hidden_verts_state[(part_origin, node_id)]
             # --- END ADDED ---
-            # --- END MODIFICATION ---
 
             bm.normal_update()
 
@@ -429,7 +431,19 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
             obj_data.update()
 
         # Update the stored JBeam data regardless of mesh regeneration
-        obj_data[constants.MESH_SINGLE_JBEAM_PART_DATA] = base64.b64encode(pickle.dumps(part_data, -1)).decode('ascii')
+        # Ensure part_data exists before trying to dump/encode it
+        if 'part_data' in locals() and part_data is not None:
+             obj_data[constants.MESH_SINGLE_JBEAM_PART_DATA] = base64.b64encode(pickle.dumps(part_data, -1)).decode('ascii')
+        else:
+            # If parsing/processing failed severely, part_data might not exist
+            # Clear the bundle in this case too
+            if constants.MESH_SINGLE_JBEAM_PART_DATA in obj_data:
+                try:
+                    # Set to encoded None to ensure safe failure on next load
+                    obj_data[constants.MESH_SINGLE_JBEAM_PART_DATA] = base64.b64encode(pickle.dumps(None, -1)).decode('ascii')
+                    print("Cleared single part data due to processing failure before assignment.")
+                except Exception as clear_err:
+                    print(f"Error clearing single part data after processing failure: {clear_err}", file=sys.stderr)
 
         context.scene['jbeam_editor_reimporting_jbeam'] = 1 # Prevents exporting jbeam
 
@@ -456,6 +470,14 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
         except Exception as clear_error:
             print(f"Error clearing mesh data after reimport failure: {clear_error}", file=sys.stderr)
 
+        # Clear the data bundle on any failure >>>
+        if constants.MESH_SINGLE_JBEAM_PART_DATA in obj_data:
+            try:
+                # Set to encoded None to ensure safe failure on next load
+                obj_data[constants.MESH_SINGLE_JBEAM_PART_DATA] = base64.b64encode(pickle.dumps(None, -1)).decode('ascii')
+                print("Cleared single part data due to reimport error.")
+            except Exception as clear_err:
+                print(f"Error clearing single part data: {clear_err}", file=sys.stderr)
 
         obj_data[constants.MESH_EDITING_ENABLED] = False # Disable editing on failure
 
@@ -647,4 +669,3 @@ class JBEAM_EDITOR_OT_import_jbeam(Operator, ImportHelper):
         bpy.ops.jbeam_editor.choose_jbeam('INVOKE_DEFAULT')
 
         return {'FINISHED'}
-

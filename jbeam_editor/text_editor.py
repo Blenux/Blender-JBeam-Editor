@@ -27,6 +27,8 @@ from . import constants
 from . import import_vehicle
 from . import import_jbeam
 from . import utils
+# # Add __init__ import at the top if not already there # <<< REMOVED CIRCULAR IMPORT
+# from . import __init__ as jbeam_editor_main           # <<< REMOVED CIRCULAR IMPORT
 
 SCENE_PREV_TEXTS = 'jbeam_editor_text_editor_files_text'
 #SCENE_FULL_TO_SHORT_FILENAME = 'jbeam_editor_text_editor_full_to_short_filename'
@@ -161,22 +163,34 @@ def check_open_int_file_for_changes(context: bpy.types.Context, undoing_redoing=
     last_file_text = scene[SCENE_PREV_TEXTS].get(short_filename, False)
     if last_file_text == False:
         return False
-    filename = scene[SCENE_SHORT_TO_FULL_FILENAME].get(short_filename)
-    if filename is None:
+    filename_full = scene[SCENE_SHORT_TO_FULL_FILENAME].get(short_filename) # Renamed variable
+    if filename_full is None:
         return False
 
     file_changed = False
+    # any_file_changed = False # <<< REMOVED: Not needed here anymore
 
     if curr_file_text != last_file_text:
+        # any_file_changed = True # <<< REMOVED
         # File changed!
         if constants.DEBUG:
-            print('file changed!', filename)
+            print('file changed!', filename_full)
 
         scene[SCENE_PREV_TEXTS][short_filename] = curr_file_text
 
-        import_vehicle.on_files_change(context, {filename: curr_file_text}, True)
-        import_jbeam.on_file_change(context, filename, True)
+        import_vehicle.on_files_change(context, {filename_full: curr_file_text}, True)
+        import_jbeam.on_file_change(context, filename_full, True)
         file_changed = True
+
+    # <<< REMOVED: Trigger external cache update if any file changed and toggle is on >>>
+    # if any_file_changed and hasattr(scene, 'ui_properties') and scene.ui_properties.toggle_cross_file_beams_vis:
+    #     jbeam_editor_main.external_nodes_cache_dirty = True # <<< REMOVED THIS LINE
+    #     # Force redraw of the 3D view to reflect potential visualization changes
+    #     for window in context.window_manager.windows:
+    #         for area in window.screen.areas:
+    #             if area.type == 'VIEW_3D':
+    #                 area.tag_redraw()
+    # <<< END REMOVED >>>
 
     if not undoing_redoing and file_changed:
         # Insert new history into history stack
@@ -204,36 +218,63 @@ def check_int_files_for_changes(context: bpy.types.Context, filenames: list, und
 
     files_changed_short_names = None
     files_changed = None
+    any_file_changed = False # Flag to track if any relevant file changed
 
     for filename in filenames:
         short_filename = _to_short_filename(filename)
-        text = bpy.data.texts[short_filename]
+        # <<< ADDED: Check if text exists before accessing >>>
+        text = bpy.data.texts.get(short_filename)
+        if not text:
+            # print(f"Warning: Text object '{short_filename}' not found during change check.")
+            continue
+        # <<< END ADDED >>>
+
         curr_file_text = text.as_string()
         last_file_text = scene[SCENE_PREV_TEXTS].get(short_filename, False)
         if last_file_text == False:
             continue
-        filename = scene[SCENE_SHORT_TO_FULL_FILENAME].get(short_filename)
-        if filename is None:
+        filename_full = scene[SCENE_SHORT_TO_FULL_FILENAME].get(short_filename) # Renamed variable
+        if filename_full is None:
             continue
 
         if curr_file_text != last_file_text:
+            any_file_changed = True # Mark change
             # File changed!
             if constants.DEBUG:
-                print('file changed!', filename)
+                print('file changed!', filename_full)
 
             scene[SCENE_PREV_TEXTS][short_filename] = curr_file_text
 
             if reimport:
-                import_jbeam.on_file_change(context, filename, regenerate_mesh)
+                # Check if it's the active file before calling single part reimport
+                active_obj = context.active_object
+                active_filepath = None
+                if active_obj and active_obj.data and active_obj.data.get(constants.MESH_JBEAM_FILE_PATH):
+                     active_filepath = active_obj.data.get(constants.MESH_JBEAM_FILE_PATH)
+
+                if filename_full == active_filepath:
+                    import_jbeam.on_file_change(context, filename_full, regenerate_mesh)
 
             if files_changed_short_names is None:
                 files_changed_short_names = {}
                 files_changed = {}
             files_changed_short_names[short_filename] = curr_file_text
-            files_changed[filename] = curr_file_text
+            files_changed[filename_full] = curr_file_text
 
     if reimport and files_changed is not None:
+        # Vehicle reimport handles multiple file changes
         import_vehicle.on_files_change(context, files_changed, regenerate_mesh)
+
+    # <<< REMOVED: Trigger external cache update if any file changed and toggle is on >>>
+    # if any_file_changed and hasattr(scene, 'ui_properties') and scene.ui_properties.toggle_cross_file_beams_vis:
+    #     jbeam_editor_main.external_nodes_cache_dirty = True # <<< REMOVED THIS LINE
+    #     # Force redraw of the 3D view to reflect potential visualization changes
+    #     for window in context.window_manager.windows:
+    #         for area in window.screen.areas:
+    #             if area.type == 'VIEW_3D':
+    #                 area.tag_redraw()
+    # <<< END REMOVED >>>
+
 
     if not undoing_redoing and files_changed_short_names is not None:
         # Insert new history into history stack
@@ -295,3 +336,4 @@ def on_undo_redo(context: bpy.types.Context, undoing: bool):
         filepaths.append(scene[SCENE_SHORT_TO_FULL_FILENAME].get(short_filename))
 
     check_int_files_for_changes(context, filepaths, True)
+

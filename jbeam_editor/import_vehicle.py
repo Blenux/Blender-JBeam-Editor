@@ -135,8 +135,12 @@ def load_vehicle(vehicle_directories: list[str], vehicle_config: dict, model_nam
                     # Optional: Log the beam that couldn't be fixed
                     # print(f"Warning: Could not infer partOrigin for beam: {beam.get('id1:', '?')}-{beam.get('id2:', '?')}")
 
-        if beams_missing_origin > 0:
-            print(f"Attempted to fix missing 'partOrigin' in {beams_missing_origin} beams. Successfully updated: {beams_updated_count}. Unable to fix: {beams_unable_to_fix}")
+        # Only print a warning if some beams could not be fixed
+        if beams_unable_to_fix > 0:
+            print(f"Warning: Unable to fix missing 'partOrigin' for {beams_unable_to_fix} beams during vehicle load.")
+        # Commented out the original message:
+        # if beams_missing_origin > 0:
+        #     print(f"Attempted to fix missing 'partOrigin' in {beams_missing_origin} beams. Successfully updated: {beams_updated_count}. Unable to fix: {beams_unable_to_fix}")
     # <<< FIX END >>>
 
     vehicle['vehicleDirectory'] = vehicle_directories[0]
@@ -437,7 +441,7 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
     prev_active_obj_name = context.active_object.name if context.active_object else None
     objs = veh_collection.all_objects
 
-    # --- BEGIN MODIFICATION: Store hidden states for ALL parts first ---
+    # Store hidden states for ALL parts first ---
     all_hidden_edges_state = {}
     all_hidden_verts_state = {} # <<< ADDED: Dictionary to store vertex hidden states
     for part in parts:
@@ -495,7 +499,7 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
                 # Only free if it wasn't the active edit mesh OR if it was created temporarily
                 if not (obj == context.active_object and obj.mode == 'EDIT'):
                     temp_bm.free()
-    # --- END MODIFICATION: Store hidden states ---
+    # Store hidden states ---
 
 
     # --- Loop through parts to regenerate/update meshes ---
@@ -528,7 +532,7 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
         # Generate the mesh content
         generate_part_mesh(obj, obj_data, bm, vehicle_bundle, part, vertices, parts_edges.get(part, []), parts_tris.get(part, []), parts_quads.get(part, []), node_index_to_id)
 
-        # --- BEGIN MODIFICATION: Apply hidden edge states ---
+        # Apply hidden edge states ---
         beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
         beam_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
         if beam_indices_layer and beam_origin_layer and all_hidden_edges_state:
@@ -544,7 +548,7 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
                             edge.hide = all_hidden_edges_state[(part_origin, first_index)]
                     except (ValueError, IndexError):
                         print(f"Warning: Could not parse beam index for applying hidden state (vehicle): {indices_str}", file=sys.stderr)
-        # --- END MODIFICATION: Apply hidden edge states ---
+        # Apply hidden edge states ---
 
         # --- ADDED: Apply hidden vertex states ---
         node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
@@ -603,6 +607,7 @@ def _reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Coll
 
 
 def reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Collection, jbeam_files: dict, regenerate_mesh: bool):
+    vehicle_bundle = None # Initialize vehicle_bundle
     try:
         config_path = veh_collection[constants.COLLECTION_PC_FILEPATH]
 
@@ -625,7 +630,19 @@ def reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Colle
             _reimport_vehicle(context, veh_collection, vehicle_bundle)
 
         # Save the potentially modified vehicle_bundle back >>>
-        veh_collection[constants.COLLECTION_VEHICLE_BUNDLE] = base64.b64encode(pickle.dumps(vehicle_bundle, -1)).decode('ascii')
+        # Ensure vehicle_bundle exists before trying to dump/encode it
+        if 'vehicle_bundle' in locals() and vehicle_bundle is not None:
+            veh_collection[constants.COLLECTION_VEHICLE_BUNDLE] = base64.b64encode(pickle.dumps(vehicle_bundle, -1)).decode('ascii')
+        else:
+             # If load_vehicle failed severely, vehicle_bundle might not exist
+             # Clear the bundle in this case too
+             if constants.COLLECTION_VEHICLE_BUNDLE in veh_collection:
+                try:
+                    # Set to encoded None to ensure safe failure on next load
+                    veh_collection[constants.COLLECTION_VEHICLE_BUNDLE] = base64.b64encode(pickle.dumps(None, -1)).decode('ascii')
+                    print("Cleared vehicle bundle due to load_vehicle failure before assignment.")
+                except Exception as clear_err:
+                    print(f"Error clearing vehicle bundle after load failure: {clear_err}", file=sys.stderr)
 
         context.scene['jbeam_editor_reimporting_jbeam'] = 1 # Prevents exporting jbeam
 
@@ -640,14 +657,17 @@ def reimport_vehicle(context: bpy.types.Context, veh_collection: bpy.types.Colle
         else:
             print('WARNING, done reimporting vehicle with errors. Some parts may not be imported.')
         return True
-    except:
-        # obj: bpy.types.Object
-        # for obj in veh_collection.all_objects[:]:
-        #     obj_data: bpy.types.Mesh = obj.data
-        #     obj_data[constants.MESH_PREV_HIDDEN] = obj.hide_get()
-        #     obj_data[constants.MESH_EDITING_ENABLED] = False
-        #     obj.hide_set(True)
+    except Exception as e: # Catch specific exceptions if possible, but broad Exception for now
         traceback.print_exc()
+        # Clear the bundle on any failure during reimport >>>
+        if constants.COLLECTION_VEHICLE_BUNDLE in veh_collection:
+            try:
+                # Set to encoded None to ensure safe failure on next load
+                veh_collection[constants.COLLECTION_VEHICLE_BUNDLE] = base64.b64encode(pickle.dumps(None, -1)).decode('ascii')
+                print("Cleared vehicle bundle due to reimport error.")
+            except Exception as clear_err:
+                 print(f"Error clearing vehicle bundle: {clear_err}", file=sys.stderr)
+        # The commented-out code for hiding objects can remain commented out
         return False
 
 
@@ -730,4 +750,3 @@ class JBEAM_EDITOR_OT_import_vehicle(Operator, ImportHelper):
         if not res:
             return {'CANCELLED'}
         return {'FINISHED'}
-
