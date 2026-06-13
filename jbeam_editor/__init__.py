@@ -22,7 +22,7 @@ bl_info = {
     "name": "Blender JBeam Editor",
     "description": "Modify BeamNG JBeam files in a 3D editor!",
     "author": "BeamNG",
-    "version": (0, 2, 55),
+    "version": (0, 2, 56),
     "blender": (4, 2, 0),
     "location": "File > Import > JBeam File / File > Export > JBeam File",
     "warning": "",
@@ -160,7 +160,7 @@ def _update_toggle_cross_part_beams_vis(self, context): # <<< RENAMED FUNCTION
 
 
 # Refresh property input field UI
-# <<< MODIFIED: Simplified rename logic >>>
+# Simplified rename logic >>>
 def on_input_node_id_field_updated(self, context: bpy.types.Context):
     global _force_do_export
     global selected_nodes
@@ -209,8 +209,6 @@ def on_input_node_id_field_updated(self, context: bpy.types.Context):
         for area in window.screen.areas:
             if area.type in ['VIEW_3D', 'PROPERTIES']:
                 area.tag_redraw()
-# <<< END MODIFIED >>>
-
 
 class UIProperties(bpy.types.PropertyGroup):
     input_node_id: bpy.props.StringProperty(
@@ -258,6 +256,17 @@ class UIProperties(bpy.types.PropertyGroup):
     )
     # <<< END ADDED >>>
 
+    # <<< NEW: Node ID Outline Size Property >>>
+    node_id_outline_size: bpy.props.IntProperty(
+        name="Node ID Outline Size",
+        description="Adjust the pixel thickness of the Node ID text outline (0 for no outline)",
+        default=2,
+        min=0,
+        max=5, # Keep a reasonable max to avoid performance issues
+        # No update function needed, draw_callback_px reads it directly
+    )
+    # <<< END NEW >>>
+
     # --- Tooltip Panel Toggle --- # <<< ADDED >>>
     show_tooltips_panel: bpy.props.BoolProperty(
         name="Tooltips",
@@ -293,7 +302,7 @@ class UIProperties(bpy.types.PropertyGroup):
         name="Line Tooltip Color",
         description="Color of the beam line number tooltip text",
         subtype='COLOR',
-        default=(1.0, 1.0, 1.0, 1.0), # Default White
+        default=(1.0, 1.0, 0.0, 1.0),
         min=0.0, max=1.0,
         size=4
     )
@@ -319,8 +328,6 @@ class UIProperties(bpy.types.PropertyGroup):
         size=4
     )
 
-    # --- REMOVED: Individual Beam Parameter Toggles ---
-
     # --- Node Tooltips ---
     show_node_tooltips_panel: bpy.props.BoolProperty(
         name="Node Tooltips",
@@ -337,7 +344,7 @@ class UIProperties(bpy.types.PropertyGroup):
         name="Line Tooltip Color",
         description="Color of the node line number tooltip text",
         subtype='COLOR',
-        default=(1.0, 1.0, 1.0, 1.0), # Default White
+        default=(1.0, 1.0, 0.0, 1.0),
         min=0.0, max=1.0,
         size=4
     )
@@ -1371,11 +1378,17 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
             col.separator()
             col.label(text="Node Visualization:")
             col.prop(ui_props, 'toggle_node_ids_text', text="Show Node IDs Text")
-            # <<< ADDED: Font Size Slider >>>
+
+            # Font Size Slider
             row = col.row()
             row.enabled = ui_props.toggle_node_ids_text # Disable slider if text is off
             row.prop(ui_props, 'node_id_font_size', text="Font Size")
-            # <<< END ADDED >>>
+
+            # <<< NEW: Outline Size Slider >>>
+            row = col.row()
+            row.enabled = ui_props.toggle_node_ids_text # Disable slider if text is off
+            row.prop(ui_props, 'node_id_outline_size', text="Outline Size")
+            # <<< END NEW >>>
 
             # --- Beam Visualization (Collapsible) ---
             col.separator()
@@ -1517,7 +1530,8 @@ def update_all_nodes_cache(context: bpy.types.Context): # <<< RENAMED FUNCTION
             if c == 123: # Starts with '{'
                 parsed_data, _ = bng_sjson._read_object(padded_content, i, full_filepath)
             else:
-                print(f"Warning: File {full_filepath} does not start with '{{', skipping node cache.")
+                # Don't warn for every non-JBeam file, just skip silently
+                # print(f"Warning: File {full_filepath} does not start with '{{', skipping node cache.")
                 continue
 
             if not parsed_data: continue
@@ -1535,21 +1549,41 @@ def update_all_nodes_cache(context: bpy.types.Context): # <<< RENAMED FUNCTION
                             y_idx = header.index("posY")
                             z_idx = header.index("posZ")
                         except (ValueError, IndexError):
-                            print(f"Warning: Invalid node header in {full_filepath} > {part_name}, skipping nodes.")
+                            # Don't warn for every part with a non-standard header
+                            # print(f"Warning: Invalid node header in {full_filepath} > {part_name}, skipping nodes.")
                             continue
 
                         for node_row in nodes_section[1:]:
                             if isinstance(node_row, list) and len(node_row) > max(id_idx, x_idx, y_idx, z_idx):
                                 node_id = node_row[id_idx]
                                 try:
-                                    # Assume external parts are at world origin (0,0,0)
-                                    pos = Vector((float(node_row[x_idx]), float(node_row[y_idx]), float(node_row[z_idx])))
+                                    # <<< MODIFICATION START >>>
+                                    # Check if position values are strings (likely expressions)
+                                    pos_x_val = node_row[x_idx]
+                                    pos_y_val = node_row[y_idx]
+                                    pos_z_val = node_row[z_idx]
+
+                                    # Attempt conversion, skip if it fails (due to expressions)
+                                    pos = Vector((float(pos_x_val), float(pos_y_val), float(pos_z_val)))
+                                    # <<< MODIFICATION END >>>
+
                                     if node_id in all_nodes_cache: # <<< USE RENAMED CACHE
                                         pass # Overwrite with the last one found
                                     # <<< Store part_name as part_origin >>>
                                     all_nodes_cache[node_id] = (pos, full_filepath, part_name) # <<< USE RENAMED CACHE & ADD part_name
-                                except (ValueError, TypeError) as e:
-                                     print(f"Warning: Could not parse node position for '{node_id}' in {full_filepath}: {e}")
+                                # <<< MODIFICATION START >>>
+                                # Catch ValueError specifically, which occurs for expressions like '$=...'
+                                except ValueError:
+                                     # It's expected that some nodes use expressions. Silently skip them
+                                     # during this external cache build.
+                                     # Optional: print a debug message if needed, but avoid user-facing warnings.
+                                     # if constants.DEBUG:
+                                     #    print(f"Debug: Skipping node '{node_id}' in {full_filepath} due to expression-based position.")
+                                     pass
+                                except TypeError as e:
+                                     # Catch other potential type errors during conversion
+                                     print(f"Warning: Could not parse node position for '{node_id}' in {full_filepath} (TypeError): {e}")
+                                # <<< MODIFICATION END >>>
 
         except Exception as e:
             print(f"Error processing file {full_filepath} for node cache: {e}", file=sys.stderr)
@@ -1672,11 +1706,47 @@ def draw_callback_px(context: bpy.types.Context):
     # Use UI property for font size >>>
     blfsize(font_id, ui_props.node_id_font_size)
     default_color = (1.0, 1.0, 1.0, 1.0) # Store default color
-    blfcolor(font_id, *default_color) # Set default white color
+    # <<< ADDED: Yellow color for selected nodes >>>
+    selected_color = (1.0, 1.0, 0.0, 1.0) # Yellow
+    # <<< END ADDED >>>
+    black_color = (0.0, 0.0, 0.0, 1.0) # Black outline color
+    # Read outline size from UI property >>>
+    outline_size = ui_props.node_id_outline_size
+
+    # --- Helper function for drawing text with outline ---
+    def draw_text_with_outline(font_id, text, x, y, text_color):
+        # Only draw outlines if size > 0 >>>
+        if outline_size > 0:
+            # Draw black outlines using outline_size >>>
+            blfcolor(font_id, *black_color)
+            lblfPosition(font_id, x - outline_size, y, 0)
+            lblfDraw(font_id, text)
+            lblfPosition(font_id, x + outline_size, y, 0)
+            lblfDraw(font_id, text)
+            lblfPosition(font_id, x, y - outline_size, 0)
+            lblfDraw(font_id, text)
+            lblfPosition(font_id, x, y + outline_size, 0)
+            lblfDraw(font_id, text)
+            # Optional: Add diagonal offsets for thicker outline (consider performance)
+            if outline_size > 1: # Only add diagonals if outline is thicker
+                 lblfPosition(font_id, x - outline_size, y - outline_size, 0); lblfDraw(font_id, text)
+                 lblfPosition(font_id, x + outline_size, y - outline_size, 0); lblfDraw(font_id, text)
+                 lblfPosition(font_id, x - outline_size, y + outline_size, 0); lblfDraw(font_id, text)
+                 lblfPosition(font_id, x + outline_size, y + outline_size, 0); lblfDraw(font_id, text)
+
+        # Draw original text
+        blfcolor(font_id, *text_color)
+        lblfPosition(font_id, x, y, 0)
+        lblfDraw(font_id, text)
+    # --- End helper function ---
 
     # --- Node ID Drawing ---
     toggleNodeText = ui_props.toggle_node_ids_text
     if toggleNodeText:
+        # <<< ADDED: Create set of selected indices for quick lookup >>>
+        selected_indices_set = {idx for idx, _ in selected_nodes} if active_obj.mode == 'EDIT' else set()
+        # <<< END ADDED >>>
+
         if is_vehicle_part:
             part_name_to_obj.clear()
             for obj in collection.all_objects:
@@ -1716,8 +1786,10 @@ def draw_callback_px(context: bpy.types.Context):
 
                         pos_text = location_3d_to_region_2d(ctxRegion, ctxRegionData, coord)
                         if pos_text:
-                            lblfPosition(font_id, pos_text[0], pos_text[1], 0)
-                            lblfDraw(font_id, node_id)
+                            # Choose color based on selection >>>
+                            text_color = selected_color if obj == active_obj and v.index in selected_indices_set else default_color
+                            # Use the helper function to draw with outline
+                            draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color)
 
                 except Exception as e:
                     print(f"Error processing part {obj.name} for drawing: {e}", file=sys.stderr)
@@ -1741,13 +1813,15 @@ def draw_callback_px(context: bpy.types.Context):
 
                     pos_text = location_3d_to_region_2d(ctxRegion, ctxRegionData, coord)
                     if pos_text:
-                        lblfPosition(font_id, pos_text[0], pos_text[1], 0)
-                        lblfDraw(font_id, node_id)
+                        # Choose color based on selection >>>
+                        text_color = selected_color if v.index in selected_indices_set else default_color
+                        # Use the helper function to draw with outline
+                        draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color)
 
     # --- Cross-Part Node ID Drawing --- # <<< RENAMED SECTION
-    # Check if cross-part beams are visible, cache exists, and JBeam data is loaded
-    if ui_props.toggle_cross_part_beams_vis and all_nodes_cache and curr_vdata and 'beams' in curr_vdata: # <<< USE RENAMED PROPERTY & CACHE
-        blfcolor(font_id, *ui_props.cross_part_beam_color) # Set color to cross-part beam color # <<< USE RENAMED PROPERTY
+    # Check if cross-part beams are visible, cache exists, JBeam data is loaded, AND Node ID text is toggled on >>>
+    if ui_props.toggle_cross_part_beams_vis and ui_props.toggle_node_ids_text and all_nodes_cache and curr_vdata and 'beams' in curr_vdata: # <<< ADDED toggle_node_ids_text CHECK & USE RENAMED PROPERTY & CACHE
+        cross_part_color = ui_props.cross_part_beam_color # Get color once # <<< USE RENAMED PROPERTY
 
         # --- Identify target external/cross-part nodes connected to the active part ---
         target_other_part_node_ids = set()
@@ -1779,148 +1853,117 @@ def draw_callback_px(context: bpy.types.Context):
                 # Convert 3D position to 2D screen coordinates
                 pos_text = location_3d_to_region_2d(ctxRegion, ctxRegionData, world_pos)
                 if pos_text:
-                    # Position and draw the node ID
-                    lblfPosition(font_id, pos_text[0], pos_text[1], 0)
-                    lblfDraw(font_id, node_id)
+                    # Use the helper function to draw with outline, using cross-part color
+                    draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], cross_part_color)
 
-        blfcolor(font_id, *default_color) # Reset color back to default
+    # --- Tooltip Positioning Calculations ---
+    padding_x = 65 # Default padding for left alignment
+    padding_y = 20
+    region_width = ctxRegion.width
+    region_height = ctxRegion.height
+    line_height = lblfDims(font_id, "X")[1]
+    line_padding = 4 # Vertical padding between lines
+    tooltip_placement = ui_props.tooltip_placement
 
-    # --- Beam Line Tooltip Drawing ---
-    global _selected_beam_line_info
-    if ui_props.toggle_beam_line_tooltip and _selected_beam_line_info is not None:
-        line_num = _selected_beam_line_info.get('line')
-        midpoint = _selected_beam_line_info.get('midpoint')
-        if line_num is not None and midpoint is not None:
-            pos_text = location_3d_to_region_2d(ctxRegion, ctxRegionData, midpoint)
-            if pos_text:
-                tooltip_text = f"Line: {line_num}" # Display 1-based line number
-                blfcolor(font_id, *ui_props.beam_line_tooltip_color)
-                lblfPosition(font_id, pos_text[0] + 10, pos_text[1] + 10, 0)
-                lblfDraw(font_id, tooltip_text)
-                blfcolor(font_id, *default_color) # Reset color
+    # Calculate bottom_left_x based on placement
+    est_max_width = 250 # Increased estimate for potentially longer lines
+    if tooltip_placement == 'BOTTOM_LEFT':
+        bottom_left_x = padding_x
+    elif tooltip_placement == 'BOTTOM_CENTER':
+        bottom_left_x = region_width / 2 - est_max_width / 2
+    elif tooltip_placement == 'BOTTOM_RIGHT':
+        bottom_left_x = region_width - est_max_width - padding_x
+    else: # Default to left
+        bottom_left_x = padding_x
 
-    # --- NEW: Node Line Tooltip Drawing ---
-    global _selected_node_line_info
-    if ui_props.toggle_node_line_tooltip and _selected_node_line_info is not None:
-        line_num = _selected_node_line_info.get('line')
-        node_pos = _selected_node_line_info.get('pos')
-        if line_num is not None and node_pos is not None:
-            pos_text = location_3d_to_region_2d(ctxRegion, ctxRegionData, node_pos)
-            if pos_text:
-                tooltip_text = f"Line: {line_num}" # Display 1-based line number
-                blfcolor(font_id, *ui_props.node_line_tooltip_color)
-                # Offset slightly differently from beam tooltip
-                lblfPosition(font_id, pos_text[0] + 10, pos_text[1] - 15, 0)
-                lblfDraw(font_id, tooltip_text)
-                blfcolor(font_id, *default_color) # Reset color
-    # --- END NEW ---
+    # --- Beam Tooltip Drawing ---
+    global _selected_beam_line_info, _selected_beam_params_info
+    beam_params_height = 0
+    beam_line_height_offset = 0
 
-    # --- Beam Parameters Tooltip Drawing ---
-    global _selected_beam_params_info
+    # Calculate height needed for beam params first
     if ui_props.toggle_beam_params_tooltip and _selected_beam_params_info is not None:
         params_list = _selected_beam_params_info.get('params_list')
         if params_list:
-            padding_x = 65 # Default padding for left alignment
-            padding_y = 20
-            region_width = ctxRegion.width # <<< ADDED: Get region width
-            region_height = ctxRegion.height
-            bottom_left_y = padding_y
+            beam_params_height = len(params_list) * (line_height + line_padding)
 
-            # Calculate bottom_left_x based on placement >>>
-            tooltip_placement = ui_props.tooltip_placement
-            if tooltip_placement == 'BOTTOM_LEFT':
-                bottom_left_x = padding_x
-            elif tooltip_placement == 'BOTTOM_CENTER':
-                bottom_left_x = region_width / 2 - 100 # Simple center offset, adjust as needed
-            elif tooltip_placement == 'BOTTOM_RIGHT':
-                bottom_left_x = region_width - 200 - padding_x # Simple right offset, adjust as needed
-            else: # Default to left
-                bottom_left_x = padding_x
+    # Calculate Y position for beam line tooltip (above params)
+    if ui_props.toggle_beam_line_tooltip and _selected_beam_line_info is not None:
+        line_num = _selected_beam_line_info.get('line')
+        if line_num is not None:
+            beam_line_y = padding_y + beam_params_height # Position above params
+            beam_line_height_offset = line_height + line_padding # Account for its height
+            tooltip_text = f"Line: {line_num+1}"
+            # Use helper function for outline
+            draw_text_with_outline(font_id, tooltip_text, bottom_left_x, beam_line_y, ui_props.beam_line_tooltip_color)
 
+    # Draw Beam Parameters Tooltip (below line number)
+    if ui_props.toggle_beam_params_tooltip and _selected_beam_params_info is not None:
+        params_list = _selected_beam_params_info.get('params_list')
+        if params_list:
             name_color = ui_props.beam_params_tooltip_color
             value_color = ui_props.beam_params_value_tooltip_color
-
-            line_height = lblfDims(font_id, "X")[1]
-            start_y = bottom_left_y + (len(params_list) -1) * (line_height + 4)
+            start_y = padding_y + (len(params_list) - 1) * (line_height + line_padding) # Start from bottom
 
             for i, (key, value_repr) in enumerate(params_list):
-                current_y = start_y - (i * (line_height + 4))
+                current_y = start_y - (i * (line_height + line_padding))
                 key_text = f"{key}: "
 
-                # Draw Key
-                blfcolor(font_id, *name_color)
-                lblfPosition(font_id, bottom_left_x, current_y, 0)
-                lblfDraw(font_id, key_text)
+                # Draw Key with outline
+                draw_text_with_outline(font_id, key_text, bottom_left_x, current_y, name_color)
 
                 # Calculate position for value
                 key_width = lblfDims(font_id, key_text)[0]
                 value_x = bottom_left_x + key_width
 
-                # Draw Value
-                blfcolor(font_id, *value_color)
-                lblfPosition(font_id, value_x, current_y, 0)
-                lblfDraw(font_id, value_repr)
+                # Draw Value with outline
+                draw_text_with_outline(font_id, value_repr, value_x, current_y, value_color)
 
-            blfcolor(font_id, *default_color) # Reset color
+    # --- Node Tooltip Drawing ---
+    global _selected_node_line_info, _selected_node_params_info
+    node_params_height = 0
+    node_line_height_offset = 0
+    # Calculate total height occupied by beam tooltips
+    total_beam_tooltip_height = beam_params_height + beam_line_height_offset
 
-    # --- Node Parameters Tooltip Drawing ---
-    global _selected_node_params_info
+    # Calculate height needed for node params
     if ui_props.toggle_node_params_tooltip and _selected_node_params_info is not None:
         params_list = _selected_node_params_info.get('params_list')
         if params_list:
-            node_padding_x = 65 # Default padding for left alignment
-            node_padding_y = 20
-            region_width = ctxRegion.width # <<< ADDED: Get region width
-            region_height = ctxRegion.height
-            bottom_left_y = node_padding_y
+            node_params_height = len(params_list) * (line_height + line_padding)
 
-            # Estimate beam tooltip height if it's visible
-            beam_tooltip_height = 0
-            if ui_props.toggle_beam_params_tooltip and _selected_beam_params_info:
-                beam_params_list = _selected_beam_params_info.get('params_list')
-                if beam_params_list:
-                    beam_line_height = lblfDims(font_id, "X")[1]
-                    beam_tooltip_height = len(beam_params_list) * (beam_line_height + 4) + 5
+    # Calculate Y position for node line tooltip (above node params and beam tooltips)
+    if ui_props.toggle_node_line_tooltip and _selected_node_line_info is not None:
+        line_num = _selected_node_line_info.get('line')
+        if line_num is not None:
+            node_line_y = padding_y + total_beam_tooltip_height + node_params_height # Position above everything else
+            node_line_height_offset = line_height + line_padding # Account for its height
+            tooltip_text = f"Line: {line_num}"
+            # Use helper function for outline
+            draw_text_with_outline(font_id, tooltip_text, bottom_left_x, node_line_y, ui_props.node_line_tooltip_color)
 
-            # Adjust node tooltip y position based on beam tooltip height
-            bottom_left_y += beam_tooltip_height
-
-            # Calculate bottom_left_x based on placement >>>
-            tooltip_placement = ui_props.tooltip_placement
-            if tooltip_placement == 'BOTTOM_LEFT':
-                bottom_left_x = node_padding_x
-            elif tooltip_placement == 'BOTTOM_CENTER':
-                bottom_left_x = region_width / 2 - 100 # Simple center offset, adjust as needed
-            elif tooltip_placement == 'BOTTOM_RIGHT':
-                bottom_left_x = region_width - 200 - node_padding_x # Simple right offset, adjust as needed
-            else: # Default to left
-                bottom_left_x = node_padding_x
-
+    # Draw Node Parameters Tooltip (below node line number, above beam tooltips)
+    if ui_props.toggle_node_params_tooltip and _selected_node_params_info is not None:
+        params_list = _selected_node_params_info.get('params_list')
+        if params_list:
             name_color = ui_props.node_params_tooltip_color
             value_color = ui_props.node_params_value_tooltip_color
-
-            line_height = lblfDims(font_id, "X")[1]
-            start_y = bottom_left_y + (len(params_list) -1) * (line_height + 4)
+            # Start Y position is above beam tooltips
+            start_y = padding_y + total_beam_tooltip_height + (len(params_list) - 1) * (line_height + line_padding)
 
             for i, (key, value_repr) in enumerate(params_list):
-                current_y = start_y - (i * (line_height + 4))
+                current_y = start_y - (i * (line_height + line_padding))
                 key_text = f"{key}: "
 
-                # Draw Key
-                blfcolor(font_id, *name_color)
-                lblfPosition(font_id, bottom_left_x, current_y, 0)
-                lblfDraw(font_id, key_text)
+                # Draw Key with outline
+                draw_text_with_outline(font_id, key_text, bottom_left_x, current_y, name_color)
 
                 # Calculate position for value
                 key_width = lblfDims(font_id, key_text)[0]
                 value_x = bottom_left_x + key_width
 
-                # Draw Value
-                blfcolor(font_id, *value_color)
-                lblfPosition(font_id, value_x, current_y, 0)
-                lblfDraw(font_id, value_repr)
-
-            blfcolor(font_id, *default_color) # Reset color
+                # Draw Value with outline
+                draw_text_with_outline(font_id, value_repr, value_x, current_y, value_color)
 
     # Final cleanup
     # Free bmesh if it was created for a single part in object mode
@@ -2080,7 +2123,7 @@ def draw_callback_view(context: bpy.types.Context):
         torsionbar_red_coords.clear()
         rail_coords.clear()
         # <<< ADDED: Clear cross-part coords >>> # <<< RENAMED COMMENT
-        cross_part_beam_coords.clear() # <<< RENAMED VARIABLE
+        cross_part_beam_coords.clear() # <<< USE RENAMED VARIABLE
         # <<< END ADDED >>>
 
         # active_obj is guaranteed to be valid JBeam and selected here
@@ -3346,7 +3389,7 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
         active_obj_data[constants.MESH_FACE_COUNT] = new_face_count
 
     # Update UI input field
-    # <<< MODIFIED: Removed rename_enabled logic >>>
+    # Removed rename_enabled logic >>>
     if len(selected_nodes) == 1:
         vert_index, init_node_id = selected_nodes[0]
         try:
@@ -3359,7 +3402,6 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
              # Clear the UI field if the vertex index is somehow invalid
              if ui_props.input_node_id != "":
                  ui_props.input_node_id = ""
-    # <<< END MODIFIED >>>
 
     # --- Tooltip Logic ---
     _selected_beam_line_info = None
