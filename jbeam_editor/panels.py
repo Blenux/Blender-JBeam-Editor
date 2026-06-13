@@ -32,6 +32,7 @@ from .operators import ( # Import operators used in panels
     JBEAM_EDITOR_OT_scroll_to_definition,
     JBEAM_EDITOR_OT_find_node,
     JBEAM_EDITOR_OT_batch_node_renaming,
+    JBEAM_EDITOR_OT_open_text_editor_split, # <<< ADD THIS IMPORT
 )
 
 class JBEAM_EDITOR_PT_transform_panel_ext(bpy.types.Panel):
@@ -95,6 +96,13 @@ class JBEAM_EDITOR_PT_jbeam_panel(bpy.types.Panel):
         if jbeam_part_name:
             layout.label(text=f'{jbeam_part_name}')
 
+            # --- ADDED: Button to open Text Editor ---
+            row = layout.row()
+            row.scale_y = 1.2 # Make button slightly bigger
+            row.operator(JBEAM_EDITOR_OT_open_text_editor_split.bl_idname, text=" Open JBeam File (Split View)", icon='TEXT')
+            layout.separator() # Add separator after the button
+            # --- END ADDED ---
+
             # --- Existing Functionality Box ---
             action_box = layout.box()
             col = action_box.column()
@@ -109,7 +117,7 @@ class JBEAM_EDITOR_PT_jbeam_panel(bpy.types.Panel):
             # Only enable if exactly one node or one beam is selected
             row = col.row()
             row.enabled = len_selected_verts == 1 or len_selected_beams == 1
-            row.operator(JBEAM_EDITOR_OT_scroll_to_definition.bl_idname, text="Find and Jump to (Text Editor)", icon='TEXT')
+            row.operator(JBEAM_EDITOR_OT_scroll_to_definition.bl_idname, text=" Find and Jump to (Text Editor)", icon='FOLDER_REDIRECT')
             col.separator() # Add separator after the button
 
             if len_selected_verts == 1:
@@ -128,6 +136,13 @@ class JBEAM_EDITOR_PT_jbeam_panel(bpy.types.Panel):
 
             if len_selected_faces > 0:
                 col.row().operator(JBEAM_EDITOR_OT_flip_jbeam_faces.bl_idname)
+
+            # --- ADDED: Documentation Button ---
+            layout.separator() # Add separator before the button
+            row = layout.row()
+            op = row.operator("wm.url_open", text="BeamNG Documentation", icon='URL')
+            op.url = "https://documentation.beamng.com/modding/vehicle/sections/"
+            # --- END ADDED ---
 
         # No need to free bm from edit mesh
 
@@ -399,7 +414,7 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
 
             col.label(text="General:")
 
-            # --- Tooltips Section ---
+            # --- Tooltips Section --- <<< MODIFIED >>>
             tooltips_box = col.box()
             row = tooltips_box.row(align=True)
             row.prop(ui_props, "show_tooltips_panel",
@@ -413,51 +428,20 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
                 tooltips_col.prop(ui_props, 'tooltip_placement', text="")
                 tooltips_col.separator()
 
-                # --- Node Tooltips Sub-panel ---
-                node_tooltip_box = tooltips_col.box()
-                row = node_tooltip_box.row(align=True)
-                row.prop(ui_props, "show_node_tooltips_panel",
-                         icon="TRIA_DOWN" if ui_props.show_node_tooltips_panel else "TRIA_RIGHT",
-                         icon_only=True, emboss=False)
-                row.label(text="Node Tooltips")
-
-                if ui_props.show_node_tooltips_panel:
-                    node_tooltip_col = node_tooltip_box.column(align=True)
-                    row = node_tooltip_col.row(align=True)
-                    row.prop(ui_props, 'toggle_node_line_tooltip', text="Show Line #")
-                    row = node_tooltip_col.row(align=True)
-                    row.prop(ui_props, 'node_line_tooltip_color', text="")
-                    row.enabled = ui_props.toggle_node_line_tooltip
-                    row = node_tooltip_col.row(align=True)
-                    row.prop(ui_props, 'toggle_node_params_tooltip', text="Show Parameters")
-                    row = node_tooltip_col.row(align=True)
-                    row.enabled = ui_props.toggle_node_params_tooltip
-                    split = row.split(factor=0.5, align=True)
-                    split.prop(ui_props, 'node_params_tooltip_color', text="Parameter")
-                    split.prop(ui_props, 'node_params_value_tooltip_color', text="Value")
-
-                # --- Beam Tooltips Sub-panel ---
-                beam_tooltip_box = tooltips_col.box()
-                row = beam_tooltip_box.row(align=True)
-                row.prop(ui_props, "show_beam_tooltips_panel",
-                         icon="TRIA_DOWN" if ui_props.show_beam_tooltips_panel else "TRIA_RIGHT",
-                         icon_only=True, emboss=False)
-                row.label(text="Beam Tooltips")
-
-                if ui_props.show_beam_tooltips_panel:
-                    beam_tooltip_col = beam_tooltip_box.column(align=True)
-                    row = beam_tooltip_col.row(align=True)
-                    row.prop(ui_props, 'toggle_beam_line_tooltip', text="Show Line #")
-                    row = beam_tooltip_col.row(align=True)
-                    row.prop(ui_props, 'beam_line_tooltip_color', text="")
-                    row.enabled = ui_props.toggle_beam_line_tooltip
-                    row = beam_tooltip_col.row(align=True)
-                    row.prop(ui_props, 'toggle_beam_params_tooltip', text="Show Parameters")
-                    row = beam_tooltip_col.row(align=True)
-                    row.enabled = ui_props.toggle_beam_params_tooltip
-                    split = row.split(factor=0.5, align=True)
-                    split.prop(ui_props, 'beam_params_tooltip_color', text="Parameter")
-                    split.prop(ui_props, 'beam_params_value_tooltip_color', text="Value")
+                # --- Shared Tooltip Settings ---
+                row = tooltips_col.row(align=True)
+                row.prop(ui_props, 'toggle_line_tooltip', text="Show Line #")
+                row = tooltips_col.row(align=True)
+                row.prop(ui_props, 'line_tooltip_color', text="")
+                row.enabled = ui_props.toggle_line_tooltip # Use shared toggle
+                row = tooltips_col.row(align=True)
+                row.prop(ui_props, 'toggle_params_tooltip', text="Show Parameters")
+                row = tooltips_col.row(align=True)
+                row.enabled = ui_props.toggle_params_tooltip # Use shared toggle
+                split = row.split(factor=0.5, align=True)
+                split.prop(ui_props, 'params_tooltip_color', text="Parameter")
+                split.prop(ui_props, 'params_value_tooltip_color', text="Value")
+            # --- End Tooltips Section ---
 
             # --- Master Visualization Toggle --- <<< ADDED >>>
             col.separator() # Separator before the master toggle

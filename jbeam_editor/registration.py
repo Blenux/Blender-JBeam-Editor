@@ -34,6 +34,7 @@ from .operators import (
     JBEAM_EDITOR_OT_batch_node_renaming,
     JBEAM_EDITOR_OT_find_node,
     JBEAM_EDITOR_OT_scroll_to_definition,
+    JBEAM_EDITOR_OT_open_text_editor_split, # <<< ADD THIS IMPORT
 )
 from .panels import (
     JBEAM_EDITOR_PT_transform_panel_ext,
@@ -70,6 +71,7 @@ classes = (
     JBEAM_EDITOR_OT_batch_node_renaming,
     JBEAM_EDITOR_OT_find_node,
     JBEAM_EDITOR_OT_scroll_to_definition,
+    JBEAM_EDITOR_OT_open_text_editor_split, # <<< ADD THIS CLASS
     JBEAM_EDITOR_PT_transform_panel_ext,
     JBEAM_EDITOR_PT_jbeam_panel,
     JBEAM_EDITOR_PT_find_node,

@@ -31,6 +31,9 @@ from . import drawing
 # This avoids circular import if drawing needs properties
 from .drawing import _update_toggle_cross_part_beams_vis, veh_render_dirty # Import veh_render_dirty
 
+# <<< ADDED: Import the helper function >>>
+from .operators import _find_and_select_node_id_logic
+
 # Refresh property input field UI
 # Simplified rename logic
 def on_input_node_id_field_updated(self, context: bpy.types.Context):
@@ -113,6 +116,18 @@ def _update_master_toggle_vis(self, context):
     # (though the scene property should be sufficient)
     setattr(drawing, 'veh_render_dirty', True)
 
+# <<< ADDED: Update callback for search_node_id >>>
+def _update_search_node_id(self, context):
+    """
+    Called when the search_node_id property changes.
+    Attempts to find and select the node.
+    """
+    search_id = self.search_node_id.strip()
+    if search_id: # Only attempt search if the field is not empty
+        # Call the helper logic. Feedback is handled by the helper.
+        # We don't need the return value here in the update callback.
+        _find_and_select_node_id_logic(context, search_id)
+    # No return needed for update callbacks
 
 class UIProperties(bpy.types.PropertyGroup):
     input_node_id: bpy.props.StringProperty(
@@ -125,8 +140,9 @@ class UIProperties(bpy.types.PropertyGroup):
     # Node Search Property
     search_node_id: bpy.props.StringProperty(
         name="Search Node ID",
-        description="Enter the Node ID to find and select",
+        description="Enter the Node ID to find and select (Press Enter to search)", # <<< Updated description
         default="",
+        update=_update_search_node_id # <<< Assign the update callback
     )
 
     batch_node_renaming_naming_scheme: bpy.props.StringProperty(
@@ -191,87 +207,42 @@ class UIProperties(bpy.types.PropertyGroup):
         default='BOTTOM_LEFT',
     )
 
-    # --- Beam Tooltips ---
-    show_beam_tooltips_panel: bpy.props.BoolProperty(
-        name="Beam Tooltips",
-        description="Expand to see beam tooltip options",
-        default=True,
-    )
-    toggle_beam_line_tooltip: bpy.props.BoolProperty(
-        name="Show Beam Line Tooltip",
-        description="Shows the JBeam file line number for a selected beam",
+    # --- Shared Tooltip Settings --- <<< MODIFIED >>>
+    toggle_line_tooltip: bpy.props.BoolProperty(
+        name="Show Line # Tooltip",
+        description="Shows the JBeam file line number for a selected node or beam",
         default=True
     )
-    beam_line_tooltip_color: bpy.props.FloatVectorProperty(
+    line_tooltip_color: bpy.props.FloatVectorProperty(
         name="Line Tooltip Color",
-        description="Color of the beam line number tooltip text",
+        description="Color of the line number tooltip text",
         subtype='COLOR',
         default=(1.0, 1.0, 0.0, 1.0),
         min=0.0, max=1.0,
         size=4
     )
-    toggle_beam_params_tooltip: bpy.props.BoolProperty(
-        name="Show Beam Params Tooltip",
-        description="Shows the parameters for a selected beam (mirrors Properties panel)",
+    toggle_params_tooltip: bpy.props.BoolProperty(
+        name="Show Parameters Tooltip",
+        description="Shows the parameters for a selected node or beam (mirrors Properties panel)",
         default=True
     )
-    beam_params_tooltip_color: bpy.props.FloatVectorProperty(
+    params_tooltip_color: bpy.props.FloatVectorProperty(
         name="Params Name Color",
-        description="Color of the beam parameter name tooltip text",
+        description="Color of the parameter name tooltip text",
         subtype='COLOR',
         default=(1.0, 1.0, 1.0, 1.0),
         min=0.0, max=1.0,
         size=4
     )
-    beam_params_value_tooltip_color: bpy.props.FloatVectorProperty(
+    params_value_tooltip_color: bpy.props.FloatVectorProperty(
         name="Params Value Color",
-        description="Color of the beam parameter value tooltip text",
+        description="Color of the parameter value tooltip text",
         subtype='COLOR',
         default=(0.0, 1.0, 0.0, 1.0),
         min=0.0, max=1.0,
         size=4
     )
-
-    # --- Node Tooltips ---
-    show_node_tooltips_panel: bpy.props.BoolProperty(
-        name="Node Tooltips",
-        description="Expand to see node tooltip options",
-        default=True,
-    )
-    toggle_node_line_tooltip: bpy.props.BoolProperty(
-        name="Show Node Line Tooltip",
-        description="Shows the JBeam file line number for a selected node",
-        default=True
-    )
-    node_line_tooltip_color: bpy.props.FloatVectorProperty(
-        name="Line Tooltip Color",
-        description="Color of the node line number tooltip text",
-        subtype='COLOR',
-        default=(1.0, 1.0, 0.0, 1.0),
-        min=0.0, max=1.0,
-        size=4
-    )
-    toggle_node_params_tooltip: bpy.props.BoolProperty(
-        name="Show Node Params Tooltip",
-        description="Shows the parameters for a selected node (mirrors Properties panel)",
-        default=True
-    )
-    node_params_tooltip_color: bpy.props.FloatVectorProperty(
-        name="Params Name Color",
-        description="Color of the node parameter name tooltip text",
-        subtype='COLOR',
-        default=(1.0, 1.0, 1.0, 1.0),
-        min=0.0, max=1.0,
-        size=4
-    )
-    node_params_value_tooltip_color: bpy.props.FloatVectorProperty(
-        name="Params Value Color",
-        description="Color of the node parameter value tooltip text",
-        subtype='COLOR',
-        default=(0.0, 1.0, 0.0, 1.0),
-        min=0.0, max=1.0,
-        size=4
-    )
+    # --- End Shared Tooltip Settings ---
 
     affect_node_references: bpy.props.BoolProperty(
         name="Affect Node References",
@@ -549,6 +520,6 @@ class UIProperties(bpy.types.PropertyGroup):
         name="Highlight Thickness Multiplier",
         description="Multiplier for the line width of the highlighted element",
         default=5.0,
-        min=1.0, max=20.0,
+        min=1.0, max=10.0,
         update=lambda self, context: setattr(drawing, 'veh_render_dirty', True) # Use drawing's dirty flag
     )

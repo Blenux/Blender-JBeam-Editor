@@ -291,11 +291,18 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
         except IndexError: pass
     jb_globals.previous_selected_indices = current_selected_indices
 
+    # --- MODIFICATION START ---
     for i, v in enumerate(bm.verts):
-        if i >= current_vert_count:
-            new_node_id = str(uuid.uuid4()); new_node_id_bytes = bytes(new_node_id, 'utf-8')
-            v[init_node_id_layer] = new_node_id_bytes; v[node_id_layer] = new_node_id_bytes
-            v[node_part_origin_layer] = bytes(active_obj_data[constants.MESH_JBEAM_PART], 'utf-8')
+        if i >= current_vert_count: # If this is a newly added vertex
+            # Assign a temporary ID. The final L/R/M prefix will be added during export.
+            temp_node_id = f"TEMP_{uuid.uuid4()}" # Use TEMP_ prefix for easy identification
+
+            temp_node_id_bytes = bytes(temp_node_id, 'utf-8')
+            v[init_node_id_layer] = temp_node_id_bytes # Assign as initial ID
+            v[node_id_layer] = temp_node_id_bytes      # Assign as current ID
+            v[node_part_origin_layer] = bytes(active_obj_data[constants.MESH_JBEAM_PART], 'utf-8') # Assign part origin
+            # v[is_fake_layer] should default to 0 (or be set if necessary)
+    # --- MODIFICATION END ---
 
     jb_globals.selected_beams.clear()
     for i, e in enumerate(bm.edges):
@@ -315,7 +322,8 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
                 f[face_idx_layer] = -1
                 f[face_part_origin_layer] = bytes(active_obj_data[constants.MESH_JBEAM_PART], 'utf-8')
         if face_idx != 0 and f.select:
-            jb_globals.selected_tris_quads.append((f, face_idx))
+            # <<< CHANGE: Store face index (f.index) instead of the BMFace object (f) >>>
+            jb_globals.selected_tris_quads.append((f.index, face_idx))
 
     if new_vert_count != current_vert_count: active_obj_data[constants.MESH_VERTEX_COUNT] = new_vert_count
     if new_edge_count != current_edge_count: active_obj_data[constants.MESH_EDGE_COUNT] = new_edge_count

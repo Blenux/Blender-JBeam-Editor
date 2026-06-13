@@ -45,7 +45,8 @@ batch_node_renaming_enabled = False
 # _last_op is managed in handlers.py
 
 # Highlight on Click state
-highlighted_element_type = None # 'node', 'beam', 'rail', 'torsionbar', 'cross_part_beam'
+# <<< MODIFIED LINE >>>
+highlighted_element_type = None # 'node', 'beam', 'rail', 'torsionbar', 'cross_part_beam', 'slidenode'
 # highlighted_element_coords is now managed in drawing.py
 highlighted_element_color = (1.0, 1.0, 1.0, 1.0) # Default white (outer color for torsionbar)
 highlighted_element_mid_color = (1.0, 0.0, 0.0, 1.0) # Default red (middle color for torsionbar)

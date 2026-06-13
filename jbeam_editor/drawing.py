@@ -112,6 +112,12 @@ def find_beam_line_number(jbeam_filepath: str, target_part_origin: str, target_i
     Finds the 1-based line number of a specific beam definition in a JBeam file
     by matching node IDs.
     """
+    # <<< ADDED CHECK >>>
+    # Ignore beams involving transient TEMP_ IDs during search
+    if target_id1.startswith('TEMP_') or target_id2.startswith('TEMP_'):
+        return None
+    # <<< END ADDED CHECK >>>
+
     file_content = text_editor.read_int_file(jbeam_filepath)
     if not file_content:
         print(f"Error: Could not read internal file: {jbeam_filepath}", file=sys.stderr)
@@ -173,7 +179,7 @@ def find_beam_line_number(jbeam_filepath: str, target_part_origin: str, target_i
                     elif node_type == ':': dict_key = temp_dict_key
                     elif dict_key is not None: temp_dict_key = None; dict_key = None
             else: # In array
-                if node_type == '[':
+                if node_type == '[': # Start of a beam definition array
                     beam_entry_start_node = node
                     stack.append((pos_in_arr, False)) # Parent was array
                     pos_in_arr = 0; in_dict = False
@@ -211,7 +217,8 @@ def find_beam_line_number(jbeam_filepath: str, target_part_origin: str, target_i
                     pos_in_arr += 1 # Increment position *after* processing the current element
             i += 1
 
-        print(f"Warning: Beam {target_id1}-{target_id2} not found in part '{target_part_origin}' in file {jbeam_filepath}", file=sys.stderr)
+        # Don't print a warning here, as TEMP_ nodes will naturally not be found
+        # print(f"Warning: Beam {target_id1}-{target_id2} not found in part '{target_part_origin}' in file {jbeam_filepath}", file=sys.stderr)
         return None
 
     except Exception as e:
@@ -225,6 +232,12 @@ def find_node_line_number(jbeam_filepath: str, target_part_origin: str, target_n
     Finds the 1-based line number of a specific node definition in a JBeam file.
     (Revised approach focusing directly on the target part's nodes section)
     """
+    # <<< ADDED CHECK >>>
+    # Ignore transient TEMP_ IDs during search
+    if target_node_id.startswith('TEMP_'):
+        return None
+    # <<< END ADDED CHECK >>>
+
     file_content = text_editor.read_int_file(jbeam_filepath)
     if not file_content:
         print(f"Error: Could not read internal file: {jbeam_filepath}", file=sys.stderr)
@@ -243,17 +256,18 @@ def find_node_line_number(jbeam_filepath: str, target_part_origin: str, target_n
             return None
 
         if not parsed_data or target_part_origin not in parsed_data:
-            print(f"Warning: Part '{target_part_origin}' not found in parsed data for {jbeam_filepath}", file=sys.stderr)
+            # Don't warn if the part itself isn't found (might happen during load/revert)
+            # print(f"Warning: Part '{target_part_origin}' not found in parsed data for {jbeam_filepath}", file=sys.stderr)
             return None
 
         part_data = parsed_data[target_part_origin]
         if not isinstance(part_data, dict) or 'nodes' not in part_data:
-            print(f"Warning: 'nodes' section not found in part '{target_part_origin}' in {jbeam_filepath}", file=sys.stderr)
+            # print(f"Warning: 'nodes' section not found in part '{target_part_origin}' in {jbeam_filepath}", file=sys.stderr)
             return None
 
         nodes_section = part_data['nodes']
         if not isinstance(nodes_section, list) or len(nodes_section) <= 1:
-            print(f"Warning: 'nodes' section in part '{target_part_origin}' is not a valid list or is empty/header-only in {jbeam_filepath}", file=sys.stderr)
+            # print(f"Warning: 'nodes' section in part '{target_part_origin}' is not a valid list or is empty/header-only in {jbeam_filepath}", file=sys.stderr)
             return None
 
         # Now parse with AST to get line numbers
@@ -294,7 +308,7 @@ def find_node_line_number(jbeam_filepath: str, target_part_origin: str, target_n
                 in_target_part = False
                 # If we exited the target part after finding the start, stop searching
                 if nodes_array_start_node_idx != -1:
-                    print(f"Warning: Exited target part '{target_part_origin}' before finding end of 'nodes' array.", file=sys.stderr)
+                    # print(f"Warning: Exited target part '{target_part_origin}' before finding end of 'nodes' array.", file=sys.stderr)
                     break # Optimization: stop if we leave the part
             # --- End tracking ---
 
@@ -353,7 +367,7 @@ def find_node_line_number(jbeam_filepath: str, target_part_origin: str, target_n
 
         # --- Process the identified 'nodes' array in the AST ---
         if nodes_array_start_node_idx == -1 or nodes_array_end_node_idx == -1:
-            print(f"Warning: Could not locate AST boundaries for 'nodes' section in part '{target_part_origin}' in {jbeam_filepath}", file=sys.stderr)
+            # print(f"Warning: Could not locate AST boundaries for 'nodes' section in part '{target_part_origin}' in {jbeam_filepath}", file=sys.stderr)
             return None
 
         node_header = []
@@ -407,7 +421,8 @@ def find_node_line_number(jbeam_filepath: str, target_part_origin: str, target_n
             k += 1
 
         # If loop finishes without finding the node
-        print(f"Warning: Node ID '{target_node_id}' not found within 'nodes' section of part '{target_part_origin}' in file {jbeam_filepath}", file=sys.stderr)
+        # Don't print a warning here, as TEMP_ nodes will naturally not be found
+        # print(f"Warning: Node ID '{target_node_id}' not found within 'nodes' section of part '{target_part_origin}' in file {jbeam_filepath}", file=sys.stderr)
         return None
 
     except Exception as e:
@@ -620,12 +635,12 @@ def _tag_redraw_3d_views(context: bpy.types.Context):
             if area.type == 'VIEW_3D':
                 area.tag_redraw()
 
-# <<< START MODIFIED FUNCTION >>>
+# <<< START MODIFIED FUNCTION find_and_highlight_element_for_line >>>
 def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bpy.types.Text, line_index: int):
     """
-    Parses the JBeam file content on the given line index,
-    identifies the *first* JBeam element (node, beam, rail, torsionbar) within enclosing brackets,
-    finds its coordinates (if applicable), and updates global highlight state.
+    Parses the JBeam file content around the given line index,
+    identifies the *first* JBeam element (node, beam, rail, torsionbar, slidenode) definition overlapping that line,
+    verifies its structural context, finds its coordinates (if applicable), and updates global highlight state.
     Returns True if an element was found and highlighted, False otherwise.
     """
     global veh_render_dirty, part_name_to_obj # Ensure part_name_to_obj is global if modified
@@ -640,7 +655,7 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
     highlight_torsionbar_outer_coords.clear()
     highlight_torsionbar_mid_coords.clear()
     jb_globals.highlighted_node_ids.clear() # Clear the set
-    jb_globals.highlighted_element_ordered_node_ids.clear() # <<< ADDED: Clear the ordered list
+    jb_globals.highlighted_element_ordered_node_ids.clear() # Clear the ordered list
     # Store previous type before clearing, to check if redraw is needed on failure
     prev_highlight_type = jb_globals.highlighted_element_type
     jb_globals.highlighted_element_type = None # Assume failure until success
@@ -650,178 +665,313 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
     jb_globals.last_text_area_info['name'] = text_obj.name
     jb_globals.last_text_area_info['line_index'] = line_index
 
+    # Default redraw trigger check
+    needs_redraw = prev_highlight_type is not None
+
     if not full_filepath:
-        # Ensure redraw if highlight was previously active
-        if prev_highlight_type is not None:
-            veh_render_dirty = True
-            _tag_redraw_3d_views(context)
+        if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context)
         return False
 
     file_content = text_obj.as_string()
     if not file_content:
-        # Ensure redraw if highlight was previously active
-        if prev_highlight_type is not None:
-            veh_render_dirty = True
-            _tag_redraw_3d_views(context)
+        if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context)
         return False
 
-    # Use the line_index passed to the function
-    current_line_index = line_index
-
     lines = file_content.splitlines(True) # Keep ends for accurate length
-    if current_line_index >= len(lines):
-        # Ensure redraw if highlight was previously active
-        if prev_highlight_type is not None:
-            veh_render_dirty = True
-            _tag_redraw_3d_views(context)
+    if line_index >= len(lines):
+        if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context)
         return False # Cursor out of bounds
 
     try:
         # --- Initialize variables ---
-        node_ids = [] # This will store the ordered list from parsing
-        element_type = None
+        node_ids = [] # This will store the ordered list from parsing (used for most elements)
+        slidenode_node_id = None # <<< Specific storage for slidenode
+        slidenode_rail_name = None # <<< Specific storage for slidenode
+        element_type = None # Determined by AST context
         original_color = (1,1,1,1)
         original_mid_color = (1,0,0,1) # Default mid color
         original_width = 1.0
         beam_type_from_data = '|NORMAL' # Default beam type
 
-        # --- Find the *first* [...] block on the line ---
-        line_content_str = lines[current_line_index]
-        content_between_brackets = None
-        element_start_bracket = -1
-        element_end_bracket = -1
+        # --- AST Parsing and Context Check ---
+        ast_data = sjsonast.parse(file_content)
+        if not ast_data:
+            if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context)
+            return False # Cannot parse AST
 
-        start_bracket = line_content_str.find('[')
-        if start_bracket != -1:
-            end_bracket = line_content_str.find(']', start_bracket)
-            if end_bracket != -1:
-                content_between_brackets = line_content_str[start_bracket + 1 : end_bracket]
-                element_start_bracket = start_bracket
-                element_end_bracket = end_bracket
+        ast_nodes = ast_data['ast']['nodes']
+        sjsonast.calculate_char_positions(ast_nodes)
 
-        # --- Parse the identified block ---
-        if content_between_brackets is not None:
-            raw_parts = content_between_brackets.split(',')
-            parsed_ids = [] # Use this local list to build the ordered IDs
-            parsed_values_count = 0 # Count potential numeric/boolean values
-            options_dict_found = False
-            for part in raw_parts:
-                stripped_part = part.strip()
-                if stripped_part.startswith('{'): # Stop parsing IDs if options dict starts
-                    options_dict_found = True
-                    break
-                if stripped_part.startswith('"') and stripped_part.endswith('"'):
-                    node_id = stripped_part[1:-1]
-                    if node_id and not node_id.isspace():
-                        parsed_ids.append(node_id) # Append to ordered list
+        # Calculate character position range for the target line
+        line_start_char_pos = sum(len(l) for l in lines[:line_index])
+        line_end_char_pos = line_start_char_pos + len(lines[line_index]) # Exclusive end
+
+        # Traverse AST to find the first element definition on the target line and check context
+        stack = []
+        in_dict = True
+        pos_in_arr = 0
+        temp_dict_key = None
+        dict_key = None
+        current_part_name = None
+        current_section_name = None
+        found_element_on_line = False
+        # <<< NEW: Track rail context >>>
+        in_rails_section_dict = False
+        current_rail_name = None
+        in_rail_links_array = False
+
+        i = 0
+        while i < len(ast_nodes):
+            node: sjsonast.ASTNode = ast_nodes[i]
+            node_type = node.data_type
+
+            # Optimization: If node start is beyond the line end, stop searching
+            if node.start_pos >= line_end_char_pos and not found_element_on_line:
+                # Only break if we haven't already found the element start
+                break
+
+            if node_type == 'wsc':
+                i += 1
+                continue
+
+            # --- Stack and Context Management ---
+            # <<< MODIFIED: More detailed context tracking >>>
+            if in_dict:
+                if node_type == '{':
+                    if dict_key is not None:
+                        stack.append((dict_key, True)) # Parent was dict
+                        if len(stack) == 1: current_part_name = dict_key
+                        if len(stack) == 2 and dict_key == 'rails': in_rails_section_dict = True
+                        if in_rails_section_dict and len(stack) == 3: current_rail_name = dict_key # Entering a specific rail's dict
+                    dict_key = None; temp_dict_key = None; in_dict = True
+                elif node_type == '[':
+                    if dict_key is not None:
+                        stack.append((dict_key, True)) # Parent was dict
+                        if len(stack) == 1: current_part_name = dict_key
+                        # <<< MODIFIED: Include 'slidenodes' >>>
+                        if len(stack) == 2: current_section_name = dict_key # Entering nodes/beams/torsionbars/slidenodes array
+                        # <<< NEW: Check if entering "links:" array >>>
+                        if in_rails_section_dict and len(stack) == 4 and dict_key == 'links:':
+                            in_rail_links_array = True
+                    dict_key = None; temp_dict_key = None; in_dict = False
+                elif node_type == '}':
+                    if stack:
+                        prev_key, prev_in_dict = stack.pop()
+                        if len(stack) == 2 and prev_key == current_rail_name: current_rail_name = None # Exiting specific rail dict
+                        if len(stack) == 1 and prev_key == 'rails': in_rails_section_dict = False
+                        if len(stack) == 0: current_part_name = None
+                        in_dict = prev_in_dict
+                    else: in_dict = None
+                elif node_type == ']':
+                     pass # Should not be reached if structure is valid dict
                 else:
-                    # Check if it looks like a number or boolean (simple check)
-                    lower_part = stripped_part.lower()
-                    if lower_part in ('true', 'false') or \
-                       (lower_part.replace('.', '', 1).replace('-', '', 1).replace('e', '', 1).isdigit()):
-                        parsed_values_count += 1
+                    if temp_dict_key is None and node_type == '"': temp_dict_key = node.value
+                    elif node_type == ':': dict_key = temp_dict_key
+                    elif dict_key is not None: # Value node after key:
+                        # --- Check for overlap on value node ---
+                        node_overlaps_line = (node.start_pos < line_end_char_pos and node.end_pos >= line_start_char_pos)
+                        if node_overlaps_line and in_rails_section_dict and current_rail_name is not None and not found_element_on_line:
 
-            num_parsed_ids = len(parsed_ids)
+                             rail_dict_start_idx = -1
+                             temp_k = i - 1 # Start searching backwards from the value node
+                             open_brackets = 0
+                             while temp_k >= 0:
+                                 if ast_nodes[temp_k].data_type == '}': open_brackets += 1
+                                 elif ast_nodes[temp_k].data_type == '{':
+                                     if open_brackets == 0:
+                                         rail_dict_start_idx = temp_k
+                                         break
+                                     open_brackets -= 1
+                                 temp_k -= 1
 
-            # --- Determine Element Type based on parsed content ---
-            # Check for Node first (ID, X, Y, Z, ...)
-            if num_parsed_ids == 1 and parsed_values_count >= 3:
-                element_type = 'node'
-                node_ids = parsed_ids # Store the single node ID (order doesn't matter here)
+                             if rail_dict_start_idx != -1:
+                                 # Search forward from the rail's '{' for "links:"
+                                 links_key_found = False
+                                 temp_k = rail_dict_start_idx + 1
+                                 while temp_k < len(ast_nodes):
+                                     inner_node = ast_nodes[temp_k]
+                                     if inner_node.data_type == '"' and inner_node.value == 'links:':
+                                         links_key_found = True
+                                     elif links_key_found and inner_node.data_type == '[':
+                                         # Found the links array, parse it
+                                         temp_node_ids = []
+                                         l = temp_k + 1
+                                         while l < len(ast_nodes):
+                                             link_node = ast_nodes[l]
+                                             if link_node.data_type == ']': break
+                                             if link_node.data_type == '"': temp_node_ids.append(link_node.value)
+                                             l += 1
+                                         if len(temp_node_ids) == 2:
+                                             element_type = 'rail'
+                                             node_ids = temp_node_ids
+                                             found_element_on_line = True
+                                             break # Exit inner search loop
+                                         else:
+                                             break # Exit inner search loop
+                                     elif inner_node.data_type == '}': # Reached end of rail dict
+                                         break # Exit inner search loop
+                                     temp_k += 1
+                             if found_element_on_line: break # Exit outer loop if found
 
-            # Check for Beam/Rail (ID1, ID2, ...)
-            elif num_parsed_ids == 2:
-                node_ids = parsed_ids # Store the parsed IDs (already ordered)
-                is_rail = False
+                        # Reset key tracking after processing value
+                        dict_key = None; temp_dict_key = None
+            else: # In array
+                if node_type == '[': # Start of an array element (potential JBeam definition)
+                    node_overlaps_line = (node.start_pos < line_end_char_pos and node.end_pos >= line_start_char_pos)
 
-                # <<< RAIL CHECK >>> (remains the same)
-                if jb_globals.curr_vdata and 'rails' in jb_globals.curr_vdata and isinstance(jb_globals.curr_vdata['rails'], dict):
-                    target_id1, target_id2 = node_ids[0], node_ids[1]
-                    for rail_name, rail_info in jb_globals.curr_vdata['rails'].items():
-                        if isinstance(rail_info, list) and len(rail_info) == 2:
-                             r_id1, r_id2 = rail_info[0], rail_info[1]
-                             if (r_id1 == target_id1 and r_id2 == target_id2) or \
-                                (r_id1 == target_id2 and r_id2 == target_id1):
-                                 is_rail = True; break
-                        elif isinstance(rail_info, dict):
-                            links = rail_info.get('links:')
-                            if isinstance(links, list) and len(links) == 2:
-                                r_id1, r_id2 = links[0], links[1]
-                                if (r_id1 == target_id1 and r_id2 == target_id2) or \
-                                   (r_id1 == target_id2 and r_id2 == target_id1):
-                                    is_rail = True; break
-                        if is_rail: break
+                    # <<< MODIFIED: Check array context, include 'slidenodes' >>>
+                    is_element_array = (
+                        (current_section_name == 'nodes' and len(stack) == 2) or
+                        (current_section_name == 'beams' and len(stack) == 2) or
+                        (current_section_name == 'torsionbars' and len(stack) == 2) or
+                        (current_section_name == 'slidenodes' and len(stack) == 2) or # <<< ADDED: Check for slidenodes section
+                        (in_rail_links_array and len(stack) == 4) # Check if it's the links array itself
+                    )
 
-                if is_rail:
-                    element_type = 'rail'
-                    original_color = ui_props.rail_color
-                    original_width = ui_props.rail_width
-                else: # Assume beam
-                    element_type = 'beam'
-                    original_color = ui_props.beam_color
-                    original_width = ui_props.beam_width
+                    if node_overlaps_line and is_element_array and not found_element_on_line:
+                        # print(f"[Highlight Debug] '[' at {node.start_pos}-{node.end_pos} overlaps target line. Section: {current_section_name}, Rail Links: {in_rail_links_array}")
+                        # Parse content within this bracket pair from AST
+                        temp_node_ids = []
+                        temp_values_count = 0
+                        k = i + 1
+                        while k < len(ast_nodes):
+                            inner_node = ast_nodes[k]
+                            if inner_node.data_type == ']': break
+                            if inner_node.data_type == '"': temp_node_ids.append(inner_node.value)
+                            elif inner_node.data_type == 'number' or inner_node.data_type == 'bool': temp_values_count += 1
+                            elif inner_node.data_type == '{': break # Options dict
+                            k += 1
 
-                    # <<< BEAM TYPE CHECK >>> (remains the same)
-                    if jb_globals.curr_vdata and 'beams' in jb_globals.curr_vdata:
-                        target_id1, target_id2 = node_ids[0], node_ids[1]
-                        active_obj = context.active_object
-                        target_part_origin = None
-                        if active_obj and active_obj.data:
-                            target_part_origin = active_obj.data.get(constants.MESH_JBEAM_PART)
+                        num_parsed_ids = len(temp_node_ids)
+                        # print(f"[Highlight Debug] Parsed content: ids={temp_node_ids}, values={temp_values_count}")
 
-                        if target_part_origin:
-                            found_beam_data = None
-                            for beam_data in jb_globals.curr_vdata['beams']:
-                                # Check if beam_data is a dict before accessing
-                                if isinstance(beam_data, dict) and beam_data.get('partOrigin') == target_part_origin:
-                                    b_id1 = beam_data.get('id1:')
-                                    b_id2 = beam_data.get('id2:')
-                                    if (b_id1 == target_id1 and b_id2 == target_id2) or \
-                                       (b_id1 == target_id2 and b_id2 == target_id1):
-                                        found_beam_data = beam_data; break
-                            if found_beam_data:
-                                beam_type_from_data = found_beam_data.get('beamType', '|NORMAL')
-                                if beam_type_from_data == '|ANISOTROPIC':
-                                    original_color = ui_props.anisotropic_beam_color; original_width = ui_props.anisotropic_beam_width
-                                elif beam_type_from_data == '|SUPPORT':
-                                    original_color = ui_props.support_beam_color; original_width = ui_props.support_beam_width
-                                elif beam_type_from_data == '|HYDRO':
-                                    original_color = ui_props.hydro_beam_color; original_width = ui_props.hydro_beam_width
-                                elif beam_type_from_data == '|BOUNDED':
-                                    original_color = ui_props.bounded_beam_color; original_width = ui_props.bounded_beam_width
-                                elif beam_type_from_data == '|LBEAM':
-                                    original_color = ui_props.lbeam_beam_color; original_width = ui_props.lbeam_beam_width
-                                elif beam_type_from_data == '|PRESSURED':
-                                    original_color = ui_props.pressured_beam_color; original_width = ui_props.pressured_beam_width
+                        # Determine element type based on context and parsed content
+                        if current_section_name == 'nodes' and num_parsed_ids == 1 and temp_values_count >= 3:
+                            element_type = 'node'
+                            node_ids = temp_node_ids
+                            found_element_on_line = True
+                        elif current_section_name == 'beams' and num_parsed_ids == 2:
+                            element_type = 'beam'
+                            node_ids = temp_node_ids
+                            found_element_on_line = True
+                        # <<< MODIFIED: Check rail context here >>>
+                        elif in_rail_links_array and num_parsed_ids == 2:
+                            element_type = 'rail'
+                            node_ids = temp_node_ids
+                            found_element_on_line = True
+                        elif current_section_name == 'torsionbars' and num_parsed_ids == 4:
+                            element_type = 'torsionbar'
+                            node_ids = temp_node_ids
+                            found_element_on_line = True
+                        # <<< ADDED: Check for slidenodes >>>
+                        elif current_section_name == 'slidenodes' and num_parsed_ids >= 2:
+                            element_type = 'slidenode'
+                            slidenode_node_id = temp_node_ids[0] # Store the node ID
+                            slidenode_rail_name = temp_node_ids[1] # Store the rail name
+                            found_element_on_line = True
+                        # <<< END ADDED >>>
 
-            # Check for Torsionbar (ID1, ID2, ID3, ID4, ...)
-            elif num_parsed_ids == 4:
-                node_ids = parsed_ids # Store the parsed IDs (already ordered)
-                element_type = 'torsionbar'
-                original_color = ui_props.torsionbar_color
-                original_mid_color = ui_props.torsionbar_mid_color
-                original_width = ui_props.torsionbar_width
+                        if found_element_on_line:
+                            # print(f"[Highlight Debug] Element FOUND on line: type={element_type}, ids={node_ids}")
+                            break # Found the first relevant element on the line
+                        else:
+                            # print(f"[Highlight Debug] Parsed array content on line did not match criteria. Section: {current_section_name}, Rail Links: {in_rail_links_array}")
+                            pass # Keep searching
 
-        # --- Common Logic: Find Node Positions (if needed) and Set Highlight ---
-        if not node_ids or element_type is None:
-            # Ensure redraw if highlight was previously active
-            if prev_highlight_type is not None:
-                veh_render_dirty = True
-                _tag_redraw_3d_views(context)
-            return False
+                    # Normal stack push if not the target element or context wrong
+                    stack.append((pos_in_arr, False)) # Parent was array
+                    pos_in_arr = 0; in_dict = False
+                elif node_type == '{':
+                    stack.append((pos_in_arr, False)) # Parent was array
+                    pos_in_arr = 0; in_dict = True
+                elif node_type == ']':
+                    if stack:
+                        prev_key_or_idx, prev_in_dict = stack.pop()
+                        # <<< NEW: Check if exiting "links:" array >>>
+                        if len(stack) == 3 and in_rail_links_array:
+                            in_rail_links_array = False
+                        # <<< MODIFIED: Include 'slidenodes' >>>
+                        if len(stack) == 1: current_section_name = None # Exiting nodes/beams/torsionbars/slidenodes array
+                        if len(stack) == 0: current_part_name = None
+                        in_dict = prev_in_dict
+                        pos_in_arr = prev_key_or_idx + 1 if not prev_in_dict else 0 # Restore position in parent
+                    else: in_dict = None
+                elif node_type == '}':
+                     pass # Should not be reached if structure is valid array
+                else: # Value node within array
+                    pos_in_arr += 1
+            i += 1
+        # --- End AST Traversal ---
 
-        # --- Handle Node Highlight (Special Case) ---
+        # <<< DEBUG PRINT: Final result before processing >>>
+        # print(f"[Highlight Debug] Final AST Result before processing: element_type={element_type}, node_ids={node_ids}, found_on_line={found_element_on_line}")
+
+        # --- Further Processing & Highlighting ---
+        if not found_element_on_line or element_type is None:
+            # print("[Highlight Debug] No valid element found on line or type is None.") # DEBUG
+            if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context)
+            return False # No valid element found on the line within correct context
+
+        # --- Determine Color/Width based on AST-determined element_type ---
+        if element_type == 'beam':
+            # Determine specific beam type color/width
+            if jb_globals.curr_vdata and 'beams' in jb_globals.curr_vdata:
+                target_id1, target_id2 = node_ids[0], node_ids[1]
+                active_obj = context.active_object
+                target_part_origin = None
+                if active_obj and active_obj.data:
+                    target_part_origin = active_obj.data.get(constants.MESH_JBEAM_PART)
+
+                if target_part_origin:
+                    found_beam_data = None
+                    for beam_data in jb_globals.curr_vdata['beams']:
+                        if isinstance(beam_data, dict) and beam_data.get('partOrigin') == target_part_origin:
+                            b_id1 = beam_data.get('id1:')
+                            b_id2 = beam_data.get('id2:')
+                            if (b_id1 == target_id1 and b_id2 == target_id2) or \
+                               (b_id1 == target_id2 and b_id2 == target_id1):
+                                found_beam_data = beam_data; break
+                    if found_beam_data:
+                        beam_type_from_data = found_beam_data.get('beamType', '|NORMAL')
+                        if beam_type_from_data == '|ANISOTROPIC': original_color = ui_props.anisotropic_beam_color; original_width = ui_props.anisotropic_beam_width
+                        elif beam_type_from_data == '|SUPPORT': original_color = ui_props.support_beam_color; original_width = ui_props.support_beam_width
+                        elif beam_type_from_data == '|HYDRO': original_color = ui_props.hydro_beam_color; original_width = ui_props.hydro_beam_width
+                        elif beam_type_from_data == '|BOUNDED': original_color = ui_props.bounded_beam_color; original_width = ui_props.bounded_beam_width
+                        elif beam_type_from_data == '|LBEAM': original_color = ui_props.lbeam_beam_color; original_width = ui_props.lbeam_beam_width
+                        elif beam_type_from_data == '|PRESSURED': original_color = ui_props.pressured_beam_color; original_width = ui_props.pressured_beam_width
+                        else: original_color = ui_props.beam_color; original_width = ui_props.beam_width # Default normal
+                    else: # Beam definition found on line, but not in curr_vdata (maybe newly added?)
+                        original_color = ui_props.beam_color; original_width = ui_props.beam_width # Use default normal
+                else: # No target part origin found? Use default normal
+                    original_color = ui_props.beam_color; original_width = ui_props.beam_width
+            else: # No beams in curr_vdata? Use default normal
+                 original_color = ui_props.beam_color; original_width = ui_props.beam_width
+
+        elif element_type == 'rail':
+             # print("[Highlight Debug] Element identified as RAIL by AST.") # DEBUG
+             original_color = ui_props.rail_color
+             original_width = ui_props.rail_width
+        elif element_type == 'torsionbar':
+             original_color = ui_props.torsionbar_color
+             original_mid_color = ui_props.torsionbar_mid_color
+             original_width = ui_props.torsionbar_width
+        # <<< ADDED: Slidenode color/width (uses rail settings) >>>
+        elif element_type == 'slidenode':
+             original_color = ui_props.rail_color # Use rail color for the line segment
+             original_width = ui_props.rail_width
+        # <<< END ADDED >>>
+
+        # --- Common Logic: Find Node Positions and Set Highlight ---
         if element_type == 'node':
-            # Only need to store the node ID and trigger redraw
+            # Node highlight logic remains the same
             jb_globals.highlighted_element_type = 'node'
-            jb_globals.highlighted_node_ids.update(node_ids) # Add the single node ID to the set
-            jb_globals.highlighted_element_ordered_node_ids = node_ids # <<< ADDED: Store the single ID in the list too
-            veh_render_dirty = True # Trigger batch rebuild (might not be strictly necessary but safe)
-            _tag_redraw_3d_views(context) # Force 3D View redraw (important for text color change)
-            return True # Node handled, return success
+            jb_globals.highlighted_node_ids.update(node_ids)
+            jb_globals.highlighted_element_ordered_node_ids = node_ids
+            veh_render_dirty = True
+            _tag_redraw_3d_views(context)
+            return True
 
-        # --- Find Node Positions (For Beams, Rails, Torsionbars) ---
-        # ... (node position finding logic remains the same) ...
+        # --- Find Node Positions (For Beams, Rails, Torsionbars, Slidenodes) ---
         active_obj = context.active_object
         active_part_name = None
         collection = None
@@ -843,8 +993,18 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                     obj_iter_data = obj_iter.data
                     temp_bm = None
                     try:
-                        if obj_iter == active_obj and active_obj.mode == 'EDIT': temp_bm = bmesh.from_edit_mesh(obj_iter_data)
-                        else: temp_bm = bmesh.new(); temp_bm.from_mesh(obj_iter_data)
+                        # <<< START MODIFICATION >>>
+                        if obj_iter == active_obj and active_obj.mode == 'EDIT':
+                            try:
+                                temp_bm = bmesh.from_edit_mesh(obj_iter_data)
+                            except ValueError:
+                                # Mesh not ready for edit mode access yet, skip this object for now
+                                # print("[Highlight Debug] Mesh not ready for edit mode access (ValueError) during initial load/draw. Skipping highlight.", file=sys.stderr)
+                                if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context) # Ensure redraw if highlight was previously active
+                                return False # Abort highlight attempt for this cycle
+                        # <<< END MODIFICATION >>>
+                        else: # Object mode or not the active object
+                            temp_bm = bmesh.new(); temp_bm.from_mesh(obj_iter_data)
 
                         node_id_layer = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
                         is_fake_layer = temp_bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
@@ -860,8 +1020,18 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
         elif active_obj and active_part_name: # Single part import
              temp_bm = None
              try:
-                if active_obj.mode == 'EDIT': temp_bm = bmesh.from_edit_mesh(active_obj.data)
-                else: temp_bm = bmesh.new(); temp_bm.from_mesh(active_obj.data)
+                # <<< START MODIFICATION >>>
+                if active_obj.mode == 'EDIT':
+                    try:
+                        temp_bm = bmesh.from_edit_mesh(active_obj.data)
+                    except ValueError:
+                        # Mesh not ready for edit mode access yet, skip highlight
+                        # print("[Highlight Debug] Mesh not ready for edit mode access (ValueError) during initial load/draw. Skipping highlight.", file=sys.stderr)
+                        if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context) # Ensure redraw if highlight was previously active
+                        return False # Abort highlight attempt for this cycle
+                # <<< END MODIFICATION >>>
+                else: # Object mode
+                    temp_bm = bmesh.new(); temp_bm.from_mesh(active_obj.data)
 
                 node_id_layer = temp_bm.verts.layers.string.get(constants.VL_NODE_ID)
                 is_fake_layer = temp_bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
@@ -876,168 +1046,188 @@ def find_and_highlight_element_for_line(context: bpy.types.Context, text_obj: bp
                  if temp_bm and not (active_obj.mode == 'EDIT'): temp_bm.free()
 
         # --- Get World Positions and Check Origins ---
-        # ... (world position finding logic remains the same) ...
-        world_positions = []
+        world_positions = [] # Used for beams, rails, torsionbars
         missing_nodes = []
-        node_origins = {}
+        node_origins = {} # Used for beams, rails, torsionbars
+        highlight_set = False # <<< Initialize highlight_set >>>
 
-        # <<< Use the ORDERED node_ids list here >>>
-        for node_id in node_ids:
-            wp = None
-            pos_data = temp_node_map.get(node_id)
-            # Check cache even if cross-part vis is off
-            cache_data = all_nodes_cache.get(node_id)
+        # <<< ADDED: Slidenode specific position finding >>>
+        if element_type == 'slidenode':
+            rail_node_id1 = None
+            rail_node_id2 = None
+            # Find the rail definition in curr_vdata
+            if jb_globals.curr_vdata and 'rails' in jb_globals.curr_vdata:
+                rails_data = jb_globals.curr_vdata['rails']
+                if isinstance(rails_data, dict):
+                    rail_info = rails_data.get(slidenode_rail_name)
+                    if isinstance(rail_info, list) and len(rail_info) == 2:
+                        rail_node_id1, rail_node_id2 = rail_info[0], rail_info[1]
+                    elif isinstance(rail_info, dict):
+                        links = rail_info.get('links:')
+                        if isinstance(links, list) and len(links) == 2:
+                            rail_node_id1, rail_node_id2 = links[0], links[1]
 
-            if pos_data:
-                wp = pos_data[1] @ pos_data[0]
-                found_origin = None
-                if is_vehicle_part and collection:
-                    for obj_iter in collection.all_objects:
-                        if (obj_iter.matrix_world - pos_data[1]).is_zero(1e-5):
-                             if obj_iter.data and obj_iter.data.get(constants.MESH_JBEAM_PART):
-                                 found_origin = obj_iter.data[constants.MESH_JBEAM_PART]; break
-                elif active_part_name: found_origin = active_part_name
-                node_origins[node_id] = found_origin if found_origin else '?'
+            if rail_node_id1 is None or rail_node_id2 is None:
+                print(f"Warning: Could not find rail definition for '{slidenode_rail_name}'")
+                if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context)
+                return False # Cannot highlight if rail nodes not found
 
-            elif cache_data: # Use cache if node not found in visible objects
-                wp = cache_data[0]
-                node_origins[node_id] = cache_data[2]
+            # Now find positions for slidenode_node_id, rail_node_id1, rail_node_id2
+            node_ids_to_find = [slidenode_node_id, rail_node_id1, rail_node_id2]
+            slidenode_world_positions = {} # Use a dict for slidenode specific positions
 
-            if wp is None: missing_nodes.append(node_id)
-            world_positions.append(wp) # world_positions will now be ordered correctly
+            for node_id in node_ids_to_find:
+                wp = None
+                pos_data = temp_node_map.get(node_id)
+                cache_data = all_nodes_cache.get(node_id)
+                if pos_data:
+                    wp = pos_data[1] @ pos_data[0]
+                elif cache_data:
+                    wp = cache_data[0]
 
-        if missing_nodes:
-            # Highlight should have been cleared at the start
-            # Ensure redraw if highlight was previously active
-            if prev_highlight_type is not None:
-                veh_render_dirty = True
-                _tag_redraw_3d_views(context)
-            return False
+                if wp is None:
+                    missing_nodes.append(node_id)
+                slidenode_world_positions[node_id] = wp
 
-        # --- Populate Coordinate Lists and Finalize Highlight (For Beams, Rails, Torsionbars) ---
-        highlight_set = False
-        if element_type == 'beam':
-            is_cross_part_candidate = False
-            if len(node_origins) == 2:
-                # Use the ordered node_ids to check origins
-                origin1 = node_origins.get(node_ids[0], '?')
-                origin2 = node_origins.get(node_ids[1], '?')
-                if origin1 != origin2 and '?' not in {origin1, origin2}:
-                    is_cross_part_candidate = True
+            if missing_nodes:
+                print(f"[Highlight Debug] Missing nodes for slidenode highlight: {missing_nodes}")
+                if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context)
+                return False
 
-            # Check if BOTH nodes are in the active geometry map (temp_node_map)
-            id1_in_active_geom = node_ids[0] in temp_node_map
-            id2_in_active_geom = node_ids[1] in temp_node_map
-
-            # If it's a cross-part candidate BUT both nodes are in active geometry, treat as normal beam
-            if is_cross_part_candidate and id1_in_active_geom and id2_in_active_geom:
-                 # Keep element_type as 'beam', use normal beam color/width (already set by default)
-                 # Need to determine the *correct* normal color based on beamType here if possible
-                 # beam_type_from_data was determined earlier
-                 if beam_type_from_data == '|ANISOTROPIC': original_color = ui_props.anisotropic_beam_color; original_width = ui_props.anisotropic_beam_width
-                 elif beam_type_from_data == '|SUPPORT': original_color = ui_props.support_beam_color; original_width = ui_props.support_beam_width
-                 elif beam_type_from_data == '|HYDRO': original_color = ui_props.hydro_beam_color; original_width = ui_props.hydro_beam_width
-                 elif beam_type_from_data == '|BOUNDED': original_color = ui_props.bounded_beam_color; original_width = ui_props.bounded_beam_width
-                 elif beam_type_from_data == '|LBEAM': original_color = ui_props.lbeam_beam_color; original_width = ui_props.lbeam_beam_width
-                 elif beam_type_from_data == '|PRESSURED': original_color = ui_props.pressured_beam_color; original_width = ui_props.pressured_beam_width
-                 else: original_color = ui_props.beam_color; original_width = ui_props.beam_width # Default normal
-
-                 highlight_coords.extend([world_positions[0], world_positions[1]])
-                 highlight_set = True
-            # Otherwise, if it's a cross-part candidate, mark it as such
-            elif is_cross_part_candidate:
-                element_type = 'cross_part_beam' # Set the type for highlight
-                original_color = ui_props.cross_part_beam_color
-                original_width = ui_props.cross_part_beam_width
-                highlight_coords.extend([world_positions[0], world_positions[1]])
-                highlight_set = True
-            # Otherwise, it's a normal beam (both nodes have same origin or one is unknown)
-            else:
-                # Use the color/width determined earlier based on beamType
-                # original_color and original_width are already set correctly
-                highlight_coords.extend([world_positions[0], world_positions[1]])
-                highlight_set = True
-
-        elif element_type == 'torsionbar':
-            # Torsionbars inherently use nodes that might be defined elsewhere,
-            # but we usually don't classify the whole torsionbar as "cross-part".
-            # Keep existing torsionbar highlight logic.
-            # world_positions is now correctly ordered [pos1, pos2, pos3, pos4]
-            highlight_torsionbar_outer_coords.extend([world_positions[0], world_positions[1]])
-            highlight_torsionbar_mid_coords.extend([world_positions[1], world_positions[2]])
-            highlight_torsionbar_outer_coords.extend([world_positions[2], world_positions[3]])
+            # Populate highlight data for slidenode
+            jb_globals.highlighted_element_type = 'slidenode'
+            jb_globals.highlighted_node_ids.add(slidenode_node_id) # Add only the slidenode's ID for text coloring
+            # Add rail segment coordinates
+            highlight_coords.extend([slidenode_world_positions[rail_node_id1], slidenode_world_positions[rail_node_id2]])
+            jb_globals.highlighted_element_color = original_color # Use rail color set earlier
+            jb_globals.highlighted_element_original_width = original_width # Use rail width set earlier
             highlight_set = True
-            original_color = ui_props.torsionbar_color
-            original_mid_color = ui_props.torsionbar_mid_color
-            original_width = ui_props.torsionbar_width
+        # <<< END ADDED: Slidenode specific position finding >>>
+        else: # Logic for beams, rails, torsionbars
+            for node_id in node_ids: # Use the ordered list
+                wp = None
+                pos_data = temp_node_map.get(node_id)
+                cache_data = all_nodes_cache.get(node_id)
 
-        elif element_type == 'rail':
-            # Similar to beams, check if it should be downgraded from cross-part
-            is_cross_part_candidate = False
-            if len(node_origins) == 2:
-                # Use the ordered node_ids to check origins
-                origin1 = node_origins.get(node_ids[0], '?')
-                origin2 = node_origins.get(node_ids[1], '?')
-                if origin1 != origin2 and '?' not in {origin1, origin2}:
-                    is_cross_part_candidate = True
+                if pos_data:
+                    wp = pos_data[1] @ pos_data[0]
+                    found_origin = None
+                    if is_vehicle_part and collection:
+                        for obj_iter in collection.all_objects:
+                            if (obj_iter.matrix_world - pos_data[1]).is_zero(1e-5):
+                                 if obj_iter.data and obj_iter.data.get(constants.MESH_JBEAM_PART):
+                                     found_origin = obj_iter.data[constants.MESH_JBEAM_PART]; break
+                    elif active_part_name: found_origin = active_part_name
+                    node_origins[node_id] = found_origin if found_origin else '?'
 
-            id1_in_active_geom = node_ids[0] in temp_node_map
-            id2_in_active_geom = node_ids[1] in temp_node_map
+                elif cache_data:
+                    wp = cache_data[0]
+                    node_origins[node_id] = cache_data[2]
 
-            if is_cross_part_candidate and id1_in_active_geom and id2_in_active_geom:
-                # Treat as normal rail if both nodes in active geometry
-                original_color = ui_props.rail_color # Use rail color
-                original_width = ui_props.rail_width
-                highlight_coords.extend([world_positions[0], world_positions[1]])
+                if wp is None: missing_nodes.append(node_id)
+                world_positions.append(wp)
+
+            if missing_nodes:
+                # print(f"[Highlight Debug] Missing nodes for highlight: {missing_nodes}") # DEBUG
+                if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context)
+                return False
+
+            # --- Populate Coordinate Lists and Finalize Highlight ---
+            if element_type == 'beam':
+                is_cross_part_candidate = False
+                if len(node_origins) == 2:
+                    origin1 = node_origins.get(node_ids[0], '?')
+                    origin2 = node_origins.get(node_ids[1], '?')
+                    if origin1 != origin2 and '?' not in {origin1, origin2}:
+                        is_cross_part_candidate = True
+
+                id1_in_active_geom = node_ids[0] in temp_node_map
+                id2_in_active_geom = node_ids[1] in temp_node_map
+
+                if is_cross_part_candidate and id1_in_active_geom and id2_in_active_geom:
+                     # Use correct normal color based on beamType (determined earlier)
+                     # The original_color/width are already set correctly for the beam type
+                     highlight_coords.extend([world_positions[0], world_positions[1]])
+                     highlight_set = True
+                elif is_cross_part_candidate:
+                    element_type = 'cross_part_beam' # Reclassify for drawing
+                    original_color = ui_props.cross_part_beam_color # Use cross-part color
+                    original_width = ui_props.cross_part_beam_width
+                    highlight_coords.extend([world_positions[0], world_positions[1]])
+                    highlight_set = True
+                else: # Normal beam within the same part
+                    # Use the color/width determined earlier based on beamType
+                    highlight_coords.extend([world_positions[0], world_positions[1]])
+                    highlight_set = True
+
+            elif element_type == 'torsionbar':
+                highlight_torsionbar_outer_coords.extend([world_positions[0], world_positions[1]])
+                highlight_torsionbar_mid_coords.extend([world_positions[1], world_positions[2]])
+                highlight_torsionbar_outer_coords.extend([world_positions[2], world_positions[3]])
                 highlight_set = True
-            elif is_cross_part_candidate:
-                 # Mark as cross-part (though visually it might look like a rail)
-                 # Consider if a separate highlight color is needed or just use cross-part beam color
-                 element_type = 'cross_part_beam' # Re-use cross-part beam type for highlight
-                 original_color = ui_props.cross_part_beam_color
-                 original_width = ui_props.cross_part_beam_width
-                 highlight_coords.extend([world_positions[0], world_positions[1]])
-                 highlight_set = True
-            else: # Normal rail
-                original_color = ui_props.rail_color
-                original_width = ui_props.rail_width
-                highlight_coords.extend([world_positions[0], world_positions[1]])
-                highlight_set = True
+                # Colors/width already set
 
+            elif element_type == 'rail':
+                 # print("[Highlight Debug] Populating highlight_coords for RAIL.") # DEBUG
+                 # Cross-part check for rails
+                 is_cross_part_candidate = False
+                 if len(node_origins) == 2:
+                     origin1 = node_origins.get(node_ids[0], '?')
+                     origin2 = node_origins.get(node_ids[1], '?')
+                     if origin1 != origin2 and '?' not in {origin1, origin2}:
+                         is_cross_part_candidate = True
 
+                 id1_in_active_geom = node_ids[0] in temp_node_map
+                 id2_in_active_geom = node_ids[1] in temp_node_map
+
+                 if is_cross_part_candidate and id1_in_active_geom and id2_in_active_geom:
+                     # Still a rail, just happens to use nodes from different parts' geometry
+                     original_color = ui_props.rail_color # Use rail color
+                     original_width = ui_props.rail_width
+                     highlight_coords.extend([world_positions[0], world_positions[1]])
+                     highlight_set = True
+                 elif is_cross_part_candidate:
+                      element_type = 'cross_part_beam' # Reclassify for drawing as cross-part
+                      original_color = ui_props.cross_part_beam_color
+                      original_width = ui_props.cross_part_beam_width
+                      highlight_coords.extend([world_positions[0], world_positions[1]])
+                      highlight_set = True
+                 else: # Normal rail within the same part
+                     # Colors/width already set
+                     highlight_coords.extend([world_positions[0], world_positions[1]])
+                     highlight_set = True
+
+        # --- Finalize Highlight State ---
         if highlight_set:
-            # Store highlight info in globals (element_type might have changed)
+            # print(f"[Highlight Debug] Highlight SET: type={element_type}, color={original_color}, width={original_width}") # DEBUG
             jb_globals.highlighted_element_type = element_type
             jb_globals.highlighted_element_color = original_color
-            jb_globals.highlighted_element_mid_color = original_mid_color # Only relevant for torsionbar
+            jb_globals.highlighted_element_mid_color = original_mid_color
             jb_globals.highlighted_element_original_width = original_width
-            jb_globals.highlighted_node_ids.update(node_ids) # Store the node IDs in the set
-            jb_globals.highlighted_element_ordered_node_ids = node_ids # <<< ADDED: Store the ordered list
-            veh_render_dirty = True # Trigger batch rebuild
-            _tag_redraw_3d_views(context) # Force 3D View redraw
+            # Only add node IDs for non-slidenode types here, slidenode handled above
+            if element_type != 'slidenode':
+                jb_globals.highlighted_node_ids.update(node_ids)
+                jb_globals.highlighted_element_ordered_node_ids = node_ids
+            veh_render_dirty = True
+            _tag_redraw_3d_views(context)
         else:
-             # Ensure redraw if highlight was previously active but isn't now
-             if prev_highlight_type is not None:
-                 veh_render_dirty = True
-                 _tag_redraw_3d_views(context)
+             # print("[Highlight Debug] Highlight NOT SET.") # DEBUG
+             if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context)
 
         return highlight_set
 
     except Exception as e:
         print(f"[Highlight Debug] EXCEPTION in find_and_highlight_element_for_line: {e}", file=sys.stderr)
         traceback.print_exc()
-        # Clear highlight on exception (redundant due to clearing at start, but safe)
+        # Clear highlight on exception
         highlight_coords.clear()
         highlight_torsionbar_outer_coords.clear()
         highlight_torsionbar_mid_coords.clear()
-        jb_globals.highlighted_node_ids.clear() # Clear node IDs set on error
-        jb_globals.highlighted_element_ordered_node_ids.clear() # <<< ADDED: Clear ordered list on error
-        # Ensure redraw if highlight was previously active
-        if prev_highlight_type is not None:
-            veh_render_dirty = True
-            _tag_redraw_3d_views(context)
+        jb_globals.highlighted_node_ids.clear()
+        jb_globals.highlighted_element_ordered_node_ids.clear()
+        if needs_redraw: veh_render_dirty = True; _tag_redraw_3d_views(context)
         return False
-# <<< END MODIFIED FUNCTION >>>
+# <<< END MODIFIED FUNCTION find_and_highlight_element_for_line >>>
 
 # --- END MOVED HIGHLIGHT LOGIC ---
 
@@ -1090,6 +1280,8 @@ def draw_callback_px(context: bpy.types.Context):
     black_color = (0.0, 0.0, 0.0, 1.0)
     outline_size = ui_props.node_id_outline_size
     highlighted_cross_part_color = (1.0, 0.5, 1.0, 1.0)
+    # <<< ADDED: Slidenode color >>>
+    slidenode_color = (1.0, 0.7, 0.7, 1.0) # Light pink
 
     def draw_text_with_outline(font_id, text, x, y, text_color):
         # ... (outline drawing logic remains the same) ...
@@ -1158,18 +1350,23 @@ def draw_callback_px(context: bpy.types.Context):
 
                         pos_text = location_3d_to_region_2d(ctxRegion, ctxRegionData, coord)
                         if pos_text:
-                            # Color logic remains the same
+                            # <<< MODIFIED: Color logic for slidenodes >>>
                             text_color = default_color
                             is_selected_in_viewport = obj == active_obj and is_editing_enabled and v.index in selected_indices_set
                             is_highlighted_by_text = node_id in highlighted_nodes # Use the set here
+                            is_slidenode_highlight = jb_globals.highlighted_element_type == 'slidenode' and is_highlighted_by_text
 
-                            if is_selected_in_viewport and is_highlighted_by_text:
+                            if is_selected_in_viewport and is_slidenode_highlight:
+                                text_color = orange_color # Keep orange for combined selection
+                            elif is_slidenode_highlight:
+                                text_color = slidenode_color # Pink for the slidenode itself
+                            elif is_selected_in_viewport and is_highlighted_by_text: # Standard highlight + viewport select
                                 text_color = orange_color
-                            elif is_highlighted_by_text:
+                            elif is_highlighted_by_text: # Standard text highlight
                                 text_color = selected_color
-                            elif is_selected_in_viewport:
+                            elif is_selected_in_viewport: # Viewport select only
                                  text_color = yellow_color
-                            # End color logic
+                            # <<< END MODIFIED >>>
 
                             draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color)
                 except Exception as e: print(f"Error processing part {obj.name} for drawing: {e}", file=sys.stderr)
@@ -1194,18 +1391,23 @@ def draw_callback_px(context: bpy.types.Context):
 
                     pos_text = location_3d_to_region_2d(ctxRegion, ctxRegionData, coord)
                     if pos_text:
-                        # Color logic remains the same
+                        # <<< MODIFIED: Color logic for slidenodes >>>
                         text_color = default_color
                         is_selected_in_viewport = is_editing_enabled and v.index in selected_indices_set
                         is_highlighted_by_text = node_id in highlighted_nodes # Use the set here
+                        is_slidenode_highlight = jb_globals.highlighted_element_type == 'slidenode' and is_highlighted_by_text
 
-                        if is_selected_in_viewport and is_highlighted_by_text:
+                        if is_selected_in_viewport and is_slidenode_highlight:
+                            text_color = orange_color # Keep orange for combined selection
+                        elif is_slidenode_highlight:
+                            text_color = slidenode_color # Pink for the slidenode itself
+                        elif is_selected_in_viewport and is_highlighted_by_text: # Standard highlight + viewport select
                             text_color = orange_color
-                        elif is_highlighted_by_text:
+                        elif is_highlighted_by_text: # Standard text highlight
                             text_color = selected_color
-                        elif is_selected_in_viewport:
+                        elif is_selected_in_viewport: # Viewport select only
                              text_color = yellow_color
-                        # End color logic
+                        # <<< END MODIFIED >>>
 
                         draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color)
 
@@ -1280,8 +1482,7 @@ def draw_callback_px(context: bpy.types.Context):
                     draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color)
 
 
-    # --- Tooltip Positioning & Drawing ---
-    # ... (Tooltip logic remains the same) ...
+    # --- Tooltip Positioning & Drawing --- <<< MODIFIED >>>
     padding_x = 65; padding_y = 20
     region_width = ctxRegion.width; region_height = ctxRegion.height
     line_height = lblfDims(font_id, "X")[1]; line_padding = 4
@@ -1293,22 +1494,23 @@ def draw_callback_px(context: bpy.types.Context):
     else: bottom_left_x = padding_x
 
     if is_editing_enabled:
+        # --- Beam Tooltips ---
         beam_params_height = 0; beam_line_height_offset = 0
-        if ui_props.toggle_beam_params_tooltip and jb_globals._selected_beam_params_info is not None:
+        if ui_props.toggle_params_tooltip and jb_globals._selected_beam_params_info is not None: # Use shared toggle
             params_list = jb_globals._selected_beam_params_info.get('params_list')
             if params_list: beam_params_height = len(params_list) * (line_height + line_padding)
 
-        if ui_props.toggle_beam_line_tooltip and jb_globals._selected_beam_line_info is not None:
+        if ui_props.toggle_line_tooltip and jb_globals._selected_beam_line_info is not None: # Use shared toggle
             line_num = jb_globals._selected_beam_line_info.get('line')
             if line_num is not None:
                 beam_line_y = padding_y + beam_params_height
                 beam_line_height_offset = line_height + line_padding
-                draw_text_with_outline(font_id, f"Line: {line_num}", bottom_left_x, beam_line_y, ui_props.beam_line_tooltip_color)
+                draw_text_with_outline(font_id, f"Line: {line_num}", bottom_left_x, beam_line_y, ui_props.line_tooltip_color) # Use shared color
 
-        if ui_props.toggle_beam_params_tooltip and jb_globals._selected_beam_params_info is not None:
+        if ui_props.toggle_params_tooltip and jb_globals._selected_beam_params_info is not None: # Use shared toggle
             params_list = jb_globals._selected_beam_params_info.get('params_list')
             if params_list:
-                name_color = ui_props.beam_params_tooltip_color; value_color = ui_props.beam_params_value_tooltip_color
+                name_color = ui_props.params_tooltip_color; value_color = ui_props.params_value_tooltip_color # Use shared colors
                 start_y = padding_y + (len(params_list) - 1) * (line_height + line_padding)
                 for i, (key, value_repr) in enumerate(params_list):
                     current_y = start_y - (i * (line_height + line_padding)); key_text = f"{key}: "
@@ -1316,29 +1518,31 @@ def draw_callback_px(context: bpy.types.Context):
                     key_width = lblfDims(font_id, key_text)[0]; value_x = bottom_left_x + key_width
                     draw_text_with_outline(font_id, value_repr, value_x, current_y, value_color)
 
+        # --- Node Tooltips ---
         node_params_height = 0; node_line_height_offset = 0
         total_beam_tooltip_height = beam_params_height + beam_line_height_offset
-        if ui_props.toggle_node_params_tooltip and jb_globals._selected_node_params_info is not None:
+        if ui_props.toggle_params_tooltip and jb_globals._selected_node_params_info is not None: # Use shared toggle
             params_list = jb_globals._selected_node_params_info.get('params_list')
             if params_list: node_params_height = len(params_list) * (line_height + line_padding)
 
-        if ui_props.toggle_node_line_tooltip and jb_globals._selected_node_line_info is not None:
+        if ui_props.toggle_line_tooltip and jb_globals._selected_node_line_info is not None: # Use shared toggle
             line_num = jb_globals._selected_node_line_info.get('line')
             if line_num is not None:
                 node_line_y = padding_y + total_beam_tooltip_height + node_params_height
                 node_line_height_offset = line_height + line_padding
-                draw_text_with_outline(font_id, f"Line: {line_num}", bottom_left_x, node_line_y, ui_props.node_line_tooltip_color)
+                draw_text_with_outline(font_id, f"Line: {line_num}", bottom_left_x, node_line_y, ui_props.line_tooltip_color) # Use shared color
 
-        if ui_props.toggle_node_params_tooltip and jb_globals._selected_node_params_info is not None:
+        if ui_props.toggle_params_tooltip and jb_globals._selected_node_params_info is not None: # Use shared toggle
             params_list = jb_globals._selected_node_params_info.get('params_list')
             if params_list:
-                name_color = ui_props.node_params_tooltip_color; value_color = ui_props.node_params_value_tooltip_color
+                name_color = ui_props.params_tooltip_color; value_color = ui_props.params_value_tooltip_color # Use shared colors
                 start_y = padding_y + total_beam_tooltip_height + (len(params_list) - 1) * (line_height + line_padding)
                 for i, (key, value_repr) in enumerate(params_list):
                     current_y = start_y - (i * (line_height + line_padding)); key_text = f"{key}: "
                     draw_text_with_outline(font_id, key_text, bottom_left_x, current_y, name_color)
                     key_width = lblfDims(font_id, key_text)[0]; value_x = bottom_left_x + key_width
                     draw_text_with_outline(font_id, value_repr, value_x, current_y, value_color)
+    # --- End Tooltip Positioning & Drawing ---
 
     # Final cleanup
     if bm and not is_vehicle_part and active_obj.mode != 'EDIT':
@@ -1434,7 +1638,8 @@ def draw_callback_view(context: bpy.types.Context):
         (ui_props.toggle_cross_part_beams_vis and cross_part_beam_render_batch is None and cross_part_beam_coords and all_nodes_cache) or # Add coord check
         # Highlight batches check remains the same as it already checks coords
         (jb_globals.highlighted_element_type == 'torsionbar' and (highlight_torsionbar_outer_batch is None or highlight_torsionbar_mid_batch is None) and (highlight_torsionbar_outer_coords or highlight_torsionbar_mid_coords)) or
-        (jb_globals.highlighted_element_type not in (None, 'node', 'torsionbar') and highlight_render_batch is None and highlight_coords) # <<< MODIFIED: Exclude 'node' type
+        # <<< MODIFIED: Exclude 'node', include 'slidenode' >>>
+        (jb_globals.highlighted_element_type not in (None, 'node') and highlight_render_batch is None and highlight_coords)
     )
     if batches_missing:
         # print("DEBUG: batches_missing = True, forcing rebuild") # Optional debug
@@ -1452,9 +1657,8 @@ def draw_callback_view(context: bpy.types.Context):
         pressured_beam_coords.clear(); torsionbar_coords.clear(); torsionbar_red_coords.clear()
         rail_coords.clear(); cross_part_beam_coords.clear()
         # <<< ADDED: Clear highlight coords >>>
-        highlight_coords.clear()
-        highlight_torsionbar_outer_coords.clear()
-        highlight_torsionbar_mid_coords.clear()
+        # Highlight coords are now cleared and repopulated within find_and_highlight_element_for_line
+        # and the highlight repopulation logic below. No need to clear them here.
 
         # ... (rest of data gathering: active_obj_data, collection, node maps, etc. remains the same) ...
         active_obj_data = active_obj.data
@@ -1906,51 +2110,59 @@ def draw_callback_view(context: bpy.types.Context):
                     if bm and not (active_obj.mode == 'EDIT'): bm.free()
 
         # <<< START: Re-populate highlight coordinates >>>
+        # This logic runs AFTER the main visualization coords are populated
+        # It uses the highlight state set by find_and_highlight_element_for_line
         if jb_globals.highlighted_element_type is not None and jb_globals.highlighted_element_type != 'node':
-            # <<< Use the ORDERED list of node IDs >>>
+            # Use the ORDERED list of node IDs for beams, rails, torsionbars
+            # For slidenodes, the rail coords are already in highlight_coords
             ordered_highlight_node_ids = jb_globals.highlighted_element_ordered_node_ids
             highlight_world_positions = [] # This will be ordered correctly now
             all_highlight_nodes_found = True
             missing_highlight_nodes = []
 
-            # <<< Iterate through the ORDERED list >>>
-            for node_id in ordered_highlight_node_ids:
-                wp = None
-                pos_data = node_id_to_pos_matrix_map.get(node_id)
-                cache_data = all_nodes_cache.get(node_id)
+            # Only find positions if it's not a slidenode (slidenode coords handled in find_and_highlight)
+            if jb_globals.highlighted_element_type != 'slidenode':
+                for node_id in ordered_highlight_node_ids:
+                    wp = None
+                    pos_data = node_id_to_pos_matrix_map.get(node_id)
+                    cache_data = all_nodes_cache.get(node_id)
 
-                if pos_data:
-                    wp = pos_data[1] @ pos_data[0]
-                elif cache_data:
-                    wp = cache_data[0]
+                    if pos_data:
+                        wp = pos_data[1] @ pos_data[0]
+                    elif cache_data:
+                        wp = cache_data[0]
 
-                if wp is None:
-                    all_highlight_nodes_found = False
-                    missing_highlight_nodes.append(node_id)
+                    if wp is None:
+                        all_highlight_nodes_found = False
+                        missing_highlight_nodes.append(node_id)
 
-                highlight_world_positions.append(wp) # Appends in the correct order
+                    highlight_world_positions.append(wp) # Appends in the correct order
 
-            if not all_highlight_nodes_found:
-                if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_highlight_nodes):
-                    print(f"Warning: Could not find position data for highlighted nodes {missing_highlight_nodes}", file=sys.stderr)
-                    warned_missing_nodes_this_rebuild.update(missing_highlight_nodes)
-                # Clear highlight type if nodes are missing to prevent drawing stale highlight
-                jb_globals.highlighted_element_type = None
-                jb_globals.highlighted_node_ids.clear() # Also clear the set
-                jb_globals.highlighted_element_ordered_node_ids.clear() # Also clear the list
-            else:
-                # Populate coordinate lists based on type
-                element_type = jb_globals.highlighted_element_type
-                if element_type in ('beam', 'rail', 'cross_part_beam'):
-                    if len(highlight_world_positions) >= 2:
-                        # Use indices 0 and 1, which are now guaranteed to be id1 and id2
-                        highlight_coords.extend([highlight_world_positions[0], highlight_world_positions[1]])
-                elif element_type == 'torsionbar':
-                    if len(highlight_world_positions) >= 4:
-                        # Use indices 0, 1, 2, 3, which are now guaranteed to be id1, id2, id3, id4
-                        highlight_torsionbar_outer_coords.extend([highlight_world_positions[0], highlight_world_positions[1]])
-                        highlight_torsionbar_mid_coords.extend([highlight_world_positions[1], highlight_world_positions[2]])
-                        highlight_torsionbar_outer_coords.extend([highlight_world_positions[2], highlight_world_positions[3]])
+                if not all_highlight_nodes_found:
+                    if any(node_id not in warned_missing_nodes_this_rebuild for node_id in missing_highlight_nodes):
+                        print(f"Warning: Could not find position data for highlighted nodes {missing_highlight_nodes}", file=sys.stderr)
+                        warned_missing_nodes_this_rebuild.update(missing_highlight_nodes)
+                    # Clear highlight type if nodes are missing to prevent drawing stale highlight
+                    jb_globals.highlighted_element_type = None
+                    jb_globals.highlighted_node_ids.clear() # Also clear the set
+                    jb_globals.highlighted_element_ordered_node_ids.clear() # Also clear the list
+                    highlight_coords.clear() # Clear any potentially partially populated coords
+                    highlight_torsionbar_outer_coords.clear()
+                    highlight_torsionbar_mid_coords.clear()
+                else:
+                    # Populate coordinate lists based on type (excluding slidenode)
+                    element_type = jb_globals.highlighted_element_type
+                    if element_type in ('beam', 'rail', 'cross_part_beam'):
+                        if len(highlight_world_positions) >= 2:
+                            highlight_coords.extend([highlight_world_positions[0], highlight_world_positions[1]])
+                    elif element_type == 'torsionbar':
+                        if len(highlight_world_positions) >= 4:
+                            highlight_torsionbar_outer_coords.extend([highlight_world_positions[0], highlight_world_positions[1]])
+                            highlight_torsionbar_mid_coords.extend([highlight_world_positions[1], highlight_world_positions[2]])
+                            highlight_torsionbar_outer_coords.extend([highlight_world_positions[2], highlight_world_positions[3]])
+            # Else: If it's a slidenode, highlight_coords should already be populated by find_and_highlight_element_for_line
+            # No need to do anything here for slidenode coords.
+
         # <<< END: Re-populate highlight coordinates >>>
 
 
@@ -2064,4 +2276,3 @@ def draw_callback_view(context: bpy.types.Context):
 
     gpu.state.depth_mask_set(False) # Reset depth mask
     gpu.state.line_width_set(1.0)
-
