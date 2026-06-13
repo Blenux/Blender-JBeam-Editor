@@ -194,9 +194,31 @@ def add_jbeam_nodes(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 def add_jbeam_beams(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, beams_to_add: list):
     i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx)
 
-    # Insert new beams at bottom of beams section
+    # Check if "//ADDED BEAMS BY EDITOR" comment exists anywhere in the AST
+    comment_text = '//ADDED BEAMS BY EDITOR'
+    comment_already_exists_globally = False
+    for node in ast_nodes:
+        if node.data_type == 'wsc' and comment_text in node.value:
+            comment_already_exists_globally = True
+            break # Found it, no need to check further
 
+    # Add "//ADDED BEAMS BY EDITOR" comment only if beams are being added and comment doesn't already exist globally
+    if beams_to_add and not comment_already_exists_globally:
+        # Add an extra newline before the standard indent and comment text
+        comment_wsc_value = '\n' + NL_TWO_INDENT + comment_text
+        if node_after_entry:
+            # Append comment to the existing whitespace node before the first new beam's indent
+            node_after_entry.value += comment_wsc_value
+            # Don't set node_after_entry to None here, the loop needs it for the first beam's indent
+        else:
+            # Insert comment as a new whitespace node. The loop will handle the first beam's indent.
+            ast_nodes.insert(i, ASTNode('wsc', comment_wsc_value))
+            i += 1 # Adjust insertion index because we added a node
+
+    # Insert new beams at bottom of beams section (Original Loop Logic)
     for (node_id_1, node_id_2) in beams_to_add:
+        # This logic correctly adds the NL_TWO_INDENT *after* the comment (if added),
+        # or as a new node for subsequent beams.
         if node_after_entry:
             node_after_entry.value += NL_TWO_INDENT
             node_after_entry = None
@@ -206,15 +228,23 @@ def add_jbeam_beams(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 
         ast_nodes.insert(i + 0, ASTNode('['))
         ast_nodes.insert(i + 1, ASTNode('"', node_id_1))
-        ast_nodes.insert(i + 2, ASTNode('wsc', ','))
+        ast_nodes.insert(i + 2, ASTNode('wsc', ',')) # Keep comma wsc separate for clarity
         ast_nodes.insert(i + 3, ASTNode('"', node_id_2))
         ast_nodes.insert(i + 4, ASTNode(']'))
-        ast_nodes.insert(i + 5, ASTNode('wsc', ','))
+        ast_nodes.insert(i + 5, ASTNode('wsc', ',')) # Keep comma wsc separate
         i += 6
 
     # Add modified original last WSCS back to end of section
     if node_2_after_entry:
-        ast_nodes[i - 1].value += node_2_after_entry.value
+        # Append the original trailing whitespace after the last added comma's whitespace node
+        if i > 0 and ast_nodes[i - 1].data_type == 'wsc':
+             ast_nodes[i - 1].value += node_2_after_entry.value
+        # If no beams were added, but setup modified whitespace, handle it?
+        # This case seems unlikely if node_2_after_entry exists and beams_to_add was empty.
+        # If beams_to_add was empty and comment was not added, node_after_entry might still exist.
+        elif node_after_entry:
+             node_after_entry.value += node_2_after_entry.value
+
 
     #print_ast_nodes(ast_nodes, i, 10, True)
     return i
