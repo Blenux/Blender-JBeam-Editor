@@ -22,7 +22,7 @@ bl_info = {
     "name": "Blender JBeam Editor",
     "description": "Modify BeamNG JBeam files in a 3D editor!",
     "author": "BeamNG",
-    "version": (0, 2, 52), # Increment version
+    "version": (0, 2, 53),
     "blender": (4, 2, 0),
     "location": "File > Import > JBeam File / File > Export > JBeam File",
     "warning": "",
@@ -43,13 +43,14 @@ import bmesh
 
 from bpy.app.handlers import persistent
 
-from blf import position as blfpos   #import the function can improve the performance
+from blf import position as blfpos
 from blf import size as blfsize
 from blf import draw as blfdraw
 from blf import color as blfcolor
+from blf import dimensions as blfdims
 
 from bpy_extras.view3d_utils import location_3d_to_region_2d
-from mathutils import Vector # Import Vector
+from mathutils import Vector, Matrix # Import Matrix
 
 from . import constants
 from . import import_jbeam
@@ -57,7 +58,8 @@ from . import export_jbeam
 from . import import_vehicle
 from . import export_vehicle
 from . import text_editor
-from . import sjsonast # Import sjsonast for line number finding
+from . import sjsonast
+from .utils import Metadata # Ensure Metadata is imported
 
 if not constants.UNIT_TESTING:
     import gpu
@@ -75,25 +77,19 @@ _force_do_export = False
 prev_obj_selected = None
 curr_vdata = None
 
-selected_nodes = [] # Stores tuples: (vertex_index, init_node_id_str)
-selected_beams = [] # Stores tuples: (edge_object, beam_indices_str)
-selected_tris_quads = [] # Stores tuples: (face_object, face_idx_in_part)
-_selected_beam_line_info = None # Stores {'line': num, 'midpoint': Vector}
+selected_nodes = []
+selected_beams = []
+selected_tris_quads = []
+_selected_beam_line_info = None
+_selected_beam_params_info = None
+_selected_node_params_info = None # <<< ADDED: Global for node params tooltip
 
 veh_render_dirty = False
-
 rename_enabled = False
-
 batch_node_renaming_enabled = False
-
-# Global variables for rail visualization
-rail_render_batch = None
-rail_coords = []
-
-# --- MODIFIED START ---
-# Global variable to track previous selection for batch renaming
+# rail_render_batch = None # Defined below with other batches
+# rail_coords = [] # Defined below with other batches
 previous_selected_indices = set()
-# --- MODIFIED END ---
 
 
 # Refresh property input field UI
@@ -106,7 +102,8 @@ def on_input_node_id_field_updated(self, context: bpy.types.Context):
     ui_props = scene.ui_properties
 
     obj = context.active_object
-    if obj is None or len(selected_nodes) == 0:
+    # Check if object is valid JBeam AND editing enabled (important for this specific action)
+    if obj is None or obj.data.get(constants.MESH_JBEAM_PART) is None or not obj.data.get(constants.MESH_EDITING_ENABLED, False) or len(selected_nodes) == 0:
         return
 
     if rename_enabled:
@@ -159,19 +156,225 @@ class UIProperties(bpy.types.PropertyGroup):
         description="Toggles the text of NodeIDs",
         default=True
     )
+
+    # --- Tooltip Placement ---
+    tooltip_placement: bpy.props.EnumProperty(
+        name="Tooltip Placement",
+        description="Horizontal placement of the parameter tooltips in the viewport",
+        items=[
+            ('BOTTOM_LEFT', "Bottom Left", "Place tooltips at the bottom left"),
+            ('BOTTOM_CENTER', "Bottom Center", "Place tooltips at the bottom center"),
+            ('BOTTOM_RIGHT', "Bottom Right", "Place tooltips at the bottom right"),
+        ],
+        default='BOTTOM_LEFT',
+    )
+
+    # --- Beam Tooltips ---
+    show_beam_tooltips_panel: bpy.props.BoolProperty(
+        name="Beam Tooltips",
+        description="Expand to see beam tooltip options",
+        default=False,
+    )
     toggle_beam_line_tooltip: bpy.props.BoolProperty(
         name="Show Beam Line Tooltip",
         description="Shows the JBeam file line number for a selected beam",
         default=True
     )
     beam_line_tooltip_color: bpy.props.FloatVectorProperty(
-        name="Tooltip Color",
+        name="Line Tooltip Color",
         description="Color of the beam line number tooltip text",
         subtype='COLOR',
         default=(1.0, 1.0, 1.0, 1.0), # Default White
         min=0.0, max=1.0,
         size=4
     )
+    toggle_beam_params_tooltip: bpy.props.BoolProperty(
+        name="Show Beam Params Tooltip",
+        description="Shows the parameters for a selected beam",
+        default=True
+    )
+    beam_params_tooltip_color: bpy.props.FloatVectorProperty(
+        name="Params Name Color", # Clarify this is for the name
+        description="Color of the beam parameter name tooltip text",
+        subtype='COLOR',
+        default=(1.0, 1.0, 1.0, 1.0),
+        min=0.0, max=1.0,
+        size=4
+    )
+    # <<< ADDED: Color property for beam parameter values >>>
+    beam_params_value_tooltip_color: bpy.props.FloatVectorProperty(
+        name="Params Value Color",
+        description="Color of the beam parameter value tooltip text",
+        subtype='COLOR',
+        default=(0.0, 1.0, 0.0, 1.0), # Default Green
+        min=0.0, max=1.0,
+        size=4
+    )
+    # <<< END ADDED >>>
+
+    # Beam Parameter Toggles
+    tooltip_show_beamSpring: bpy.props.BoolProperty(name="beamSpring", default=True)
+    tooltip_show_beamDamp: bpy.props.BoolProperty(name="beamDamp", default=True)
+    tooltip_show_beamDeform: bpy.props.BoolProperty(name="beamDeform", default=True)
+    tooltip_show_beamStrength: bpy.props.BoolProperty(name="beamStrength", default=True)
+    tooltip_show_beamPrecompression: bpy.props.BoolProperty(name="beamPrecompression", default=True)
+    tooltip_show_beamType: bpy.props.BoolProperty(name="beamType", default=True)
+    tooltip_show_beamLongBound: bpy.props.BoolProperty(name="beamLongBound", default=True)
+    tooltip_show_beamShortBound: bpy.props.BoolProperty(name="beamShortBound", default=True)
+    tooltip_show_beamLimitSpring: bpy.props.BoolProperty(name="beamLimitSpring", default=True)
+    tooltip_show_beamLimitDamp: bpy.props.BoolProperty(name="beamLimitDamp", default=True)
+    tooltip_show_beamPrecompressionRange: bpy.props.BoolProperty(name="beamPrecompressionRange", default=True)
+    tooltip_show_beamDampRebound: bpy.props.BoolProperty(name="beamDampRebound", default=True)
+    tooltip_show_beamDampFast: bpy.props.BoolProperty(name="beamDampFast", default=True)
+    tooltip_show_beamDampReboundFast: bpy.props.BoolProperty(name="beamDampReboundFast", default=True)
+    tooltip_show_beamDampVelocitySplit: bpy.props.BoolProperty(name="beamDampVelocitySplit", default=True)
+    tooltip_show_beamDampCutoffHz: bpy.props.BoolProperty(name="beamDampCutoffHz", default=True)
+    tooltip_show_beamDeformReboundThreshold: bpy.props.BoolProperty(name="beamDeformReboundThreshold", default=True)
+    tooltip_show_breakGroup: bpy.props.BoolProperty(name="breakGroup", default=True)
+    tooltip_show_breakGroupType: bpy.props.BoolProperty(name="breakGroupType", default=True)
+    tooltip_show_disableMeshBreaking: bpy.props.BoolProperty(name="disableMeshBreaking", default=True)
+    tooltip_show_disableTriangleBreaking: bpy.props.BoolProperty(name="disableTriangleBreaking", default=True)
+    tooltip_show_soundTriggerBeam: bpy.props.BoolProperty(name="soundTriggerBeam", default=True)
+    tooltip_show_optional: bpy.props.BoolProperty(name="optional", default=True)
+    tooltip_show_group: bpy.props.BoolProperty(name="group", default=True)
+    # --- ADDED: New Beam Parameter Toggles ---
+    tooltip_show_dampCutoffHz: bpy.props.BoolProperty(name="dampCutoffHz", default=True)
+    tooltip_show_deformGroup: bpy.props.BoolProperty(name="deformGroup", default=True)
+    tooltip_show_deformLimitExpansion: bpy.props.BoolProperty(name="deformLimitExpansion", default=True)
+    tooltip_show_deformLimitStress: bpy.props.BoolProperty(name="deformLimitStress", default=True)
+    tooltip_show_deformationTriggerRatio: bpy.props.BoolProperty(name="deformationTriggerRatio", default=True)
+    tooltip_show_name_beam: bpy.props.BoolProperty(name="name (beam)", default=True) # Renamed to avoid conflict
+    tooltip_show_partName_beam: bpy.props.BoolProperty(name="partName (beam)", default=True) # Renamed to avoid conflict
+    tooltip_show_slotType_beam: bpy.props.BoolProperty(name="slotType (beam)", default=True) # Renamed to avoid conflict
+    # --- END ADDED ---
+
+    # --- Node Tooltips ---
+    show_node_tooltips_panel: bpy.props.BoolProperty(
+        name="Node Tooltips",
+        description="Expand to see node tooltip options",
+        default=False,
+    )
+    toggle_node_params_tooltip: bpy.props.BoolProperty(
+        name="Show Node Params Tooltip",
+        description="Shows the parameters for a selected node",
+        default=True
+    )
+    node_params_tooltip_color: bpy.props.FloatVectorProperty(
+        name="Params Name Color", #  Clarify this is for the name
+        description="Color of the node parameter name tooltip text",
+        subtype='COLOR',
+        default=(1.0, 1.0, 1.0, 1.0),
+        min=0.0, max=1.0,
+        size=4
+    )
+    # <<< ADDED: Color property for node parameter values >>>
+    node_params_value_tooltip_color: bpy.props.FloatVectorProperty(
+        name="Params Value Color",
+        description="Color of the node parameter value tooltip text",
+        subtype='COLOR',
+        default=(0.0, 1.0, 0.0, 1.0), # Default Green
+        min=0.0, max=1.0,
+        size=4
+    )
+    # <<< END ADDED >>>
+
+    # Node Parameter Toggles
+    tooltip_show_nodeWeight: bpy.props.BoolProperty(name="nodeWeight", default=True)
+    tooltip_show_nodeMaterial: bpy.props.BoolProperty(name="nodeMaterial", default=True)
+    tooltip_show_collision: bpy.props.BoolProperty(name="collision", default=True)
+    tooltip_show_selfCollision: bpy.props.BoolProperty(name="selfCollision", default=True)
+    tooltip_show_frictionCoef: bpy.props.BoolProperty(name="frictionCoef", default=True)
+    tooltip_show_slidingFrictionCoef: bpy.props.BoolProperty(name="slidingFrictionCoef", default=True)
+    tooltip_show_group_node: bpy.props.BoolProperty(name="group (node)", default=True)
+    tooltip_show_couplerGroup: bpy.props.BoolProperty(name="couplerGroup", default=True)
+    tooltip_show_loadMembers: bpy.props.BoolProperty(name="loadMembers", default=True)
+    tooltip_show_isCoupler: bpy.props.BoolProperty(name="isCoupler", default=True)
+    tooltip_show_couplerStrength: bpy.props.BoolProperty(name="couplerStrength", default=True)
+    tooltip_show_couplerPullStrength: bpy.props.BoolProperty(name="couplerPullStrength", default=True)
+    tooltip_show_couplerPosition: bpy.props.BoolProperty(name="couplerPosition", default=True)
+    tooltip_show_couplerDirection: bpy.props.BoolProperty(name="couplerDirection", default=True)
+    tooltip_show_couplerRadius: bpy.props.BoolProperty(name="couplerRadius", default=True)
+    tooltip_show_couplerStartRadius: bpy.props.BoolProperty(name="couplerStartRadius", default=True)
+    tooltip_show_couplerBreakTriggerBeam: bpy.props.BoolProperty(name="couplerBreakTriggerBeam", default=True)
+    tooltip_show_couplerSoundVolumeFactor: bpy.props.BoolProperty(name="couplerSoundVolumeFactor", default=True)
+    tooltip_show_couplerSoundNode: bpy.props.BoolProperty(name="couplerSoundNode", default=True)
+    tooltip_show_couplerLockedSoundEvent: bpy.props.BoolProperty(name="couplerLockedSoundEvent", default=True)
+    tooltip_show_couplerUnlockedSoundEvent: bpy.props.BoolProperty(name="couplerUnlockedSoundEvent", default=True)
+    tooltip_show_couplerLockable: bpy.props.BoolProperty(name="couplerLockable", default=True)
+    tooltip_show_couplerAllowUnlocking: bpy.props.BoolProperty(name="couplerAllowUnlocking", default=True)
+    tooltip_show_couplerAutoLockRadius: bpy.props.BoolProperty(name="couplerAutoLockRadius", default=True)
+    tooltip_show_couplerAngleLimit: bpy.props.BoolProperty(name="couplerAngleLimit", default=True)
+    tooltip_show_couplerAngleLimitSpring: bpy.props.BoolProperty(name="couplerAngleLimitSpring", default=True)
+    tooltip_show_couplerAngleLimitDamp: bpy.props.BoolProperty(name="couplerAngleLimitDamp", default=True)
+    tooltip_show_couplerAngleLimitDeform: bpy.props.BoolProperty(name="couplerAngleLimitDeform", default=True)
+    tooltip_show_couplerAngleLimitStrength: bpy.props.BoolProperty(name="couplerAngleLimitStrength", default=True)
+    tooltip_show_couplerBreakGroup: bpy.props.BoolProperty(name="couplerBreakGroup", default=True)
+    tooltip_show_engineGroup: bpy.props.BoolProperty(name="engineGroup", default=True)
+    tooltip_show_enablePowertrain: bpy.props.BoolProperty(name="enablePowertrain", default=True)
+    tooltip_show_name: bpy.props.BoolProperty(name="name", default=True)
+    tooltip_show_inputName: bpy.props.BoolProperty(name="inputName", default=True)
+    tooltip_show_pressurePSI: bpy.props.BoolProperty(name="pressurePSI", default=True)
+    tooltip_show_soundFile: bpy.props.BoolProperty(name="soundFile", default=True)
+    tooltip_show_volumePerPSI: bpy.props.BoolProperty(name="volumePerPSI", default=True)
+    tooltip_show_attackTime: bpy.props.BoolProperty(name="attackTime", default=True)
+    tooltip_show_decayTime: bpy.props.BoolProperty(name="decayTime", default=True)
+    tooltip_show_maxVolumedB: bpy.props.BoolProperty(name="maxVolumedB", default=True)
+    tooltip_show_radius: bpy.props.BoolProperty(name="radius", default=True)
+    tooltip_show_fixed: bpy.props.BoolProperty(name="fixed", default=True)
+    tooltip_show_category: bpy.props.BoolProperty(name="category", default=True)
+    tooltip_show_pressureDamage: bpy.props.BoolProperty(name="pressureDamage", default=True)
+    tooltip_show_hubGroup: bpy.props.BoolProperty(name="hubGroup", default=True)
+    tooltip_show_pressureRatePSI: bpy.props.BoolProperty(name="pressureRatePSI", default=True)
+    tooltip_show_maxPressurePSI: bpy.props.BoolProperty(name="maxPressurePSI", default=True)
+    tooltip_show_boostPSI: bpy.props.BoolProperty(name="boostPSI", default=True)
+    tooltip_show_supercharger: bpy.props.BoolProperty(name="supercharger", default=True)
+    tooltip_show_turbocharger: bpy.props.BoolProperty(name="turbocharger", default=True)
+    tooltip_show_nitroSoundFile: bpy.props.BoolProperty(name="nitroSoundFile", default=True)
+    tooltip_show_nitroVolumePerPSI: bpy.props.BoolProperty(name="nitroVolumePerPSI", default=True)
+    tooltip_show_nitroAttackTime: bpy.props.BoolProperty(name="nitroAttackTime", default=True)
+    tooltip_show_nitroDecayTime: bpy.props.BoolProperty(name="nitroDecayTime", default=True)
+    tooltip_show_nitroMaxVolumedB: bpy.props.BoolProperty(name="nitroMaxVolumedB", default=True)
+    tooltip_show_cameraDistance: bpy.props.BoolProperty(name="cameraDistance", default=True)
+    tooltip_show_cameraRotation: bpy.props.BoolProperty(name="cameraRotation", default=True)
+    tooltip_show_cameraLookAt: bpy.props.BoolProperty(name="cameraLookAt", default=True)
+    tooltip_show_cameraFOV: bpy.props.BoolProperty(name="cameraFOV", default=True)
+    tooltip_show_cameraOffset: bpy.props.BoolProperty(name="cameraOffset", default=True)
+    tooltip_show_cameraMinDistance: bpy.props.BoolProperty(name="cameraMinDistance", default=True)
+    tooltip_show_cameraMaxDistance: bpy.props.BoolProperty(name="cameraMaxDistance", default=True)
+    tooltip_show_cameraFocusPoint: bpy.props.BoolProperty(name="cameraFocusPoint", default=True)
+    tooltip_show_cameraMode: bpy.props.BoolProperty(name="cameraMode", default=True)
+    tooltip_show_cameraShake: bpy.props.BoolProperty(name="cameraShake", default=True)
+    tooltip_show_cameraShakeMultiplier: bpy.props.BoolProperty(name="cameraShakeMultiplier", default=True)
+    tooltip_show_cameraShakeMaxSpeed: bpy.props.BoolProperty(name="cameraShakeMaxSpeed", default=True)
+    tooltip_show_cameraShakeMaxAngle: bpy.props.BoolProperty(name="cameraShakeMaxAngle", default=True)
+    tooltip_show_cameraShakeMaxOffset: bpy.props.BoolProperty(name="cameraShakeMaxOffset", default=True)
+    tooltip_show_cameraShakeFrequency: bpy.props.BoolProperty(name="cameraShakeFrequency", default=True)
+    tooltip_show_cameraShakeDamping: bpy.props.BoolProperty(name="cameraShakeDamping", default=True)
+    tooltip_show_cameraShakeRandomness: bpy.props.BoolProperty(name="cameraShakeRandomness", default=True)
+    tooltip_show_cameraShakeRandomSeed: bpy.props.BoolProperty(name="cameraShakeRandomSeed", default=True)
+    tooltip_show_cameraShakeRandomFrequency: bpy.props.BoolProperty(name="cameraShakeRandomFrequency", default=True)
+    tooltip_show_cameraShakeRandomDamping: bpy.props.BoolProperty(name="cameraShakeRandomDamping", default=True)
+    tooltip_show_cameraShakeRandomOffset: bpy.props.BoolProperty(name="cameraShakeRandomOffset", default=True)
+    tooltip_show_cameraShakeRandomAngle: bpy.props.BoolProperty(name="cameraShakeRandomAngle", default=True)
+    tooltip_show_cameraShakeRandomMaxSpeed: bpy.props.BoolProperty(name="cameraShakeRandomMaxSpeed", default=True)
+    tooltip_show_cameraShakeRandomMaxAngle: bpy.props.BoolProperty(name="cameraShakeRandomMaxAngle", default=True)
+    tooltip_show_cameraShakeRandomMaxOffset: bpy.props.BoolProperty(name="cameraShakeRandomMaxOffset", default=True)
+    tooltip_show_cameraShakeRandomFrequencyMultiplier: bpy.props.BoolProperty(name="cameraShakeRandomFrequencyMultiplier", default=True)
+    tooltip_show_cameraShakeRandomDampingMultiplier: bpy.props.BoolProperty(name="cameraShakeRandomDampingMultiplier", default=True)
+    tooltip_show_cameraShakeRandomOffsetMultiplier: bpy.props.BoolProperty(name="cameraShakeRandomOffsetMultiplier", default=True)
+    tooltip_show_cameraShakeRandomAngleMultiplier: bpy.props.BoolProperty(name="cameraShakeRandomAngleMultiplier", default=True)
+    tooltip_show_cameraShakeRandomMaxSpeedMultiplier: bpy.props.BoolProperty(name="cameraShakeRandomMaxSpeedMultiplier", default=True)
+    tooltip_show_cameraShakeRandomMaxAngleMultiplier: bpy.props.BoolProperty(name="cameraShakeRandomMaxAngleMultiplier", default=True)
+    tooltip_show_cameraShakeRandomMaxOffsetMultiplier: bpy.props.BoolProperty(name="cameraShakeRandomMaxOffsetMultiplier", default=True)
+    tooltip_show_burnRate: bpy.props.BoolProperty(name="burnRate", default=True)
+    tooltip_show_chemEnergy: bpy.props.BoolProperty(name="chemEnergy", default=True)
+    tooltip_show_flashPoint: bpy.props.BoolProperty(name="flashPoint", default=True)
+    tooltip_show_partName: bpy.props.BoolProperty(name="partName", default=True)
+    tooltip_show_selfIgnitionCoef: bpy.props.BoolProperty(name="selfIgnitionCoef", default=True)
+    tooltip_show_slotType: bpy.props.BoolProperty(name="slotType", default=True)
+    tooltip_show_smokePoint: bpy.props.BoolProperty(name="smokePoint", default=True)
+    tooltip_show_specHeat: bpy.props.BoolProperty(name="specHeat", default=True)
+    tooltip_show_totalOffset: bpy.props.BoolProperty(name="totalOffset", default=True)
 
     affect_node_references: bpy.props.BoolProperty(
         name="Affect Node References",
@@ -203,7 +406,7 @@ class UIProperties(bpy.types.PropertyGroup):
     # Torsionbar visualization properties
     toggle_torsionbars_vis: bpy.props.BoolProperty(
         name="Show Torsionbars",
-        description="Toggles the visibility of torsionbars (Blue/Red Lines)", # Updated description
+        description="Toggles the visibility of torsionbars (Blue/Red Lines)",
         default=True
     )
     torsionbar_color: bpy.props.FloatVectorProperty(
@@ -287,7 +490,6 @@ class JBEAM_EDITOR_OT_redo(bpy.types.Operator):
         refresh_curr_vdata(True)
         return {'FINISHED'}
 
-
 # Add JBeam beam/triangle/quad
 class JBEAM_EDITOR_OT_add_beam_tri_quad(bpy.types.Operator):
     bl_idname = "jbeam_editor.add_beam_tri_quad"
@@ -296,6 +498,10 @@ class JBEAM_EDITOR_OT_add_beam_tri_quad(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         global selected_nodes
+        # Check active object validity AND editing enabled
+        obj = context.active_object
+        if not obj or obj.data.get(constants.MESH_JBEAM_PART) is None or not obj.data.get(constants.MESH_EDITING_ENABLED, False):
+            return False
         return len(selected_nodes) in (2,3,4)
 
     def invoke(self, context, event):
@@ -355,6 +561,10 @@ class JBEAM_EDITOR_OT_flip_jbeam_faces(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         global selected_tris_quads
+        # Check active object validity AND editing enabled
+        obj = context.active_object
+        if not obj or obj.data.get(constants.MESH_JBEAM_PART) is None or not obj.data.get(constants.MESH_EDITING_ENABLED, False):
+            return False
         return len(selected_tris_quads) > 0
 
     def invoke(self, context, event):
@@ -392,7 +602,8 @@ class JBEAM_EDITOR_OT_batch_node_renaming(bpy.types.Operator):
         obj_data = obj.data
         if not isinstance(obj_data, bpy.types.Mesh):
             return False
-        if obj_data.get(constants.MESH_JBEAM_PART) is None or not obj_data[constants.MESH_EDITING_ENABLED]:
+        # Check active object validity AND editing enabled
+        if obj_data.get(constants.MESH_JBEAM_PART) is None or not obj_data.get(constants.MESH_EDITING_ENABLED, False):
             return False
         if obj.mode != 'EDIT':
             return False
@@ -408,12 +619,17 @@ class JBEAM_EDITOR_OT_batch_node_renaming(bpy.types.Operator):
             ui_props.batch_node_renaming_node_idx = 1
         return {'FINISHED'}
 
-
 class JBEAM_EDITOR_PT_transform_panel_ext(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Item'
     bl_label = 'JBeam'
+
+    # Poll method checks if editing is enabled
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None and obj.data.get(constants.MESH_EDITING_ENABLED, False)
 
     def draw(self, context):
         layout = self.layout
@@ -425,6 +641,12 @@ class JBEAM_EDITOR_PT_jbeam_panel(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = 'JBeam'
     bl_label = 'JBeam'
+
+    # Poll method checks if editing is enabled
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None and obj.data.get(constants.MESH_EDITING_ENABLED, False)
 
     def draw(self, context):
         obj = context.active_object
@@ -482,11 +704,8 @@ class JBEAM_EDITOR_PT_jbeam_panel(bpy.types.Panel):
 
             if len_selected_faces > 0:
                 col.row().operator('jbeam_editor.flip_jbeam_faces')
-        # else:
-            # Option to convert non-JBeam mesh (if needed in future)
-            # layout.operator('jbeam_editor.convert_to_jbeam_mesh', text='Convert to JBeam Mesh')
 
-        if bm: bm.free() # Free bmesh if it was created
+        if bm and not (obj.mode == 'EDIT'): bm.free() # Free bmesh if it was created
 
 
 class JBEAM_EDITOR_PT_jbeam_properties_panel(bpy.types.Panel):
@@ -496,6 +715,12 @@ class JBEAM_EDITOR_PT_jbeam_properties_panel(bpy.types.Panel):
     bl_category = 'JBeam'
     bl_label = 'Properties'
     bl_options = {'DEFAULT_CLOSED'}
+
+    # Poll method checks if editing is enabled
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None and obj.data.get(constants.MESH_EDITING_ENABLED, False)
 
     def draw(self, context):
         global curr_vdata
@@ -549,7 +774,7 @@ class JBEAM_EDITOR_PT_jbeam_properties_panel(bpy.types.Panel):
                     node = curr_vdata['nodes'][node_id]
                     col.label(text=f"Node: {node_id}")
                     for k in sorted(node.keys(), key=lambda x: str(x)):
-                        if k == 'pos': continue # Don't show raw position
+                        if k == 'pos' or k == Metadata or k == 'posNoOffset': continue # Don't show raw position, Metadata, or posNoOffset
                         val = node[k]
                         str_val = repr(val)
                         col.row().label(text=f'- {k}: {str_val}')
@@ -593,7 +818,8 @@ class JBEAM_EDITOR_PT_jbeam_properties_panel(bpy.types.Panel):
                     beam = curr_vdata['beams'][global_beam_idx]
                     col.label(text=f"Beam: {beam.get('id1:', '?')}-{beam.get('id2:', '?')} (Index {beam_idx_in_part} in {part_origin})")
                     for k in sorted(beam.keys(), key=lambda x: str(x)):
-                        if k in ('id1:', 'id2:', 'partOrigin'): continue # Don't repeat IDs/origin
+                        if k in ('id1:', 'id2:', 'partOrigin') or k == Metadata: # Exclude Metadata class
+                            continue
                         val = beam[k]
                         str_val = repr(val)
                         col.row().label(text=f'- {k}: {str_val}')
@@ -655,7 +881,7 @@ class JBEAM_EDITOR_PT_jbeam_properties_panel(bpy.types.Panel):
         else:
             col.label(text="Select a single node, beam, or face to see properties.")
 
-        if bm: bm.free() # Free bmesh
+        if bm and not (obj.mode == 'EDIT'): bm.free() # Free bmesh
 
 
 class JBEAM_EDITOR_PT_batch_node_renaming(bpy.types.Panel):
@@ -663,6 +889,12 @@ class JBEAM_EDITOR_PT_batch_node_renaming(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = 'JBeam'
     bl_label = 'Batch Node Renaming'
+
+    # Poll method checks if editing is enabled
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None and obj.data.get(constants.MESH_EDITING_ENABLED, False)
 
     def draw(self, context):
         scene = context.scene
@@ -685,6 +917,12 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
     bl_category = 'JBeam'
     bl_label = 'Settings'
 
+    # Poll method checks if editing is enabled
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None and obj.data.get(constants.MESH_EDITING_ENABLED, False)
+
     def draw(self, context):
         obj = context.active_object
         if not obj:
@@ -698,50 +936,279 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
         ui_props = scene.ui_properties
         layout = self.layout
 
-        # Check if it's a JBeam mesh before drawing settings
+        # Check if it's a JBeam mesh before drawing settings (redundant due to poll, but safe)
         if obj_data.get(constants.MESH_JBEAM_PART) is not None:
             box = layout.box()
             col = box.column(align=True) # Align elements in the column
 
             col.label(text="General:")
             col.prop(ui_props, 'affect_node_references', text="Affect Node References")
+            # <<< ADDED: Tooltip Placement Setting >>>
+            col.label(text="Tooltip Placement:")
+            col.prop(ui_props, 'tooltip_placement', text="")
+            # <<< END ADDED >>>
 
             col.separator()
             col.label(text="Node Visualization:")
             col.prop(ui_props, 'toggle_node_ids_text', text="Show Node IDs Text")
 
+            # --- Node Tooltips Sub-panel ---
+            node_tooltip_box = col.box()
+            row = node_tooltip_box.row(align=True)
+            row.prop(ui_props, "show_node_tooltips_panel",
+                     icon="TRIA_DOWN" if ui_props.show_node_tooltips_panel else "TRIA_RIGHT",
+                     icon_only=True, emboss=False)
+            row.label(text="Node Tooltips")
+
+            if ui_props.show_node_tooltips_panel:
+                node_tooltip_col = node_tooltip_box.column(align=True)
+
+                # Parameters Tooltip (Main Toggle + Colors)
+                row = node_tooltip_col.row(align=True)
+                row.prop(ui_props, 'toggle_node_params_tooltip', text="Params")
+                # Add value color property >>>
+                split = row.split(factor=0.5, align=True)
+                split.prop(ui_props, 'node_params_tooltip_color', text="")
+                split.prop(ui_props, 'node_params_value_tooltip_color', text="")
+
+                # Main box for all parameters, enabled by the main toggle
+                node_param_main_box = node_tooltip_col.box()
+                node_param_main_box.enabled = ui_props.toggle_node_params_tooltip
+
+                # --- Coupler Parameters Sub-Box ---
+                coupler_box = node_param_main_box.box()
+                coupler_box.label(text="Coupler Parameters:")
+                coupler_grid = coupler_box.grid_flow(row_major=True, columns=1, align=True)
+
+                # --- Camera Parameters Sub-Box ---
+                camera_box = node_param_main_box.box()
+                camera_box.label(text="Camera Parameters:")
+                camera_grid = camera_box.grid_flow(row_major=True, columns=1, align=True)
+
+                # --- Other Parameters Sub-Box ---
+                other_box = node_param_main_box.box()
+                other_box.label(text="Other Parameters:")
+                other_grid = other_box.grid_flow(row_major=True, columns=1, align=True)
+
+                # Map parameter names to their corresponding UI toggle property
+                node_param_toggle_map = {
+                    'nodeWeight': 'tooltip_show_nodeWeight',
+                    'nodeMaterial': 'tooltip_show_nodeMaterial',
+                    'collision': 'tooltip_show_collision',
+                    'selfCollision': 'tooltip_show_selfCollision',
+                    'frictionCoef': 'tooltip_show_frictionCoef',
+                    'slidingFrictionCoef': 'tooltip_show_slidingFrictionCoef',
+                    'group': 'tooltip_show_group_node', # Use the renamed property
+                    'couplerGroup': 'tooltip_show_couplerGroup',
+                    'loadMembers': 'tooltip_show_loadMembers',
+                    'isCoupler': 'tooltip_show_isCoupler',
+                    'couplerStrength': 'tooltip_show_couplerStrength',
+                    'couplerPullStrength': 'tooltip_show_couplerPullStrength',
+                    'couplerPosition': 'tooltip_show_couplerPosition',
+                    'couplerDirection': 'tooltip_show_couplerDirection',
+                    'couplerRadius': 'tooltip_show_couplerRadius',
+                    'couplerStartRadius': 'tooltip_show_couplerStartRadius',
+                    'couplerBreakTriggerBeam': 'tooltip_show_couplerBreakTriggerBeam',
+                    'couplerSoundVolumeFactor': 'tooltip_show_couplerSoundVolumeFactor',
+                    'couplerSoundNode': 'tooltip_show_couplerSoundNode',
+                    'couplerLockedSoundEvent': 'tooltip_show_couplerLockedSoundEvent',
+                    'couplerUnlockedSoundEvent': 'tooltip_show_couplerUnlockedSoundEvent',
+                    'couplerLockable': 'tooltip_show_couplerLockable',
+                    'couplerAllowUnlocking': 'tooltip_show_couplerAllowUnlocking',
+                    'couplerAutoLockRadius': 'tooltip_show_couplerAutoLockRadius',
+                    'couplerAngleLimit': 'tooltip_show_couplerAngleLimit',
+                    'couplerAngleLimitSpring': 'tooltip_show_couplerAngleLimitSpring',
+                    'couplerAngleLimitDamp': 'tooltip_show_couplerAngleLimitDamp',
+                    'couplerAngleLimitDeform': 'tooltip_show_couplerAngleLimitDeform',
+                    'couplerAngleLimitStrength': 'tooltip_show_couplerAngleLimitStrength',
+                    'couplerBreakGroup': 'tooltip_show_couplerBreakGroup',
+                    'engineGroup': 'tooltip_show_engineGroup',
+                    'enablePowertrain': 'tooltip_show_enablePowertrain',
+                    'name': 'tooltip_show_name',
+                    'inputName': 'tooltip_show_inputName',
+                    'pressurePSI': 'tooltip_show_pressurePSI',
+                    'soundFile': 'tooltip_show_soundFile',
+                    'volumePerPSI': 'tooltip_show_volumePerPSI',
+                    'attackTime': 'tooltip_show_attackTime',
+                    'decayTime': 'tooltip_show_decayTime',
+                    'maxVolumedB': 'tooltip_show_maxVolumedB',
+                    'radius': 'tooltip_show_radius',
+                    'fixed': 'tooltip_show_fixed',
+                    'category': 'tooltip_show_category',
+                    'pressureDamage': 'tooltip_show_pressureDamage',
+                    'hubGroup': 'tooltip_show_hubGroup',
+                    'pressureRatePSI': 'tooltip_show_pressureRatePSI',
+                    'maxPressurePSI': 'tooltip_show_maxPressurePSI',
+                    'boostPSI': 'tooltip_show_boostPSI',
+                    'supercharger': 'tooltip_show_supercharger',
+                    'turbocharger': 'tooltip_show_turbocharger',
+                    'nitroSoundFile': 'tooltip_show_nitroSoundFile',
+                    'nitroVolumePerPSI': 'tooltip_show_nitroVolumePerPSI',
+                    'nitroAttackTime': 'tooltip_show_nitroAttackTime',
+                    'nitroDecayTime': 'tooltip_show_nitroDecayTime',
+                    'nitroMaxVolumedB': 'tooltip_show_nitroMaxVolumedB',
+                    'cameraDistance': 'tooltip_show_cameraDistance',
+                    'cameraRotation': 'tooltip_show_cameraRotation',
+                    'cameraLookAt': 'tooltip_show_cameraLookAt',
+                    'cameraFOV': 'tooltip_show_cameraFOV',
+                    'cameraOffset': 'tooltip_show_cameraOffset',
+                    'cameraMinDistance': 'tooltip_show_cameraMinDistance',
+                    'cameraMaxDistance': 'tooltip_show_cameraMaxDistance',
+                    'cameraFocusPoint': 'tooltip_show_cameraFocusPoint',
+                    'cameraMode': 'tooltip_show_cameraMode',
+                    'cameraShake': 'tooltip_show_cameraShake',
+                    'cameraShakeMultiplier': 'tooltip_show_cameraShakeMultiplier',
+                    'cameraShakeMaxSpeed': 'tooltip_show_cameraShakeMaxSpeed',
+                    'cameraShakeMaxAngle': 'tooltip_show_cameraShakeMaxAngle',
+                    'cameraShakeMaxOffset': 'tooltip_show_cameraShakeMaxOffset',
+                    'cameraShakeFrequency': 'tooltip_show_cameraShakeFrequency',
+                    'cameraShakeDamping': 'tooltip_show_cameraShakeDamping',
+                    'cameraShakeRandomness': 'tooltip_show_cameraShakeRandomness',
+                    'cameraShakeRandomSeed': 'tooltip_show_cameraShakeRandomSeed',
+                    'cameraShakeRandomFrequency': 'tooltip_show_cameraShakeRandomFrequency',
+                    'cameraShakeRandomDamping': 'tooltip_show_cameraShakeRandomDamping',
+                    'cameraShakeRandomOffset': 'tooltip_show_cameraShakeRandomOffset',
+                    'cameraShakeRandomAngle': 'tooltip_show_cameraShakeRandomAngle',
+                    'cameraShakeRandomMaxSpeed': 'tooltip_show_cameraShakeRandomMaxSpeed',
+                    'cameraShakeRandomMaxAngle': 'tooltip_show_cameraShakeRandomMaxAngle',
+                    'cameraShakeRandomMaxOffset': 'tooltip_show_cameraShakeRandomMaxOffset',
+                    'cameraShakeRandomFrequencyMultiplier': 'tooltip_show_cameraShakeRandomFrequencyMultiplier',
+                    'cameraShakeRandomDampingMultiplier': 'tooltip_show_cameraShakeRandomDampingMultiplier',
+                    'cameraShakeRandomOffsetMultiplier': 'tooltip_show_cameraShakeRandomOffsetMultiplier',
+                    'cameraShakeRandomAngleMultiplier': 'tooltip_show_cameraShakeRandomAngleMultiplier',
+                    'cameraShakeRandomMaxSpeedMultiplier': 'tooltip_show_cameraShakeRandomMaxSpeedMultiplier',
+                    'cameraShakeRandomMaxAngleMultiplier': 'tooltip_show_cameraShakeRandomMaxAngleMultiplier',
+                    'cameraShakeRandomMaxOffsetMultiplier': 'tooltip_show_cameraShakeRandomMaxOffsetMultiplier',
+                    'burnRate': 'tooltip_show_burnRate',
+                    'chemEnergy': 'tooltip_show_chemEnergy',
+                    'flashPoint': 'tooltip_show_flashPoint',
+                    'partName': 'tooltip_show_partName',
+                    'selfIgnitionCoef': 'tooltip_show_selfIgnitionCoef',
+                    'slotType': 'tooltip_show_slotType',
+                    'smokePoint': 'tooltip_show_smokePoint',
+                    'specHeat': 'tooltip_show_specHeat',
+                    'totalOffset': 'tooltip_show_totalOffset',
+                }
+
+                # Iterate and assign properties to the correct grid
+                for param_key, prop_name in node_param_toggle_map.items():
+                    # Special case for 'group' to avoid conflict with beam group
+                    text_override = "group" if prop_name == 'tooltip_show_group_node' else None
+
+                    if "coupler" in param_key.lower():
+                        coupler_grid.prop(ui_props, prop_name, text=text_override if text_override else param_key)
+                    elif "camera" in param_key.lower():
+                        camera_grid.prop(ui_props, prop_name, text=text_override if text_override else param_key)
+                    else:
+                        # These new ones will automatically go here
+                        other_grid.prop(ui_props, prop_name, text=text_override if text_override else param_key)
+
+
+            # --- Beam Visualization ---
             col.separator()
             col.label(text="Beam Visualization:")
             col.prop(ui_props, 'toggle_beams_vis')
-            # Indent the color picker if the toggle is enabled
             row = col.row()
-            row.enabled = ui_props.toggle_beams_vis # Disable color picker if toggle is off
+            row.enabled = ui_props.toggle_beams_vis
             row.prop(ui_props, 'beam_color')
             col.prop(ui_props, 'beam_width')
-            col.prop(ui_props, 'toggle_beam_line_tooltip', text="Show Beam Line Tooltip")
-            # Indent the color picker if the tooltip is enabled for better UI flow
-            row = col.row()
-            row.enabled = ui_props.toggle_beam_line_tooltip # Disable color picker if tooltip is off
-            row.prop(ui_props, 'beam_line_tooltip_color')
 
+            # --- Beam Tooltips Sub-panel ---
+            beam_tooltip_box = col.box()
+            row = beam_tooltip_box.row(align=True)
+            row.prop(ui_props, "show_beam_tooltips_panel",
+                     icon="TRIA_DOWN" if ui_props.show_beam_tooltips_panel else "TRIA_RIGHT",
+                     icon_only=True, emboss=False)
+            row.label(text="Beam Tooltips")
+
+            if ui_props.show_beam_tooltips_panel:
+                beam_tooltip_col = beam_tooltip_box.column(align=True)
+
+                # Line Number Tooltip
+                row = beam_tooltip_col.row(align=True)
+                row.prop(ui_props, 'toggle_beam_line_tooltip', text="Line #")
+                row.prop(ui_props, 'beam_line_tooltip_color', text="")
+
+                # Parameters Tooltip (Main Toggle + Colors)
+                row = beam_tooltip_col.row(align=True)
+                row.prop(ui_props, 'toggle_beam_params_tooltip', text="Params")
+                # Add value color property >>>
+                split = row.split(factor=0.5, align=True)
+                split.prop(ui_props, 'beam_params_tooltip_color', text="")
+                split.prop(ui_props, 'beam_params_value_tooltip_color', text="")
+
+                # Individual Parameter Toggles
+                beam_param_box = beam_tooltip_col.box()
+                beam_param_box.enabled = ui_props.toggle_beam_params_tooltip
+                beam_param_grid = beam_param_box.grid_flow(row_major=True, columns=1, align=True) # Adjust columns as needed
+
+                # Map parameter names to their corresponding UI toggle property
+                beam_param_toggle_map = {
+                    'beamSpring': 'tooltip_show_beamSpring',
+                    'beamDamp': 'tooltip_show_beamDamp',
+                    'beamDeform': 'tooltip_show_beamDeform',
+                    'beamStrength': 'tooltip_show_beamStrength',
+                    'beamPrecompression': 'tooltip_show_beamPrecompression',
+                    'beamType': 'tooltip_show_beamType',
+                    'beamLongBound': 'tooltip_show_beamLongBound',
+                    'beamShortBound': 'tooltip_show_beamShortBound',
+                    'beamLimitSpring': 'tooltip_show_beamLimitSpring',
+                    'beamLimitDamp': 'tooltip_show_beamLimitDamp',
+                    'beamPrecompressionRange': 'tooltip_show_beamPrecompressionRange',
+                    'beamDampRebound': 'tooltip_show_beamDampRebound',
+                    'beamDampFast': 'tooltip_show_beamDampFast',
+                    'beamDampReboundFast': 'tooltip_show_beamDampReboundFast',
+                    'beamDampVelocitySplit': 'tooltip_show_beamDampVelocitySplit',
+                    'beamDampCutoffHz': 'tooltip_show_beamDampCutoffHz',
+                    'beamDeformReboundThreshold': 'tooltip_show_beamDeformReboundThreshold',
+                    'breakGroup': 'tooltip_show_breakGroup',
+                    'breakGroupType': 'tooltip_show_breakGroupType',
+                    'disableMeshBreaking': 'tooltip_show_disableMeshBreaking',
+                    'disableTriangleBreaking': 'tooltip_show_disableTriangleBreaking',
+                    'soundTriggerBeam': 'tooltip_show_soundTriggerBeam',
+                    'optional': 'tooltip_show_optional',
+                    'group': 'tooltip_show_group',
+                    # --- ADDED: New Mappings ---
+                    'dampCutoffHz': 'tooltip_show_dampCutoffHz',
+                    'deformGroup': 'tooltip_show_deformGroup',
+                    'deformLimitExpansion': 'tooltip_show_deformLimitExpansion',
+                    'deformLimitStress': 'tooltip_show_deformLimitStress',
+                    'deformationTriggerRatio': 'tooltip_show_deformationTriggerRatio',
+                    'name': 'tooltip_show_name_beam', # Use renamed property
+                    'partName': 'tooltip_show_partName_beam', # Use renamed property
+                    'slotType': 'tooltip_show_slotType_beam', # Use renamed property
+                    # --- END ADDED ---
+                }
+
+                # Iterate and display properties in the grid
+                for param_key, prop_name in beam_param_toggle_map.items():
+                    # Special case for 'name', 'partName', 'slotType' to avoid conflict with node params
+                    text_override = None
+                    if prop_name == 'tooltip_show_name_beam': text_override = "name"
+                    elif prop_name == 'tooltip_show_partName_beam': text_override = "partName"
+                    elif prop_name == 'tooltip_show_slotType_beam': text_override = "slotType"
+
+                    beam_param_grid.prop(ui_props, prop_name, text=text_override if text_override else param_key)
+
+
+            # --- Torsionbar Visualization ---
             col.separator()
             col.label(text="Torsionbar Visualization:")
             col.prop(ui_props, 'toggle_torsionbars_vis')
-            # Indent the color pickers if the toggle is enabled
             row = col.row()
-            row.enabled = ui_props.toggle_torsionbars_vis # Disable color pickers if toggle is off
+            row.enabled = ui_props.toggle_torsionbars_vis
             row.prop(ui_props, 'torsionbar_color')
             row = col.row()
-            row.enabled = ui_props.toggle_torsionbars_vis # Disable color pickers if toggle is off
+            row.enabled = ui_props.toggle_torsionbars_vis
             row.prop(ui_props, 'torsionbar_mid_color')
             col.prop(ui_props, 'torsionbar_width')
 
+            # --- Rail Visualization ---
             col.separator()
             col.label(text="Rail Visualization:")
             col.prop(ui_props, 'toggle_rails_vis')
-            # Indent the color picker if the toggle is enabled
             row = col.row()
-            row.enabled = ui_props.toggle_rails_vis # Disable color picker if toggle is off
+            row.enabled = ui_props.toggle_rails_vis
             row.prop(ui_props, 'rail_color')
             col.prop(ui_props, 'rail_width')
 
@@ -758,13 +1225,20 @@ def refresh_curr_vdata(force_refresh=False):
     obj = context.active_object
     if obj is not None:
         obj_data = obj.data
-        jbeam_part = obj_data.get(constants.MESH_JBEAM_PART)
-        selected_obj_name = obj.name
+        # <<< MODIFICATION START: Check if it's a JBeam object >>>
+        if obj_data and obj_data.get(constants.MESH_JBEAM_PART) is not None:
+            jbeam_part = obj_data.get(constants.MESH_JBEAM_PART)
+            selected_obj_name = obj.name
+        else:
+            # It's not a JBeam object, clear name and part
+            selected_obj_name = None
+            jbeam_part = None
+        # <<< MODIFICATION END >>>
     else:
         selected_obj_name = None
 
     if force_refresh or prev_obj_selected != selected_obj_name:
-        if jbeam_part is not None and obj is not None: # Make sure obj exists
+        if jbeam_part is not None and obj is not None: # Make sure obj exists and is JBeam
             collection = obj.users_collection[0] if obj.users_collection else None # Check if object is in a collection
             veh_model = collection.get(constants.COLLECTION_VEHICLE_MODEL) if collection else None
 
@@ -779,11 +1253,10 @@ def refresh_curr_vdata(force_refresh=False):
                  print(f"Error loading JBeam data for {selected_obj_name}: {e}", file=sys.stderr) # Print to stderr
                  curr_vdata = None
         else:
-            curr_vdata = None
+            curr_vdata = None # Clear data if not a JBeam object
 
         veh_render_dirty = True
         prev_obj_selected = selected_obj_name
-
 
 part_name_to_obj: dict[str, bpy.types.Object] = {}
 
@@ -791,57 +1264,52 @@ part_name_to_obj: dict[str, bpy.types.Object] = {}
 def draw_callback_px(context: bpy.types.Context):
     scene = context.scene
     ui_props = scene.ui_properties
-    # Check if ui_properties exists and has the attribute
-    if not hasattr(context, 'scene') or not hasattr(scene, 'ui_properties'): # Removed specific toggle check here
+    if not hasattr(context, 'scene') or not hasattr(scene, 'ui_properties'):
         return
     font_id = 0
 
     active_obj = context.active_object
-    if active_obj is None:
-        return
+    # <<< MODIFICATION START: Check if active object is a JBeam object >>>
+    if active_obj is None or active_obj.data is None or active_obj.data.get(constants.MESH_JBEAM_PART) is None:
+        return # Don't draw if not a JBeam object
+    # <<< MODIFICATION END >>>
     active_obj_data = active_obj.data
-    # Use .get() for safety and check MESH_EDITING_ENABLED
-    if active_obj_data.get(constants.MESH_JBEAM_PART) is None or not active_obj_data.get(constants.MESH_EDITING_ENABLED, False):
-        return
 
     collection = active_obj.users_collection[0] if active_obj.users_collection else None
     is_vehicle_part = collection is not None and collection.get(constants.COLLECTION_VEHICLE_MODEL) is not None
 
-    # Use try-except for bmesh access, especially in EDIT mode
     bm = None
     try:
         if active_obj.mode == 'EDIT':
             bm = bmesh.from_edit_mesh(active_obj_data)
-        else:
-            # For object mode, we might iterate through all vehicle parts if it's a vehicle
-            if not is_vehicle_part:
-                bm = bmesh.new()
-                bm.from_mesh(active_obj_data)
-            # If it IS a vehicle part but in object mode, handle drawing for all parts below
+        elif not is_vehicle_part: # Only need bmesh for single parts in object mode
+            bm = bmesh.new()
+            bm.from_mesh(active_obj_data)
     except Exception as e:
-        print(f"Error accessing bmesh for {active_obj.name}: {e}", file=sys.stderr) # Print to stderr
-        return # Don't proceed if bmesh fails
+        print(f"Error accessing bmesh for {active_obj.name}: {e}", file=sys.stderr)
+        # Don't return here if it's a vehicle part, we might still draw other parts
+        if not is_vehicle_part:
+            return
 
     # Common drawing setup
     ctxRegion = context.region
     ctxRegionData = context.region_data
     lblfPosition = blfpos
     lblfDraw = blfdraw
+    lblfDims = blfdims
     blfsize(font_id, 12)
     blfcolor(font_id, 1, 1, 1, 1) # Default white color
 
     # --- Node ID Drawing ---
     toggleNodeText = ui_props.toggle_node_ids_text
     if toggleNodeText:
-        # --- Vehicle Drawing Logic ---
         if is_vehicle_part:
             part_name_to_obj.clear()
             for obj in collection.all_objects:
-                # Ensure the object has the necessary JBeam data attributes
+                 # Check if the object in the collection is a JBeam part before adding
                 if obj.data and obj.data.get(constants.MESH_JBEAM_PART):
                      part_name_to_obj[obj.data[constants.MESH_JBEAM_PART]] = obj
 
-            # Iterate through all visible objects in the collection for drawing
             for part_name, obj in part_name_to_obj.items():
                 if not obj.visible_get():
                     continue
@@ -849,28 +1317,24 @@ def draw_callback_px(context: bpy.types.Context):
                 part_bm = None
                 obj_data = obj.data
                 try:
-                    # Get bmesh for the current part, handle edit mode specifically for the active object
+                    # Use active edit bmesh if it's the current part, otherwise create temp bmesh
                     if obj == active_obj and active_obj.mode == 'EDIT':
-                        part_bm = bm # Reuse the bmesh obtained earlier for the active object
+                        part_bm = bm # Use the bm obtained earlier for the active object in edit mode
                     else:
                         part_bm = bmesh.new()
                         part_bm.from_mesh(obj_data)
 
-                    # Get necessary layers, check if they exist
                     node_id_layer = part_bm.verts.layers.string.get(constants.VL_NODE_ID)
                     is_fake_layer = part_bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
 
                     if not node_id_layer or not is_fake_layer:
-                        if part_bm != bm and part_bm: part_bm.free() # Free if newly created and exists
-                        continue # Skip if layers are missing
+                        if part_bm != bm and part_bm: part_bm.free()
+                        continue
 
-                    part_bm.verts.ensure_lookup_table() # Important for index access if needed
+                    part_bm.verts.ensure_lookup_table()
 
                     for v in part_bm.verts:
-                        if v[is_fake_layer] == 1:
-                            continue
-                        # Check if the vertex is hidden in Edit Mode
-                        if v.hide:
+                        if v[is_fake_layer] == 1 or v.hide:
                             continue
 
                         coord = obj.matrix_world @ v.co
@@ -882,24 +1346,20 @@ def draw_callback_px(context: bpy.types.Context):
                             lblfDraw(font_id, node_id)
 
                 except Exception as e:
-                    print(f"Error processing part {obj.name} for drawing: {e}", file=sys.stderr) # Print to stderr
+                    print(f"Error processing part {obj.name} for drawing: {e}", file=sys.stderr)
                 finally:
-                    # Free the bmesh if it was created specifically for this part
+                     # Free the temporary bmesh if it was created
                      if part_bm and part_bm != bm:
                         part_bm.free()
 
-        # --- Single Part Drawing Logic ---
-        elif bm: # Only draw if bm was successfully created (covers EDIT and OBJECT mode for single parts)
+        elif bm: # Single Part Drawing Logic (Object or Edit Mode)
             node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
             is_fake_layer = bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
 
             if node_id_layer and is_fake_layer:
                 bm.verts.ensure_lookup_table()
                 for v in bm.verts:
-                    if v[is_fake_layer] == 1:
-                        continue
-                    # Check if the vertex is hidden in Edit Mode
-                    if v.hide:
+                    if v[is_fake_layer] == 1 or v.hide:
                         continue
 
                     coord = active_obj.matrix_world @ v.co
@@ -910,7 +1370,7 @@ def draw_callback_px(context: bpy.types.Context):
                         lblfPosition(font_id, pos_text[0], pos_text[1], 0)
                         lblfDraw(font_id, node_id)
             else:
-                print(f"Warning: Node ID layers not found on single part {active_obj.name}", file=sys.stderr) # Print to stderr
+                print(f"Warning: Node ID layers not found on single part {active_obj.name}", file=sys.stderr)
 
     # --- Beam Line Tooltip Drawing ---
     global _selected_beam_line_info
@@ -920,15 +1380,122 @@ def draw_callback_px(context: bpy.types.Context):
         if line_num is not None and midpoint is not None:
             pos_text = location_3d_to_region_2d(ctxRegion, ctxRegionData, midpoint)
             if pos_text:
-                tooltip_text = f"Beam: L{line_num}"
-                # Use the color property from UIProperties
-                blfcolor(font_id, *ui_props.beam_line_tooltip_color) # Use '*' to unpack the color vector
-                lblfPosition(font_id, pos_text[0] + 10, pos_text[1] + 10, 0) # Offset slightly
+                tooltip_text = f"Line: {line_num+1}"
+                blfcolor(font_id, *ui_props.beam_line_tooltip_color)
+                lblfPosition(font_id, pos_text[0] + 10, pos_text[1] + 10, 0)
                 lblfDraw(font_id, tooltip_text)
-                blfcolor(font_id, 1, 1, 1, 1) # Reset color to default white for other potential text
+                blfcolor(font_id, 1, 1, 1, 1) # Reset color
 
-    # Final cleanup of the initial bmesh if it was created and not the active edit mesh
-    if bm and not (active_obj.mode == 'EDIT'):
+    # --- Beam Parameters Tooltip Drawing ---
+    global _selected_beam_params_info
+    if ui_props.toggle_beam_params_tooltip and _selected_beam_params_info is not None:
+        params_list = _selected_beam_params_info.get('params_list')
+        if params_list:
+            padding_x = 65 # Default padding for left alignment
+            padding_y = 20
+            region_width = ctxRegion.width # <<< ADDED: Get region width
+            region_height = ctxRegion.height
+            bottom_left_y = padding_y
+
+            # Calculate bottom_left_x based on placement >>>
+            tooltip_placement = ui_props.tooltip_placement
+            if tooltip_placement == 'BOTTOM_LEFT':
+                bottom_left_x = padding_x
+            elif tooltip_placement == 'BOTTOM_CENTER':
+                bottom_left_x = region_width / 2 - 100 # Simple center offset, adjust as needed
+            elif tooltip_placement == 'BOTTOM_RIGHT':
+                bottom_left_x = region_width - 200 - padding_x # Simple right offset, adjust as needed
+            else: # Default to left
+                bottom_left_x = padding_x
+
+            name_color = ui_props.beam_params_tooltip_color
+            value_color = ui_props.beam_params_value_tooltip_color
+
+            line_height = lblfDims(font_id, "X")[1]
+            start_y = bottom_left_y + (len(params_list) -1) * (line_height + 4)
+
+            for i, (key, value_repr) in enumerate(params_list):
+                current_y = start_y - (i * (line_height + 4))
+                key_text = f"{key}: "
+
+                # Draw Key
+                blfcolor(font_id, *name_color)
+                lblfPosition(font_id, bottom_left_x, current_y, 0)
+                lblfDraw(font_id, key_text)
+
+                # Calculate position for value
+                key_width = lblfDims(font_id, key_text)[0]
+                value_x = bottom_left_x + key_width
+
+                # Draw Value
+                blfcolor(font_id, *value_color)
+                lblfPosition(font_id, value_x, current_y, 0)
+                lblfDraw(font_id, value_repr)
+
+            blfcolor(font_id, 1, 1, 1, 1) # Reset color
+
+    # --- Node Parameters Tooltip Drawing ---
+    global _selected_node_params_info
+    if ui_props.toggle_node_params_tooltip and _selected_node_params_info is not None:
+        params_list = _selected_node_params_info.get('params_list')
+        if params_list:
+            node_padding_x = 65 # Default padding for left alignment
+            node_padding_y = 20
+            region_width = ctxRegion.width # <<< ADDED: Get region width
+            region_height = ctxRegion.height
+            bottom_left_y = node_padding_y
+
+            # Estimate beam tooltip height if it's visible
+            beam_tooltip_height = 0
+            if ui_props.toggle_beam_params_tooltip and _selected_beam_params_info:
+                beam_params_list = _selected_beam_params_info.get('params_list')
+                if beam_params_list:
+                    beam_line_height = lblfDims(font_id, "X")[1]
+                    beam_tooltip_height = len(beam_params_list) * (beam_line_height + 4) + 5
+
+            # Adjust node tooltip y position based on beam tooltip height
+            bottom_left_y += beam_tooltip_height
+
+            # Calculate bottom_left_x based on placement >>>
+            tooltip_placement = ui_props.tooltip_placement
+            if tooltip_placement == 'BOTTOM_LEFT':
+                bottom_left_x = node_padding_x
+            elif tooltip_placement == 'BOTTOM_CENTER':
+                bottom_left_x = region_width / 2 - 100 # Simple center offset, adjust as needed
+            elif tooltip_placement == 'BOTTOM_RIGHT':
+                bottom_left_x = region_width - 200 - node_padding_x # Simple right offset, adjust as needed
+            else: # Default to left
+                bottom_left_x = node_padding_x
+
+            name_color = ui_props.node_params_tooltip_color
+            value_color = ui_props.node_params_value_tooltip_color
+
+            line_height = lblfDims(font_id, "X")[1]
+            start_y = bottom_left_y + (len(params_list) -1) * (line_height + 4)
+
+            for i, (key, value_repr) in enumerate(params_list):
+                current_y = start_y - (i * (line_height + 4))
+                key_text = f"{key}: "
+
+                # Draw Key
+                blfcolor(font_id, *name_color)
+                lblfPosition(font_id, bottom_left_x, current_y, 0)
+                lblfDraw(font_id, key_text)
+
+                # Calculate position for value
+                key_width = lblfDims(font_id, key_text)[0]
+                value_x = bottom_left_x + key_width
+
+                # Draw Value
+                blfcolor(font_id, *value_color)
+                lblfPosition(font_id, value_x, current_y, 0)
+                lblfDraw(font_id, value_repr)
+
+            blfcolor(font_id, 1, 1, 1, 1) # Reset color
+
+    # Final cleanup
+    # Free bmesh if it was created for a single part in object mode
+    if bm and not is_vehicle_part and active_obj.mode != 'EDIT':
         bm.free()
 
 
@@ -936,13 +1503,11 @@ beam_render_shader = None
 beam_render_batch = None
 beam_coords = [] # Renamed from coords to be specific
 
-# Add variables for torsionbars
 torsionbar_render_batch = None
 torsionbar_coords = []
 torsionbar_red_render_batch = None # New batch for red segments
 torsionbar_red_coords = []       # New coords for red segments
 
-# Add variables for rails (already existed, just confirming)
 rail_render_batch = None
 rail_coords = []
 
@@ -965,6 +1530,28 @@ def draw_callback_view(context: bpy.types.Context):
     if not hasattr(context, 'scene') or not hasattr(scene, 'ui_properties'):
         return
 
+    active_obj = context.active_object
+    # <<< MODIFICATION START: Check if active object is a JBeam object >>>
+    is_valid_jbeam_obj = False
+    if active_obj and active_obj.data and active_obj.data.get(constants.MESH_JBEAM_PART) is not None: 
+        is_valid_jbeam_obj = True
+
+    if not is_valid_jbeam_obj:
+        # Clear batches if the object is not valid JBeam
+        if beam_render_batch: beam_render_batch = None
+        if torsionbar_render_batch: torsionbar_render_batch = None
+        if torsionbar_red_render_batch: torsionbar_red_render_batch = None
+        if rail_render_batch: rail_render_batch = None
+        # Clear coordinates as well if dirty flag wasn't already set (e.g., object just deselected)
+        if not veh_render_dirty:
+            beam_coords.clear()
+            torsionbar_coords.clear()
+            torsionbar_red_coords.clear()
+            rail_coords.clear()
+        veh_render_dirty = False # Ensure dirty flag is false
+        return # Don't draw if not a valid JBeam object
+    # <<< MODIFICATION END >>>
+
     if beam_render_shader is None:
         beam_render_shader = gpu.shader.from_builtin('UNIFORM_COLOR')
 
@@ -974,40 +1561,29 @@ def draw_callback_view(context: bpy.types.Context):
         torsionbar_red_coords.clear() # Clear red torsionbar coords
         rail_coords.clear() # Clear rail coords
 
-        active_obj = context.active_object
-        if active_obj is None:
-            beam_render_batch = None
-            torsionbar_render_batch = None # Clear torsionbar batch
-            torsionbar_red_render_batch = None # Clear red torsionbar batch
-            rail_render_batch = None # Clear rail batch
-            veh_render_dirty = False
-            return
+        # active_obj is guaranteed to be valid JBeam here due to the check above
         active_obj_data = active_obj.data
-        # Use .get() for safety and check MESH_EDITING_ENABLED
-        if active_obj_data.get(constants.MESH_JBEAM_PART) is None or not active_obj_data.get(constants.MESH_EDITING_ENABLED, False):
-            beam_render_batch = None
-            torsionbar_render_batch = None # Clear torsionbar batch
-            torsionbar_red_render_batch = None # Clear red torsionbar batch
-            rail_render_batch = None # Clear rail batch
-            veh_render_dirty = False
-            return
 
         collection = active_obj.users_collection[0] if active_obj.users_collection else None
         is_vehicle_part = collection is not None and collection.get(constants.COLLECTION_VEHICLE_MODEL) is not None
 
-        # Map node IDs to their hidden status for checking torsionbars/rails
+        # Map node IDs to their hidden status and current position/matrix
         node_id_to_hide_status: dict[str, bool] = {}
+        # Stores {node_id: (local_coord.copy(), matrix_world.copy())}
+        node_id_to_pos_matrix_map: dict[str, tuple[Vector, Matrix]] = {} # Use Matrix type hint
 
         # --- Vehicle Data Gathering ---
         if is_vehicle_part:
             # Use part_name_to_obj which should be populated by draw_callback_px or needs population here
             if not part_name_to_obj: # Populate if empty
                  for obj in collection.all_objects:
+                     # Check if the object in the collection is a JBeam part
                     if obj.data and obj.data.get(constants.MESH_JBEAM_PART):
                         part_name_to_obj[obj.data[constants.MESH_JBEAM_PART]] = obj
 
             for obj in collection.all_objects:
-                if obj.visible_get():
+                # Only process visible JBeam parts in the collection
+                if obj.visible_get() and obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None: 
                     obj_data = obj.data
                     bm = None
                     try:
@@ -1018,34 +1594,35 @@ def draw_callback_view(context: bpy.types.Context):
                             bm = bmesh.new()
                             bm.from_mesh(obj_data)
 
-                        # Get beam layers, check existence
+                        # Get layers safely
                         beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
-                        # Get node layers for hide status mapping
                         node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
                         is_fake_layer = bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
 
-                        # Populate node hide status map
+                        # Populate node maps
                         if node_id_layer and is_fake_layer:
                             bm.verts.ensure_lookup_table()
+                            obj_matrix_copy = obj.matrix_world.copy() # Copy matrix once per object
                             for v in bm.verts:
                                 if v[is_fake_layer] == 0: # Only consider real nodes
                                     node_id = v[node_id_layer].decode('utf-8')
                                     node_id_to_hide_status[node_id] = v.hide
+                                    # Store local coord and object matrix
+                                    node_id_to_pos_matrix_map[node_id] = (v.co.copy(), obj_matrix_copy)
 
-                        if not beam_indices_layer:
-                            if bm and not (obj == active_obj and active_obj.mode == 'EDIT'): bm.free()
-                            continue # Skip beam processing if layer missing
-
-                        bm.edges.ensure_lookup_table()
-                        for e in bm.edges:
-                            # Check if edge itself or connected verts are hidden
-                            if e.hide or any(v.hide for v in e.verts):
-                                continue
-                            # Check if it's a JBeam beam (index is not empty)
-                            if e[beam_indices_layer].decode('utf-8') != '':
-                                v1, v2 = e.verts[0], e.verts[1]
-                                beam_coords.append(obj.matrix_world @ v1.co)
-                                beam_coords.append(obj.matrix_world @ v2.co)
+                        # Gather Beam Coords (using mesh edges)
+                        if beam_indices_layer:
+                            bm.edges.ensure_lookup_table()
+                            for e in bm.edges:
+                                # Check if edge itself or connected verts are hidden
+                                if e.hide or any(v.hide for v in e.verts):
+                                    continue
+                                # Check if it's a JBeam beam (index is not empty)
+                                if e[beam_indices_layer].decode('utf-8') != '':
+                                    v1, v2 = e.verts[0], e.verts[1]
+                                    # Calculate world coords directly for beams
+                                    beam_coords.append(obj.matrix_world @ v1.co)
+                                    beam_coords.append(obj.matrix_world @ v2.co)
 
                     except Exception as e:
                         print(f"Error getting geometry data from {obj.name}: {e}", file=sys.stderr) # Print to stderr
@@ -1054,18 +1631,11 @@ def draw_callback_view(context: bpy.types.Context):
                         if bm and not (obj == active_obj and active_obj.mode == 'EDIT'):
                             bm.free()
 
-            # Gather Torsionbar Coords (using curr_vdata for positions) - MODIFIED FOR 4 NODES & RED MIDDLE SEGMENT
-            if curr_vdata and 'nodes' in curr_vdata and 'torsionbars' in curr_vdata:
-                nodes_data = curr_vdata['nodes']
+            # Gather Torsionbar Coords (using node_id_to_pos_matrix_map)
+            if curr_vdata and 'torsionbars' in curr_vdata:
                 torsionbars_data = curr_vdata['torsionbars']
-
                 for tb in torsionbars_data:
-                    # Get the four node IDs
-                    id1 = tb.get('id1:')
-                    id2 = tb.get('id2:')
-                    id3 = tb.get('id3:') # New
-                    id4 = tb.get('id4:') # New
-                    part_origin = tb.get('partOrigin')
+                    id1, id2, id3, id4 = tb.get('id1:'), tb.get('id2:'), tb.get('id3:'), tb.get('id4:')
 
                     # Check if any involved node is hidden
                     if (node_id_to_hide_status.get(id1, False) or
@@ -1074,120 +1644,76 @@ def draw_callback_view(context: bpy.types.Context):
                         node_id_to_hide_status.get(id4, False)):
                         continue
 
-                    obj_to_transform = None
-                    is_visible = False
+                    # Get positions and matrices from the map
+                    data1 = node_id_to_pos_matrix_map.get(id1)
+                    data2 = node_id_to_pos_matrix_map.get(id2)
+                    data3 = node_id_to_pos_matrix_map.get(id3)
+                    data4 = node_id_to_pos_matrix_map.get(id4)
 
-                    # Determine the correct object for transformation based on partOrigin
-                    if part_origin and part_origin in part_name_to_obj:
-                        obj_to_transform = part_name_to_obj[part_origin]
-                        is_visible = obj_to_transform.visible_get()
-                    # Optional: Fallback logic if partOrigin is missing or object not found
-                    # else:
-                    #     main_part_name = collection.get(constants.COLLECTION_MAIN_PART)
-                    #     if main_part_name and main_part_name in part_name_to_obj:
-                    #         obj_to_transform = part_name_to_obj[main_part_name]
-                    #         is_visible = obj_to_transform.visible_get()
+                    if data1 and data2 and data3 and data4:
+                        co1, matrix1 = data1
+                        co2, matrix2 = data2
+                        co3, matrix3 = data3
+                        co4, matrix4 = data4
 
-                    if not is_visible or not obj_to_transform:
-                        continue # Skip if the part's object isn't visible or found
+                        # Calculate world positions using stored coords and matrices
+                        world_pos1 = matrix1 @ co1
+                        world_pos2 = matrix2 @ co2
+                        world_pos3 = matrix3 @ co3
+                        world_pos4 = matrix4 @ co4
 
-                    # Check if all four nodes exist in the nodes data
-                    if id1 in nodes_data and id2 in nodes_data and id3 in nodes_data and id4 in nodes_data:
-                        try:
-                            pos1 = nodes_data[id1]['pos']
-                            pos2 = nodes_data[id2]['pos']
-                            pos3 = nodes_data[id3]['pos'] # New
-                            pos4 = nodes_data[id4]['pos'] # New
+                        # Segments 1-2 and 3-4 go to the regular (blue) list
+                        torsionbar_coords.append(world_pos1)
+                        torsionbar_coords.append(world_pos2)
+                        torsionbar_coords.append(world_pos3) # Start third line
+                        torsionbar_coords.append(world_pos4) # End third line
 
-                            # Ensure positions are valid vectors/tuples
-                            if (isinstance(pos1, (list, tuple, Vector)) and
-                                isinstance(pos2, (list, tuple, Vector)) and
-                                isinstance(pos3, (list, tuple, Vector)) and # New
-                                isinstance(pos4, (list, tuple, Vector))):   # New
+                        # Segment 2-3 goes to the red list
+                        torsionbar_red_coords.append(world_pos2) # Start second line
+                        torsionbar_red_coords.append(world_pos3) # End second line
+                    else:
+                        # Optional: Warn if a node wasn't found in the map
+                        missing_nodes = [nid for nid, data in [(id1, data1), (id2, data2), (id3, data3), (id4, data4)] if not data]
+                        if missing_nodes:
+                            print(f"Warning: Could not find position data for torsionbar nodes {missing_nodes}", file=sys.stderr)
 
-                                # Append coordinates for the three lines (1-2, 2-3, 3-4)
-                                world_pos1 = obj_to_transform.matrix_world @ Vector(pos1)
-                                world_pos2 = obj_to_transform.matrix_world @ Vector(pos2)
-                                world_pos3 = obj_to_transform.matrix_world @ Vector(pos3) # New
-                                world_pos4 = obj_to_transform.matrix_world @ Vector(pos4) # New
 
-                                # Segments 1-2 and 3-4 go to the regular (blue) list
-                                torsionbar_coords.append(world_pos1)
-                                torsionbar_coords.append(world_pos2)
-                                torsionbar_coords.append(world_pos3) # Start third line
-                                torsionbar_coords.append(world_pos4) # End third line
-
-                                # Segment 2-3 goes to the red list
-                                torsionbar_red_coords.append(world_pos2) # Start second line
-                                torsionbar_red_coords.append(world_pos3) # End second line
-
-                            else:
-                                print(f"Warning: Invalid position data for torsionbar nodes {id1}, {id2}, {id3}, {id4}", file=sys.stderr) # Print to stderr
-                        except (KeyError, TypeError, ValueError) as e:
-                            print(f"Error processing torsionbar {id1}-{id2}-{id3}-{id4}: {e}", file=sys.stderr) # Print to stderr
-                    # else: # Optional: Print warning if any node is missing
-                    #    print(f"Warning: One or more nodes not found for torsionbar: {id1}, {id2}, {id3}, {id4}", file=sys.stderr)
-
-            # Gather Rail Coords (using curr_vdata)
-            if curr_vdata and 'nodes' in curr_vdata and 'rails' in curr_vdata:
-                nodes_data = curr_vdata['nodes']
-                rails_data = curr_vdata['rails'] # Get rails data (dictionary)
-
-                for rail_name, rail_info in rails_data.items(): # Iterate through rails dictionary
-                    links = rail_info.get('links:') # Get the links list
-                    part_origin = rail_info.get('partOrigin') # Get part origin if available
-
-                    # Ensure links is a list with exactly two nodes
+            # Gather Rail Coords (using node_id_to_pos_matrix_map)
+            if curr_vdata and 'rails' in curr_vdata:
+                rails_data = curr_vdata['rails']
+                for rail_name, rail_info in rails_data.items():
+                    links = rail_info.get('links:')
                     if isinstance(links, list) and len(links) == 2:
-                        id1 = links[0]
-                        id2 = links[1]
+                        id1, id2 = links[0], links[1]
 
                         # Check if any involved node is hidden
                         if (node_id_to_hide_status.get(id1, False) or
                             node_id_to_hide_status.get(id2, False)):
                             continue
 
-                        obj_to_transform = None
-                        is_visible = False
+                        # Get positions and matrices from the map
+                        data1 = node_id_to_pos_matrix_map.get(id1)
+                        data2 = node_id_to_pos_matrix_map.get(id2)
 
-                        # Determine the correct object for transformation based on partOrigin
-                        if part_origin and part_origin in part_name_to_obj:
-                            obj_to_transform = part_name_to_obj[part_origin]
-                            is_visible = obj_to_transform.visible_get()
-                        # Optional Fallback (if needed)
-                        # else:
-                        #     main_part_name = collection.get(constants.COLLECTION_MAIN_PART)
-                        #     if main_part_name and main_part_name in part_name_to_obj:
-                        #         obj_to_transform = part_name_to_obj[main_part_name]
-                        #         is_visible = obj_to_transform.visible_get()
+                        if data1 and data2:
+                            co1, matrix1 = data1
+                            co2, matrix2 = data2
 
-                        if not is_visible or not obj_to_transform:
-                            continue # Skip if the part's object isn't visible or found
+                            # Calculate world positions
+                            world_pos1 = matrix1 @ co1
+                            world_pos2 = matrix2 @ co2
 
-                        # Check if both nodes exist in the nodes data
-                        if id1 in nodes_data and id2 in nodes_data:
-                            try:
-                                pos1 = nodes_data[id1]['pos']
-                                pos2 = nodes_data[id2]['pos']
+                            rail_coords.append(world_pos1)
+                            rail_coords.append(world_pos2)
+                        else:
+                            # Optional: Warn if a node wasn't found
+                            missing_nodes = [nid for nid, data in [(id1, data1), (id2, data2)] if not data]
+                            if missing_nodes:
+                                print(f"Warning: Could not find position data for rail nodes {missing_nodes}", file=sys.stderr)
 
-                                # Ensure positions are valid vectors/tuples
-                                if isinstance(pos1, (list, tuple, Vector)) and isinstance(pos2, (list, tuple, Vector)):
-                                    world_pos1 = obj_to_transform.matrix_world @ Vector(pos1)
-                                    world_pos2 = obj_to_transform.matrix_world @ Vector(pos2)
-
-                                    rail_coords.append(world_pos1)
-                                    rail_coords.append(world_pos2)
-                                else:
-                                    print(f"Warning: Invalid position data for rail nodes {id1}, {id2}", file=sys.stderr)
-                            except (KeyError, TypeError, ValueError) as e:
-                                print(f"Error processing rail {id1}-{id2}: {e}", file=sys.stderr)
-                        # else: # Optional: Print warning if nodes missing
-                        #    print(f"Warning: One or more nodes not found for rail: {id1}, {id2}", file=sys.stderr)
-                    # else: # Optional: Print warning for invalid links format
-                    #    print(f"Warning: Invalid 'links:' format for rail '{rail_name}': {links}", file=sys.stderr)
 
         # --- Single Part Data Gathering ---
-        else:
+        else: # is_valid_jbeam_obj is True, but not part of a vehicle collection
             if active_obj.visible_get():
                 bm = None
                 try:
@@ -1197,24 +1723,25 @@ def draw_callback_view(context: bpy.types.Context):
                         bm = bmesh.new()
                         bm.from_mesh(active_obj_data)
 
-                    # Get node layers for hide status mapping
+                    # Get layers safely
                     node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID)
                     is_fake_layer = bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
+                    beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
 
-                    # Populate node hide status map
+                    # Populate node maps for single part
                     if node_id_layer and is_fake_layer:
                         bm.verts.ensure_lookup_table()
+                        obj_matrix_copy = active_obj.matrix_world.copy() # Copy matrix once
                         for v in bm.verts:
                             if v[is_fake_layer] == 0: # Only consider real nodes
                                 node_id = v[node_id_layer].decode('utf-8')
                                 node_id_to_hide_status[node_id] = v.hide
+                                node_id_to_pos_matrix_map[node_id] = (v.co.copy(), obj_matrix_copy)
 
-                    # Gather Beams
-                    beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
+                    # Gather Beams (using mesh edges)
                     if beam_indices_layer:
                         bm.edges.ensure_lookup_table()
                         for e in bm.edges:
-                            # Check if edge itself or connected verts are hidden
                             if e.hide or any(v.hide for v in e.verts):
                                 continue
                             if e[beam_indices_layer].decode('utf-8') != '':
@@ -1222,99 +1749,76 @@ def draw_callback_view(context: bpy.types.Context):
                                 beam_coords.append(active_obj.matrix_world @ v1.co)
                                 beam_coords.append(active_obj.matrix_world @ v2.co)
 
-                    # Gather Torsionbars (using curr_vdata) - MODIFIED FOR 4 NODES & RED MIDDLE SEGMENT
-                    if curr_vdata and 'nodes' in curr_vdata and 'torsionbars' in curr_vdata:
-                        nodes_data = curr_vdata['nodes']
+                    # Gather Torsionbars (using node_id_to_pos_matrix_map)
+                    if curr_vdata and 'torsionbars' in curr_vdata:
                         torsionbars_data = curr_vdata['torsionbars']
                         for tb in torsionbars_data:
-                            # Get the four node IDs
-                            id1 = tb.get('id1:')
-                            id2 = tb.get('id2:')
-                            id3 = tb.get('id3:') # New
-                            id4 = tb.get('id4:') # New
+                            id1, id2, id3, id4 = tb.get('id1:'), tb.get('id2:'), tb.get('id3:'), tb.get('id4:')
 
-                            # Check if any involved node is hidden
                             if (node_id_to_hide_status.get(id1, False) or
                                 node_id_to_hide_status.get(id2, False) or
                                 node_id_to_hide_status.get(id3, False) or
                                 node_id_to_hide_status.get(id4, False)):
                                 continue
 
-                            # Check if all four nodes exist
-                            if id1 in nodes_data and id2 in nodes_data and id3 in nodes_data and id4 in nodes_data:
-                                try:
-                                    pos1 = nodes_data[id1]['pos']
-                                    pos2 = nodes_data[id2]['pos']
-                                    pos3 = nodes_data[id3]['pos'] # New
-                                    pos4 = nodes_data[id4]['pos'] # New
+                            data1 = node_id_to_pos_matrix_map.get(id1)
+                            data2 = node_id_to_pos_matrix_map.get(id2)
+                            data3 = node_id_to_pos_matrix_map.get(id3)
+                            data4 = node_id_to_pos_matrix_map.get(id4)
 
-                                    # Ensure positions are valid
-                                    if (isinstance(pos1, (list, tuple, Vector)) and
-                                        isinstance(pos2, (list, tuple, Vector)) and
-                                        isinstance(pos3, (list, tuple, Vector)) and # New
-                                        isinstance(pos4, (list, tuple, Vector))):   # New
+                            if data1 and data2 and data3 and data4:
+                                co1, matrix1 = data1 # Matrix will be the same for single part
+                                co2, matrix2 = data2
+                                co3, matrix3 = data3
+                                co4, matrix4 = data4
 
-                                        # Append coordinates for the three lines (1-2, 2-3, 3-4)
-                                        world_pos1 = active_obj.matrix_world @ Vector(pos1)
-                                        world_pos2 = active_obj.matrix_world @ Vector(pos2)
-                                        world_pos3 = active_obj.matrix_world @ Vector(pos3) # New
-                                        world_pos4 = active_obj.matrix_world @ Vector(pos4) # New
+                                world_pos1 = matrix1 @ co1
+                                world_pos2 = matrix2 @ co2
+                                world_pos3 = matrix3 @ co3
+                                world_pos4 = matrix4 @ co4
 
-                                        # Segments 1-2 and 3-4 go to the regular (blue) list
-                                        torsionbar_coords.append(world_pos1)
-                                        torsionbar_coords.append(world_pos2)
-                                        torsionbar_coords.append(world_pos3) # Start third line
-                                        torsionbar_coords.append(world_pos4) # End third line
+                                torsionbar_coords.append(world_pos1)
+                                torsionbar_coords.append(world_pos2)
+                                torsionbar_coords.append(world_pos3)
+                                torsionbar_coords.append(world_pos4)
 
-                                        # Segment 2-3 goes to the red list
-                                        torsionbar_red_coords.append(world_pos2) # Start second line
-                                        torsionbar_red_coords.append(world_pos3) # End second line
-                                    else:
-                                         print(f"Warning: Invalid position data for torsionbar nodes {id1}, {id2}, {id3}, {id4}", file=sys.stderr) # Print to stderr
-                                except (KeyError, TypeError, ValueError) as e:
-                                    print(f"Error processing torsionbar {id1}-{id2}-{id3}-{id4}: {e}", file=sys.stderr) # Print to stderr
-                            # else: # Optional: Print warning if any node is missing
-                            #    print(f"Warning: One or more nodes not found for torsionbar: {id1}, {id2}, {id3}, {id4}", file=sys.stderr)
+                                torsionbar_red_coords.append(world_pos2)
+                                torsionbar_red_coords.append(world_pos3)
+                            else:
+                                missing_nodes = [nid for nid, data in [(id1, data1), (id2, data2), (id3, data3), (id4, data4)] if not data]
+                                if missing_nodes:
+                                    print(f"Warning: Could not find position data for torsionbar nodes {missing_nodes}", file=sys.stderr)
 
-                    # Gather Rail Coords (using curr_vdata)
-                    if curr_vdata and 'nodes' in curr_vdata and 'rails' in curr_vdata:
-                        nodes_data = curr_vdata['nodes']
-                        rails_data = curr_vdata['rails'] # Get rails data (dictionary)
 
-                        for rail_name, rail_info in rails_data.items(): # Iterate through rails dictionary
-                            links = rail_info.get('links:') # Get the links list
-
-                            # Ensure links is a list with exactly two nodes
+                    # Gather Rail Coords (using node_id_to_pos_matrix_map)
+                    if curr_vdata and 'rails' in curr_vdata:
+                        rails_data = curr_vdata['rails']
+                        for rail_name, rail_info in rails_data.items():
+                            links = rail_info.get('links:')
                             if isinstance(links, list) and len(links) == 2:
-                                id1 = links[0]
-                                id2 = links[1]
+                                id1, id2 = links[0], links[1]
 
-                                # Check if any involved node is hidden
                                 if (node_id_to_hide_status.get(id1, False) or
                                     node_id_to_hide_status.get(id2, False)):
                                     continue
 
-                                # Check if both nodes exist in the nodes data
-                                if id1 in nodes_data and id2 in nodes_data:
-                                    try:
-                                        pos1 = nodes_data[id1]['pos']
-                                        pos2 = nodes_data[id2]['pos']
+                                data1 = node_id_to_pos_matrix_map.get(id1)
+                                data2 = node_id_to_pos_matrix_map.get(id2)
 
-                                        # Ensure positions are valid vectors/tuples
-                                        if isinstance(pos1, (list, tuple, Vector)) and isinstance(pos2, (list, tuple, Vector)):
-                                            world_pos1 = active_obj.matrix_world @ Vector(pos1)
-                                            world_pos2 = active_obj.matrix_world @ Vector(pos2)
+                                if data1 and data2:
+                                    co1, matrix1 = data1 # Matrix will be the same
+                                    co2, matrix2 = data2
 
-                                            rail_coords.append(world_pos1)
-                                            rail_coords.append(world_pos2)
-                                        else:
-                                            print(f"Warning: Invalid position data for rail nodes {id1}, {id2}", file=sys.stderr)
-                                    except (KeyError, TypeError, ValueError) as e:
-                                        print(f"Error processing rail {id1}-{id2}: {e}", file=sys.stderr)
-                                # else: # Optional: Print warning if nodes missing
-                                #    print(f"Warning: One or more nodes not found for rail: {id1}, {id2}", file=sys.stderr)
-                            # else: # Optional: Print warning for invalid links format
-                            #    print(f"Warning: Invalid 'links:' format for rail '{rail_name}': {links}", file=sys.stderr)
+                                    world_pos1 = matrix1 @ co1
+                                    world_pos2 = matrix2 @ co2
+
+                                    rail_coords.append(world_pos1)
+                                    rail_coords.append(world_pos2)
+                                else:
+                                    missing_nodes = [nid for nid, data in [(id1, data1), (id2, data2)] if not data]
+                                    if missing_nodes:
+                                        print(f"Warning: Could not find position data for rail nodes {missing_nodes}", file=sys.stderr)
+
 
                 except Exception as e:
                     print(f"Error getting geometry data from {active_obj.name}: {e}", file=sys.stderr) # Print to stderr
@@ -1383,7 +1887,6 @@ def draw_callback_view(context: bpy.types.Context):
 
     # Reset states
     gpu.state.line_width_set(1.0)
-    # gpu.state.depth_test_set('NONE') # Disable depth test if it was enabled
 
 
 def menu_func_import(self, context):
@@ -1396,7 +1899,6 @@ def menu_func_export(self, context):
 
 def menu_func_import_vehicle(self, context):
     self.layout.operator(import_vehicle.JBEAM_EDITOR_OT_import_vehicle.bl_idname, text="Part Config File (.pc)")
-
 
 # https://blenderartists.org/t/make-latest-created-collection-active/1350762/5
 def find_layer_collection_recursive(find, col):
@@ -1527,6 +2029,7 @@ def find_beam_line_number(jbeam_filepath: str, target_part_origin: str, target_b
                         if beam_idx_counter == target_beam_idx_in_part:
                             # Found the beam! Calculate line number.
                             start_char_pos = node.start_pos
+                            # Add 1 because line numbers are 1-based, add another 1 because the count is *before* the newline
                             line_number = file_content[:start_char_pos].count('\n') + 1
                             return line_number
                     # Reset for the new level
@@ -1573,81 +2076,93 @@ def find_beam_line_number(jbeam_filepath: str, target_part_origin: str, target_b
         traceback.print_exc()
         return None
 
-# --- MODIFIED START: Batch Renaming Logic ---
+# Batch Renaming Logic & Tooltip Updates ---
 def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, depsgraph: bpy.types.Depsgraph):
     global _do_export
     global _force_do_export
-    global veh_render_dirty # Make sure to use the global flag
+    global veh_render_dirty
 
     global selected_nodes
     global selected_beams
     global selected_tris_quads
-    global _selected_beam_line_info # Use the global variable
-    global previous_selected_indices # Use the global variable for previous selection
+    global _selected_beam_line_info
+    global _selected_beam_params_info
+    global _selected_node_params_info # <<< ADDED: Use node params global
+    global previous_selected_indices
 
     reimporting_jbeam = False
 
-    # Don't act on reimporting mesh
     if isinstance(scene.get('jbeam_editor_reimporting_jbeam'), int):
         scene['jbeam_editor_reimporting_jbeam'] -= 1
-
         if scene['jbeam_editor_reimporting_jbeam'] < 0:
             scene['jbeam_editor_reimporting_jbeam'] = 0
         else:
             reimporting_jbeam = True
 
-        if constants.DEBUG:
-            print('_depsgraph_callback: jbeam_editor_reimporting_jbeam')
-
     ui_props = scene.ui_properties
 
     active_obj = context.active_object
-    if active_obj is None:
+    # Early exit if no object or no data
+    if active_obj is None or active_obj.data is None:
+        _selected_beam_line_info = None
+        _selected_beam_params_info = None
+        _selected_node_params_info = None
         return
     active_obj_data = active_obj.data
-    # Use .get() for safety and check MESH_EDITING_ENABLED
-    if active_obj_data.get(constants.MESH_JBEAM_PART) is None or not active_obj_data.get(constants.MESH_EDITING_ENABLED, False):
+
+    # Check if it's a JBeam object (don't need MESH_EDITING_ENABLED here for refresh)
+    is_jbeam_obj = active_obj_data.get(constants.MESH_JBEAM_PART) is not None
+    if not is_jbeam_obj:
+        _selected_beam_line_info = None
+        _selected_beam_params_info = None
+        _selected_node_params_info = None
+        # Still call refresh_curr_vdata to clear data if needed
+        refresh_curr_vdata()
         return
+
+    # Refresh data based on current active object (will set veh_render_dirty if needed)
+    refresh_curr_vdata()
+
+    # Only proceed with Edit Mode logic if in Edit Mode and editing is enabled
+    mesh_editing_enabled = active_obj_data.get(constants.MESH_EDITING_ENABLED, False)
+    if active_obj.mode != 'EDIT' or not mesh_editing_enabled:
+        _selected_beam_line_info = None
+        _selected_beam_params_info = None
+        _selected_node_params_info = None
+        return # Exit if not in edit mode or editing disabled
+
+    # --- The rest of the function assumes Edit Mode ---
 
     active_obj_eval: bpy.types.Object = active_obj.evaluated_get(depsgraph)
 
-    # Show selected jbeam part's JBeam file in text editor
     jbeam_filepath = active_obj_data.get(constants.MESH_JBEAM_FILE_PATH)
     if jbeam_filepath:
         text_editor.show_int_file(jbeam_filepath)
 
     if not reimporting_jbeam:
         for update in depsgraph.updates:
-            # Check if the update is for the evaluated active object
-            if update.id.original == active_obj: # Compare original IDs
-                #print('update.is_updated_geometry', update.is_updated_geometry, 'update.is_updated_shading', update.is_updated_shading, 'update.is_updated_transform', update.is_updated_transform)
+            if update.id.original == active_obj:
                 if update.is_updated_geometry or update.is_updated_transform:
-                    if constants.DEBUG:
-                        print('_depsgraph_callback: updated_geometry or transform')
                     _do_export = True
-                    veh_render_dirty = True # Set render dirty flag
+                    veh_render_dirty = True # Also set render dirty on geometry/transform changes
 
     veh_model = active_obj_data.get(constants.MESH_VEHICLE_MODEL)
     if veh_model is not None:
         veh_collection = bpy.data.collections.get(veh_model)
         if veh_collection is not None:
-            # Set vehicle collection as active collection if it's not already
             current_active_layer_col = context.view_layer.active_layer_collection
             if current_active_layer_col is None or current_active_layer_col.collection != veh_collection:
                 layer = find_layer_collection_recursive(veh_collection, context.view_layer.layer_collection)
                 if layer is not None:
                     context.view_layer.active_layer_collection = layer
 
-    if active_obj.mode != 'EDIT':
-        return
-
-    # Use try-except for bmesh access
+    # Get BMesh for Edit Mode
     bm = None
     try:
         bm = bmesh.from_edit_mesh(active_obj_data)
     except Exception as e:
-        print(f"Error getting bmesh in depsgraph callback: {e}", file=sys.stderr) # Print to stderr
-        return # Exit if bmesh fails
+        print(f"Error getting bmesh in depsgraph callback: {e}", file=sys.stderr)
+        return
 
     # Get layers safely
     init_node_id_layer = bm.verts.layers.string.get(constants.VL_INIT_NODE_ID)
@@ -1655,13 +2170,14 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
     is_fake_layer = bm.verts.layers.int.get(constants.VL_NODE_IS_FAKE)
     beam_indices_layer = bm.edges.layers.string.get(constants.EL_BEAM_INDICES)
     face_idx_layer = bm.faces.layers.int.get(constants.FL_FACE_IDX)
-    beam_part_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN) # Get beam origin layer
-    face_part_origin_layer = bm.faces.layers.string.get(constants.FL_FACE_PART_ORIGIN) # Get face origin layer
+    beam_part_origin_layer = bm.edges.layers.string.get(constants.EL_BEAM_PART_ORIGIN)
+    face_part_origin_layer = bm.faces.layers.string.get(constants.FL_FACE_PART_ORIGIN)
+    node_part_origin_layer = bm.verts.layers.string.get(constants.VL_NODE_PART_ORIGIN)
 
     # Check if essential layers exist
-    if not all([init_node_id_layer, node_id_layer, is_fake_layer, beam_indices_layer, face_idx_layer, beam_part_origin_layer, face_part_origin_layer]):
-        print("Warning: One or more JBeam layers missing from mesh.", file=sys.stderr) # Print to stderr
-        if bm: bm.free()
+    if not all([init_node_id_layer, node_id_layer, is_fake_layer, beam_indices_layer, face_idx_layer, beam_part_origin_layer, face_part_origin_layer, node_part_origin_layer]):
+        print("Warning: One or more JBeam layers missing from mesh.", file=sys.stderr)
+        # No need to free bm here as it's from edit mesh
         return
 
     # Ensure lookup tables
@@ -1682,61 +2198,44 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
     newly_selected_vert_index = -1
     num_currently_selected = 0
 
-    # --- First pass: Identify current selection and potential new selection ---
     for v in bm.verts:
         if v[is_fake_layer]:
             continue
         if v.select:
             current_selected_indices.add(v.index)
             num_currently_selected += 1
-            # Check if this vertex was NOT selected in the previous run
             if v.index not in previous_selected_indices:
-                # If we haven't already found a newly selected one, this is potentially it
                 if newly_selected_vert_index == -1:
                     newly_selected_vert_index = v.index
                 else:
-                    # Multiple new selections occurred in one update? Ambiguous for click-rename.
-                    newly_selected_vert_index = -2 # Mark as ambiguous
+                    newly_selected_vert_index = -2
 
-    # --- Handle Batch Renaming based on the single NEW selection ---
     if batch_node_renaming_enabled and newly_selected_vert_index >= 0:
-        # Only rename if batch mode is on and exactly one NEW vertex was identified.
         try:
-            vert_to_rename = bm.verts[newly_selected_vert_index] # Access by index
-
+            vert_to_rename = bm.verts[newly_selected_vert_index]
             new_node_id: str = ui_props.batch_node_renaming_naming_scheme
-            # Ensure '#' is present before replacing to avoid errors/unexpected behavior
             if '#' in new_node_id:
                 new_node_id = new_node_id.replace('#', f'{ui_props.batch_node_renaming_node_idx}')
                 vert_to_rename[node_id_layer] = bytes(new_node_id, 'utf-8')
-                ui_props.batch_node_renaming_node_idx += 1 # Increment AFTER successful rename
+                ui_props.batch_node_renaming_node_idx += 1
                 _force_do_export = True
-                if constants.DEBUG: # Optional debug print
-                    print(f"Batch Renamed node {vert_to_rename.index} to {new_node_id}, next index: {ui_props.batch_node_renaming_node_idx}")
             else:
-                 # Warn if the naming scheme is missing the placeholder
                  print(f"Warning: Batch rename scheme '{ui_props.batch_node_renaming_naming_scheme}' does not contain '#'. No rename performed.")
-
         except IndexError:
             print(f"Error: Could not find vertex with index {newly_selected_vert_index} for renaming.")
         except Exception as rename_err:
              print(f"Error during batch renaming: {rename_err}")
 
-    # --- Update selected_nodes list (for UI/Properties panel) ---
-    # This part should run regardless of renaming to keep the UI updated
+    # --- Update selected_nodes list ---
     selected_nodes.clear()
     for idx in current_selected_indices:
         try:
-            # Get the vertex again to ensure we have the latest data if a rename occurred
             v = bm.verts[idx]
-            # Use init_node_id for consistency in the selected_nodes list
             selected_nodes.append((idx, v[init_node_id_layer].decode('utf-8')))
         except IndexError:
-            pass # Vertex might have been deleted between loops
+            pass
 
-    # --- Update previous selection state for the next callback run ---
     previous_selected_indices = current_selected_indices
-    # --- End Batch Renaming and Selection Tracking ---
 
     # --- Process newly added vertices ---
     for i, v in enumerate(bm.verts):
@@ -1745,39 +2244,34 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
             new_node_id_bytes = bytes(new_node_id, 'utf-8')
             v[init_node_id_layer] = new_node_id_bytes
             v[node_id_layer] = new_node_id_bytes
-            # v[is_fake_layer] = 0 # Ensure new verts are not fake (should be default)
-            if constants.DEBUG:
-                print('new vertex added', new_node_id)
+            # Assign part origin based on the active object's part
+            v[node_part_origin_layer] = bytes(active_obj_data[constants.MESH_JBEAM_PART], 'utf-8')
 
-    # --- Process Edges (Selection and New) ---
-    selected_beams.clear() # Clear before populating
+    # --- Process Edges ---
+    selected_beams.clear()
     for i, e in enumerate(bm.edges):
         beam_indices = e[beam_indices_layer].decode('utf-8')
         if i >= current_edge_count:
-            # Only mark as new ('-1') if it wasn't already set (e.g., by beam creation operator)
             if beam_indices == '':
                 e[beam_indices_layer] = bytes('-1', 'utf-8')
-            if constants.DEBUG:
-                print('new edge added', i)
-        # Check selection only if it's a JBeam beam
+                # Assign part origin based on the active object's part
+                e[beam_part_origin_layer] = bytes(active_obj_data[constants.MESH_JBEAM_PART], 'utf-8')
         if beam_indices != '' and e.select:
             selected_beams.append((e, beam_indices))
 
-    # --- Process Faces (Selection and New) ---
-    selected_tris_quads.clear() # Clear before populating
+    # --- Process Faces ---
+    selected_tris_quads.clear()
     for i, f in enumerate(bm.faces):
         face_idx = f[face_idx_layer]
         if i >= current_face_count:
-             # Only mark as new ('-1') if it wasn't already set (e.g., by face creation operator)
-            if face_idx == 0: # Assuming 0 is the default/uninitialized value
+            if face_idx == 0:
                 f[face_idx_layer] = -1
-            if constants.DEBUG:
-                print('new face added', i)
-        # Check selection only if it's a JBeam face (index is not 0)
+                # Assign part origin based on the active object's part
+                f[face_part_origin_layer] = bytes(active_obj_data[constants.MESH_JBEAM_PART], 'utf-8')
         if face_idx != 0 and f.select:
             selected_tris_quads.append((f, face_idx))
 
-    # Update counts in object properties if they changed
+    # Update counts
     if new_vert_count != current_vert_count:
         active_obj_data[constants.MESH_VERTEX_COUNT] = new_vert_count
     if new_edge_count != current_edge_count:
@@ -1785,80 +2279,192 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
     if new_face_count != current_face_count:
         active_obj_data[constants.MESH_FACE_COUNT] = new_face_count
 
-    # If one vertex is selected, set the UI input node_id field to the selected vertex's node_id attribute
+    # Update UI input field
     if len(selected_nodes) == 1:
-        vert_index, init_node_id = selected_nodes[0] # Use init_node_id from the updated list
+        vert_index, init_node_id = selected_nodes[0]
         try:
             v = bm.verts[vert_index]
-            current_node_id = v[node_id_layer].decode('utf-8') # Get potentially updated node_id
+            current_node_id = v[node_id_layer].decode('utf-8')
             global rename_enabled
-            rename_enabled = False # Disable rename flag initially
-
-            # Only update UI if the value is different to prevent feedback loops
+            rename_enabled = False
             if ui_props.input_node_id != current_node_id:
                 ui_props.input_node_id = current_node_id
         except IndexError:
-             if ui_props.input_node_id != "": # Clear if vertex not found
+             if ui_props.input_node_id != "":
                  ui_props.input_node_id = ""
-    # else: # Optional: Clear input field if selection changes from 1 vertex
-    #     if ui_props.input_node_id != "":
-    #         ui_props.input_node_id = ""
 
-    # If one beam is selected, find its line number and midpoint
-    _selected_beam_line_info = None # Clear before potentially setting
-    if len(selected_beams) == 1:
-        e, beam_indices_str = selected_beams[0] # e is the BMEdge object
+    # --- Tooltip Logic ---
+    _selected_beam_line_info = None
+    _selected_beam_params_info = None
+    _selected_node_params_info = None
+
+    # --- Node Tooltip Logic ---
+    if len(selected_nodes) == 1:
+        vert_index, node_id = selected_nodes[0]
+        if curr_vdata and 'nodes' in curr_vdata and node_id in curr_vdata['nodes']:
+            node_data = curr_vdata['nodes'][node_id]
+            params_list = []
+            node_world_pos = active_obj.matrix_world @ bm.verts[vert_index].co
+
+            node_param_toggle_map = {
+                'nodeWeight': 'tooltip_show_nodeWeight', 'nodeMaterial': 'tooltip_show_nodeMaterial',
+                'collision': 'tooltip_show_collision', 'selfCollision': 'tooltip_show_selfCollision',
+                'frictionCoef': 'tooltip_show_frictionCoef', 'slidingFrictionCoef': 'tooltip_show_slidingFrictionCoef',
+                'group': 'tooltip_show_group_node', 'couplerGroup': 'tooltip_show_couplerGroup',
+                'loadMembers': 'tooltip_show_loadMembers', 'isCoupler': 'tooltip_show_isCoupler',
+                'couplerStrength': 'tooltip_show_couplerStrength', 'couplerPullStrength': 'tooltip_show_couplerPullStrength',
+                'couplerPosition': 'tooltip_show_couplerPosition', 'couplerDirection': 'tooltip_show_couplerDirection',
+                'couplerRadius': 'tooltip_show_couplerRadius', 'couplerStartRadius': 'tooltip_show_couplerStartRadius',
+                'couplerBreakTriggerBeam': 'tooltip_show_couplerBreakTriggerBeam', 'couplerSoundVolumeFactor': 'tooltip_show_couplerSoundVolumeFactor',
+                'couplerSoundNode': 'tooltip_show_couplerSoundNode', 'couplerLockedSoundEvent': 'tooltip_show_couplerLockedSoundEvent',
+                'couplerUnlockedSoundEvent': 'tooltip_show_couplerUnlockedSoundEvent', 'couplerLockable': 'tooltip_show_couplerLockable',
+                'couplerAllowUnlocking': 'tooltip_show_couplerAllowUnlocking', 'couplerAutoLockRadius': 'tooltip_show_couplerAutoLockRadius',
+                'couplerAngleLimit': 'tooltip_show_couplerAngleLimit', 'couplerAngleLimitSpring': 'tooltip_show_couplerAngleLimitSpring',
+                'couplerAngleLimitDamp': 'tooltip_show_couplerAngleLimitDamp', 'couplerAngleLimitDeform': 'tooltip_show_couplerAngleLimitDeform',
+                'couplerAngleLimitStrength': 'tooltip_show_couplerAngleLimitStrength', 'couplerBreakGroup': 'tooltip_show_couplerBreakGroup',
+                'engineGroup': 'tooltip_show_engineGroup', 'enablePowertrain': 'tooltip_show_enablePowertrain',
+                'name': 'tooltip_show_name', 'inputName': 'tooltip_show_inputName',
+                'pressurePSI': 'tooltip_show_pressurePSI', 'soundFile': 'tooltip_show_soundFile',
+                'volumePerPSI': 'tooltip_show_volumePerPSI', 'attackTime': 'tooltip_show_attackTime',
+                'decayTime': 'tooltip_show_decayTime', 'maxVolumedB': 'tooltip_show_maxVolumedB',
+                'radius': 'tooltip_show_radius', 'fixed': 'tooltip_show_fixed',
+                'category': 'tooltip_show_category', 'pressureDamage': 'tooltip_show_pressureDamage',
+                'hubGroup': 'tooltip_show_hubGroup', 'pressureRatePSI': 'tooltip_show_pressureRatePSI',
+                'maxPressurePSI': 'tooltip_show_maxPressurePSI', 'boostPSI': 'tooltip_show_boostPSI',
+                'supercharger': 'tooltip_show_supercharger', 'turbocharger': 'tooltip_show_turbocharger',
+                'nitroSoundFile': 'tooltip_show_nitroSoundFile', 'nitroVolumePerPSI': 'tooltip_show_nitroVolumePerPSI',
+                'nitroAttackTime': 'tooltip_show_nitroAttackTime', 'nitroDecayTime': 'tooltip_show_nitroDecayTime',
+                'nitroMaxVolumedB': 'tooltip_show_nitroMaxVolumedB', 'cameraDistance': 'tooltip_show_cameraDistance',
+                'cameraRotation': 'tooltip_show_cameraRotation', 'cameraLookAt': 'tooltip_show_cameraLookAt',
+                'cameraFOV': 'tooltip_show_cameraFOV', 'cameraOffset': 'tooltip_show_cameraOffset',
+                'cameraMinDistance': 'tooltip_show_cameraMinDistance', 'cameraMaxDistance': 'tooltip_show_cameraMaxDistance',
+                'cameraFocusPoint': 'tooltip_show_cameraFocusPoint', 'cameraMode': 'tooltip_show_cameraMode',
+                'cameraShake': 'tooltip_show_cameraShake', 'cameraShakeMultiplier': 'tooltip_show_cameraShakeMultiplier',
+                'cameraShakeMaxSpeed': 'tooltip_show_cameraShakeMaxSpeed', 'cameraShakeMaxAngle': 'tooltip_show_cameraShakeMaxAngle',
+                'cameraShakeMaxOffset': 'tooltip_show_cameraShakeMaxOffset', 'cameraShakeFrequency': 'tooltip_show_cameraShakeFrequency',
+                'cameraShakeDamping': 'tooltip_show_cameraShakeDamping', 'cameraShakeRandomness': 'tooltip_show_cameraShakeRandomness',
+                'cameraShakeRandomSeed': 'tooltip_show_cameraShakeRandomSeed', 'cameraShakeRandomFrequency': 'tooltip_show_cameraShakeRandomFrequency',
+                'cameraShakeRandomDamping': 'tooltip_show_cameraShakeRandomDamping', 'cameraShakeRandomOffset': 'tooltip_show_cameraShakeRandomOffset',
+                'cameraShakeRandomAngle': 'tooltip_show_cameraShakeRandomAngle', 'cameraShakeRandomMaxSpeed': 'tooltip_show_cameraShakeRandomMaxSpeed',
+                'cameraShakeRandomMaxAngle': 'tooltip_show_cameraShakeRandomMaxAngle', 'cameraShakeRandomMaxOffset': 'tooltip_show_cameraShakeRandomMaxOffset',
+                'cameraShakeRandomFrequencyMultiplier': 'tooltip_show_cameraShakeRandomFrequencyMultiplier', 'cameraShakeRandomDampingMultiplier': 'tooltip_show_cameraShakeRandomDampingMultiplier',
+                'cameraShakeRandomOffsetMultiplier': 'tooltip_show_cameraShakeRandomOffsetMultiplier', 'cameraShakeRandomAngleMultiplier': 'tooltip_show_cameraShakeRandomAngleMultiplier',
+                'cameraShakeRandomMaxSpeedMultiplier': 'tooltip_show_cameraShakeRandomMaxSpeedMultiplier', 'cameraShakeRandomMaxAngleMultiplier': 'tooltip_show_cameraShakeRandomMaxAngleMultiplier',
+                'cameraShakeRandomMaxOffsetMultiplier': 'tooltip_show_cameraShakeRandomMaxOffsetMultiplier', 'burnRate': 'tooltip_show_burnRate',
+                'chemEnergy': 'tooltip_show_chemEnergy', 'flashPoint': 'tooltip_show_flashPoint',
+                'partName': 'tooltip_show_partName', 'selfIgnitionCoef': 'tooltip_show_selfIgnitionCoef',
+                'slotType': 'tooltip_show_slotType', 'smokePoint': 'tooltip_show_smokePoint',
+                'specHeat': 'tooltip_show_specHeat', 'totalOffset': 'tooltip_show_totalOffset',
+            }
+
+            for k in sorted(node_data.keys(), key=lambda x: str(x)):
+                if k == Metadata or k == 'pos' or k == 'posNoOffset': continue
+                val = node_data[k]
+                toggle_prop_name = node_param_toggle_map.get(k)
+                if toggle_prop_name and getattr(ui_props, toggle_prop_name, False):
+                    params_list.append((k, repr(val)))
+                elif toggle_prop_name is None: pass
+
+            if params_list:
+                _selected_node_params_info = {'params_list': params_list, 'pos': node_world_pos}
+            else:
+                _selected_node_params_info = {'params_list': [("(No params shown)", "")], 'pos': node_world_pos}
+
+    # --- Beam Tooltip Logic ---
+    elif len(selected_beams) == 1:
+        e, beam_indices_str = selected_beams[0]
         beam_indices = beam_indices_str.split(',')
         if beam_indices:
             try:
-                target_beam_idx_in_part = int(beam_indices[0]) # Use first index
+                target_beam_idx_in_part = int(beam_indices[0])
                 target_part_origin = e[beam_part_origin_layer].decode('utf-8')
+                midpoint = active_obj.matrix_world @ ((e.verts[0].co + e.verts[1].co) / 2)
 
-                if target_beam_idx_in_part > 0 and target_part_origin and jbeam_filepath: # Check if index is valid JBeam index (>0)
+                # Get Line Number
+                if target_beam_idx_in_part > 0 and target_part_origin and jbeam_filepath:
                     line_num = find_beam_line_number(jbeam_filepath, target_part_origin, target_beam_idx_in_part)
                     if line_num is not None:
-                        midpoint = active_obj.matrix_world @ ((e.verts[0].co + e.verts[1].co) / 2)
                         _selected_beam_line_info = {'line': line_num, 'midpoint': midpoint}
+
+                # Get Parameters
+                if curr_vdata and 'beams' in curr_vdata and target_beam_idx_in_part > 0:
+                    global_beam_idx = -1
+                    current_part_beam_count = 0
+                    for i, b in enumerate(curr_vdata['beams']):
+                        if b.get('partOrigin') == target_part_origin:
+                            current_part_beam_count += 1
+                            if current_part_beam_count == target_beam_idx_in_part:
+                                global_beam_idx = i
+                                break
+
+                    if global_beam_idx != -1 and global_beam_idx < len(curr_vdata['beams']):
+                        beam_data = curr_vdata['beams'][global_beam_idx]
+                        params_list = []
+
+                        beam_param_toggle_map = {
+                            'beamSpring': 'tooltip_show_beamSpring', 'beamDamp': 'tooltip_show_beamDamp',
+                            'beamDeform': 'tooltip_show_beamDeform', 'beamStrength': 'tooltip_show_beamStrength',
+                            'beamPrecompression': 'tooltip_show_beamPrecompression', 'beamType': 'tooltip_show_beamType',
+                            'beamLongBound': 'tooltip_show_beamLongBound', 'beamShortBound': 'tooltip_show_beamShortBound',
+                            'beamLimitSpring': 'tooltip_show_beamLimitSpring', 'beamLimitDamp': 'tooltip_show_beamLimitDamp',
+                            'beamPrecompressionRange': 'tooltip_show_beamPrecompressionRange', 'beamDampRebound': 'tooltip_show_beamDampRebound',
+                            'beamDampFast': 'tooltip_show_beamDampFast', 'beamDampReboundFast': 'tooltip_show_beamDampReboundFast',
+                            'beamDampVelocitySplit': 'tooltip_show_beamDampVelocitySplit', 'beamDampCutoffHz': 'tooltip_show_beamDampCutoffHz',
+                            'beamDeformReboundThreshold': 'tooltip_show_beamDeformReboundThreshold', 'breakGroup': 'tooltip_show_breakGroup',
+                            'breakGroupType': 'tooltip_show_breakGroupType', 'disableMeshBreaking': 'tooltip_show_disableMeshBreaking',
+                            'disableTriangleBreaking': 'tooltip_show_disableTriangleBreaking', 'soundTriggerBeam': 'tooltip_show_soundTriggerBeam',
+                            'optional': 'tooltip_show_optional', 'group': 'tooltip_show_group',
+                            'dampCutoffHz': 'tooltip_show_dampCutoffHz', 'deformGroup': 'tooltip_show_deformGroup',
+                            'deformLimitExpansion': 'tooltip_show_deformLimitExpansion', 'deformLimitStress': 'tooltip_show_deformLimitStress',
+                            'deformationTriggerRatio': 'tooltip_show_deformationTriggerRatio', 'name': 'tooltip_show_name_beam',
+                            'partName': 'tooltip_show_partName_beam', 'slotType': 'tooltip_show_slotType_beam',
+                        }
+
+                        for k in sorted(beam_data.keys(), key=lambda x: str(x)):
+                            if k in ('id1:', 'id2:', 'partOrigin') or k == Metadata: continue
+                            val = beam_data[k]
+                            toggle_prop_name = beam_param_toggle_map.get(k)
+                            if toggle_prop_name and getattr(ui_props, toggle_prop_name, False):
+                                params_list.append((k, repr(val)))
+                            elif toggle_prop_name is None: pass
+
+                        if params_list:
+                            _selected_beam_params_info = {'params_list': params_list, 'midpoint': midpoint}
+                        else:
+                             _selected_beam_params_info = {'params_list': [("(No params shown)", "")], 'midpoint': midpoint}
+                    else:
+                        print(f"  Warning: Global beam index {global_beam_idx} not found or invalid for part '{target_part_origin}'.")
 
             except ValueError:
                 print(f"Warning: Could not parse beam index: {beam_indices_str}", file=sys.stderr)
             except Exception as find_err:
-                 print(f"Error finding beam line number: {find_err}", file=sys.stderr)
+                 print(f"Error processing beam tooltips: {find_err}", file=sys.stderr)
+                 import traceback
+                 traceback.print_exc()
 
-    if bm: bm.free() # Free bmesh
-# --- MODIFIED END: Batch Renaming Logic ---
+    # No need to free bm as it's from edit mesh
 
 
 @persistent
 def depsgraph_callback(scene: bpy.types.Scene, depsgraph: bpy.types.Depsgraph):
     context = bpy.context
-
-    if constants.DEBUG:
-        print('depsgraph_callback')
-
-    try: # Add try-except around the main callback logic
+    try:
         _depsgraph_callback(context, scene, depsgraph)
-        refresh_curr_vdata()
     except Exception as e:
-        print(f"Error in depsgraph callback: {e}", file=sys.stderr) # Print to stderr
+        print(f"Error in depsgraph callback: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc()
 
 
-# If active file in text editor changed, reimport jbeam file/vehicle
 @persistent
 def check_files_for_changes():
     context = bpy.context
-
-    try: # Add try-except
+    try:
         changed = text_editor.check_open_int_file_for_changes(context)
         if changed:
             refresh_curr_vdata(True)
     except Exception as e:
-        print(f"Error checking files for changes: {e}", file=sys.stderr) # Print to stderr
-        # Optionally stop the timer if errors persist
-        # return None
-
+        print(f"Error checking files for changes: {e}", file=sys.stderr)
     return check_file_interval
 
 op_no_export = {
@@ -1893,7 +2499,8 @@ def poll_active_operators():
 
     try: # Add try-except
         active_obj = context.active_object
-        if active_obj is not None:
+        # Check if active object is valid JBeam AND editing enabled before exporting
+        if active_obj is not None and active_obj.data is not None:
             active_obj_data = active_obj.data
             # Use .get() for safety and check MESH_EDITING_ENABLED
             if active_obj_data.get(constants.MESH_JBEAM_PART) is not None and active_obj_data.get(constants.MESH_EDITING_ENABLED, False):
@@ -1914,13 +2521,15 @@ def poll_active_operators():
 
                     _do_export = False
                     _force_do_export = False
+        # Reset export flags if object is not valid JBeam or editing disabled
+        else:
+            _do_export = False
+            _force_do_export = False
 
     except Exception as e:
         print(f"Error polling active operators: {e}", file=sys.stderr) # Print to stderr
         _do_export = False # Reset flags on error to prevent loops
         _force_do_export = False
-        # Optionally stop the timer if errors persist
-        # return None
     finally:
          _last_op = op # Update last operator even if export didn't happen
 
@@ -1992,7 +2601,6 @@ def register():
         km, kmi = init_keymaps()
         if km: # Check if keymap was created
             for k_item in kmi:
-                # k_item.active = True # 'active' attribute deprecated/removed?
                 custom_keymaps.append((km, k_item)) # Store keymap item itself
 
     bpy.types.Scene.ui_properties = bpy.props.PointerProperty(type=UIProperties)
@@ -2000,7 +2608,6 @@ def register():
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_vehicle)
-    #bpy.types.TOPBAR_MT_file_export.append(menu_func_export_vehicle)
 
     # Clear existing handlers before appending (safety measure)
     while bpy.app.handlers.depsgraph_update_post:
@@ -2047,7 +2654,6 @@ def unregister():
         bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
         bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
         bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_vehicle)
-        #bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_vehicle)
     except Exception as e:
         print(f"Error removing menu functions: {e}", file=sys.stderr) # Print to stderr
 
