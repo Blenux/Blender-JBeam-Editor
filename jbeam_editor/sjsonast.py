@@ -262,7 +262,9 @@ def stringify_bool(node):
 
 
 def stringify_string(node):
-    return '"' + node.value + '"'
+    # If node.value is None, treat it as an empty string for stringification.
+    value_to_stringify = node.value if node.value is not None else ""
+    return '"' + value_to_stringify + '"'
 
 
 def stringify_number(node):
