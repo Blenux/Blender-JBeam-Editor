@@ -22,11 +22,14 @@ import bpy
 import bmesh
 import sys
 import traceback # <<< ADDED: Import traceback
+import json # <<< ADDED: Import json
 
 # Import from local modules
 from . import constants
 from . import text_editor
 from . import globals as jb_globals # Import globals
+# Import drawing module and specific elements needed
+from . import drawing # <<< ADDED: Import drawing module
 from .drawing import refresh_curr_vdata, find_node_line_number, find_beam_line_number, _scroll_editor_to_line # Import drawing functions
 from .text_editor import _to_short_filename # <<< ADDED: Import helper
 # <<< ADDED: Import utils for show_message_box if needed, or use self.report >>>
@@ -558,5 +561,163 @@ class JBEAM_EDITOR_OT_open_text_editor_split(bpy.types.Operator):
             self.report({'ERROR'}, f"Failed to split area and open Text Editor: {e}")
             traceback.print_exc()
             return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+# <<< Operator for Node Deletion Confirmation >>>
+class JBEAM_EDITOR_OT_confirm_node_deletion(bpy.types.Operator):
+    """Confirms deletion of newly created nodes that overlap existing ones."""
+    bl_idname = "jbeam_editor.confirm_node_deletion"
+    bl_label = "Confirm Overlapping Node Deletion"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    nodes_data: bpy.props.StringProperty(options={'HIDDEN'})
+    # Store list of tuples (node_id, display_name, position)
+    nodes_to_delete_info: list = []
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and obj.mode == 'EDIT' and obj.data
+
+    # <<< MODIFIED: cancel method to clear flag AND trigger export >>>
+    def cancel(self, context):
+        """Called when the operator is cancelled. Keeps the new node and triggers export."""
+        print("Node deletion confirmation cancelled. Keeping newly created node and triggering export...") # Debug message
+
+        # --- Trigger Export ---
+        # The newly created node (with its temporary or final ID) exists in the mesh.
+        # Triggering an export will process the current mesh state, including the new node.
+        # The export logic (export_utils.get_nodes_add_delete_rename) should handle
+        # the final naming and addition of this node to the JBeam file.
+        jb_globals._force_do_export = True
+        # --- End Trigger Export ---
+
+        # --- Ensure flag is cleared ---
+        # This must happen regardless of export success/failure
+        jb_globals.confirm_delete_pending = False
+        print("Cancel: confirm_delete_pending flag cleared.")
+        # --- End Ensure flag is cleared ---
+
+        # Trigger viewport redraw might be good practice after potentially changing state
+        drawing.veh_render_dirty = True
+        drawing._tag_redraw_3d_views(context)
+        # <<< END MODIFICATION >>>
+
+    def invoke(self, context, event):
+        # Flag is set *before* invoke in export_utils.py
+        try:
+            # Store parsed data in nodes_to_delete_info
+            # Use getattr to safely access nodes_data, default to empty string
+            nodes_data_str = getattr(self, 'nodes_data', '')
+            if not nodes_data_str:
+                 raise ValueError("Node data string is empty")
+            self.nodes_to_delete_info = json.loads(nodes_data_str)
+            if not isinstance(self.nodes_to_delete_info, list):
+                raise ValueError("Invalid data format")
+        except (json.JSONDecodeError, ValueError) as e:
+            self.report({'ERROR'}, f"Failed to parse node deletion data: {e}")
+            jb_globals.confirm_delete_pending = False # CLEAR FLAG on invoke error
+            return {'CANCELLED'}
+
+        if not self.nodes_to_delete_info:
+            self.report({'WARNING'}, "No nodes specified for deletion confirmation.")
+            jb_globals.confirm_delete_pending = False # CLEAR FLAG if no nodes
+            return {'CANCELLED'}
+
+        return context.window_manager.invoke_props_dialog(self, width=400)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="The following newly created nodes overlap existing nodes:")
+        layout.label(text="Confirm deletion to proceed?")
+        box = layout.box()
+        # Use getattr for safer access
+        nodes_info = getattr(self, 'nodes_to_delete_info', [])
+        if not nodes_info:
+             box.label(text="Error: Node information not available.")
+        else:
+            for node_id, display_name, pos in nodes_info:
+                pos_str = f"({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})"
+                # Use display_name which might be the mirrored name or the UUID
+                box.label(text=f"- Node '{display_name}' at {pos_str}")
+
+    def execute(self, context):
+        obj = context.active_object
+        obj_data = obj.data
+
+        # Use getattr for safer access
+        nodes_info = getattr(self, 'nodes_to_delete_info', None)
+        if not nodes_info:
+             self.report({'WARNING'}, "No node info available for deletion execution.")
+             jb_globals.confirm_delete_pending = False # Should not happen, but clear flag just in case
+             return {'CANCELLED'}
+
+        bm = None
+        verts_geom = []
+        try:
+            bm = bmesh.from_edit_mesh(obj_data)
+            bm.verts.ensure_lookup_table()
+            node_id_layer = bm.verts.layers.string.get(constants.VL_NODE_ID) # Get node ID layer
+
+            if not node_id_layer:
+                self.report({'ERROR'}, "Node ID layer not found on mesh.")
+                jb_globals.confirm_delete_pending = False
+                return {'CANCELLED'}
+
+            # Find vertices by Node ID
+            node_ids_to_delete = {info[0] for info in nodes_info} # Get the set of actual node IDs
+            found_node_ids = set()
+
+            for v in bm.verts:
+                try:
+                    # Check if vertex is valid before accessing layer
+                    if not v.is_valid: continue
+                    current_node_id = v[node_id_layer].decode('utf-8')
+                    if current_node_id in node_ids_to_delete:
+                        verts_geom.append(v)
+                        found_node_ids.add(current_node_id)
+                except ReferenceError:
+                     # Handle cases where vertex becomes invalid during iteration
+                     print(f"Execute: Vertex {v.index} became invalid during search.", file=sys.stderr)
+                except Exception as e:
+                    # Handle potential decoding errors or layer access issues for a specific vertex
+                    print(f"Warning: Error processing vertex {v.index} during deletion search: {e}", file=sys.stderr)
+
+            if not verts_geom:
+                 # Report if none of the target IDs were found in the current mesh
+                 missing_ids = node_ids_to_delete - found_node_ids
+                 if missing_ids:
+                     self.report({'WARNING'}, f"Could not find vertices for deletion: {', '.join(missing_ids)}")
+                 else: # Should not happen if node_ids_to_delete was not empty
+                     self.report({'WARNING'}, "Could not find any vertices to delete.")
+                 jb_globals.confirm_delete_pending = False # CLEAR FLAG
+                 return {'CANCELLED'}
+
+            # Report if some nodes were not found but others were
+            missing_ids = node_ids_to_delete - found_node_ids
+            if missing_ids:
+                self.report({'WARNING'}, f"Could not find some nodes for deletion: {', '.join(missing_ids)}")
+
+            bmesh.ops.delete(bm, geom=verts_geom, context='VERTS')
+            bmesh.update_edit_mesh(obj_data)
+            self.report({'INFO'}, f"Deleted {len(verts_geom)} overlapping nodes.")
+
+            # Trigger viewport redraw to show the deletion
+            drawing.veh_render_dirty = True
+            drawing._tag_redraw_3d_views(context)
+
+            # Trigger a new export cycle to write the changes correctly after deletion
+            jb_globals._force_do_export = True
+
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to delete nodes: {e}")
+            traceback.print_exc()
+            jb_globals.confirm_delete_pending = False # CLEAR FLAG on error
+            return {'CANCELLED'}
+        finally:
+             # ENSURE FLAG IS CLEARED on successful execution
+             jb_globals.confirm_delete_pending = False
+             # No need to free bm from edit mesh
 
         return {'FINISHED'}

@@ -43,6 +43,7 @@ _selected_node_line_info = None # Dict: {'line': int, 'pos': Vector}
 # Operator states
 batch_node_renaming_enabled = False
 # _last_op is managed in handlers.py
+confirm_delete_pending = False # <<< ADDED: Flag to indicate confirmation dialog is active
 
 # Highlight on Click state
 # <<< MODIFIED LINE >>>

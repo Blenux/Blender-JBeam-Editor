@@ -158,13 +158,13 @@ class UIProperties(bpy.types.PropertyGroup):
         min=1
     )
 
-    # --- Master Visualization Toggle --- <<< ADDED >>>
-    toggle_master_vis: bpy.props.BoolProperty(
-        name="Show All Line Visualizations",
-        description="Toggles the visibility of all beam/rail/torsionbar lines (excluding highlights)",
-        default=True,
-        update=_update_master_toggle_vis # Use the new update function
-    )
+    # --- Master Visualization Toggle --- <<< REMOVED (Moved to new panel) >>>
+    # toggle_master_vis: bpy.props.BoolProperty(
+    #     name="Show All Line Visualizations",
+    #     description="Toggles the visibility of all beam/rail/torsionbar lines (excluding highlights)",
+    #     default=True,
+    #     update=_update_master_toggle_vis # Use the new update function
+    # )
 
     toggle_node_ids_text: bpy.props.BoolProperty(
         name="Toggle NodeIDs Text",
@@ -187,6 +187,16 @@ class UIProperties(bpy.types.PropertyGroup):
         min=0,
         max=5,
     )
+
+    # <<< ADDED PROPERTY >>>
+    node_id_text_offset: bpy.props.IntProperty(
+        name="Node ID Text Offset",
+        description="Adjust the distance (in pixels) between the node and its ID text",
+        default=5, # Start with a small default offset
+        min=0,
+        max=50, # Set a reasonable maximum
+    )
+    # <<< END ADDED PROPERTY >>>
 
     # --- Tooltip Panel Toggle ---
     show_tooltips_panel: bpy.props.BoolProperty(
@@ -250,7 +260,30 @@ class UIProperties(bpy.types.PropertyGroup):
         default=False
     )
 
-    # --- Beam Visualization Panel Toggle ---
+    # --- Beam Visualization Panel Toggle --- <<< REMOVED (Moved to new panel) >>>
+    # show_beam_visualization_panel: bpy.props.BoolProperty(
+    #     name="Beam Visualization",
+    #     description="Expand to see beam visualization options",
+    #     default=False,
+    # )
+
+    # <<< ADDED: New Panel Toggle >>>
+    show_line_visualizations_panel: bpy.props.BoolProperty(
+        name="Line Visualizations",
+        description="Expand to see visualization options for beams, rails, torsionbars, etc.",
+        default=False, # Start collapsed
+    )
+    # <<< END ADDED >>>
+
+    # --- Master Visualization Toggle --- <<< MOVED HERE (Inside UIProperties, but will be drawn in the new panel) >>>
+    toggle_master_vis: bpy.props.BoolProperty(
+        name="Show All Line Visualizations",
+        description="Toggles the visibility of all beam/rail/torsionbar lines (excluding highlights)",
+        default=True,
+        update=_update_master_toggle_vis # Use the new update function
+    )
+
+    # --- Beam Visualization Panel Toggle --- <<< MOVED HERE (Inside UIProperties, but will be drawn in the new panel) >>>
     show_beam_visualization_panel: bpy.props.BoolProperty(
         name="Beam Visualization",
         description="Expand to see beam visualization options",
@@ -523,3 +556,46 @@ class UIProperties(bpy.types.PropertyGroup):
         min=1.0, max=10.0,
         update=lambda self, context: setattr(drawing, 'veh_render_dirty', True) # Use drawing's dirty flag
     )
+
+    # --- Node Creation Prefixes ---
+    # <<< ADDED PROPERTY >>>
+    show_new_node_naming_panel: bpy.props.BoolProperty(
+        name="New Node Naming",
+        description="Expand to see new node naming options",
+        default=False, # Start collapsed by default
+    )
+    # <<< END ADDED PROPERTY >>>
+
+    # <<< ADDED: Toggle for prefix/suffix feature >>>
+    use_node_naming_prefixes: bpy.props.BoolProperty(
+        name="Use Prefix/Suffix and Auto-Symmetry",
+        description="Automatically add a prefix or suffix to newly created nodes based on their X position + apply automatic symmetry if possible",
+        default=True,
+    )
+    # <<< END ADDED >>>
+
+    new_node_prefix_left: bpy.props.StringProperty(
+        name="Left Prefix/Suffix",
+        description="Prefix/Suffix for newly created nodes with positive X coordinate + reference for automatic symmetry target",
+        default="l",
+    )
+    new_node_prefix_middle: bpy.props.StringProperty(
+        name="Middle Prefix/Suffix",
+        description="Prefix/Suffix for newly created nodes with near-zero X coordinate",
+        default="",
+    )
+    new_node_prefix_right: bpy.props.StringProperty(
+        name="Right Prefix/Suffix",
+        description="Prefix/Suffix for newly created nodes with negative X coordinate + reference for automatic symmetry target",
+        default="r",
+    )
+    new_node_prefix_position: bpy.props.EnumProperty(
+        name="Position",
+        description="Place the identifier at the front or back of the node name",
+        items=[
+            ('FRONT', "Front", "Add identifier as a prefix (e.g., L_node)"),
+            ('BACK', "Back", "Add identifier as a suffix (e.g., node_L)"),
+        ],
+        default='BACK',
+    )
+    # --- End Node Creation Prefixes ---

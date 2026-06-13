@@ -22,6 +22,7 @@ from mathutils import Vector
 import sys
 import traceback
 import uuid # <<< Import uuid
+import json # <<< ADDED: Import json
 
 import bpy
 
@@ -31,6 +32,7 @@ from . import constants
 from .sjsonast import ASTNode, parse as sjsonast_parse, stringify_nodes as sjsonast_stringify_nodes
 from .utils import Metadata, is_number, to_c_float, to_float_str, get_float_precision
 from . import text_editor
+from . import globals as jb_globals # <<< ADDED: Import globals
 
 from .jbeam import io as jbeam_io
 from .jbeam.expression_parser import add_offset_expr
@@ -41,6 +43,10 @@ TWO_INDENT = INDENT * 2
 NL_INDENT = '\n' + INDENT
 NL_TWO_INDENT = '\n' + TWO_INDENT
 
+# Tolerance for mirror check position comparison
+MIRROR_CHECK_TOLERANCE = 1e-5
+# Tolerance for exact position collision check
+POSITION_COLLISION_TOLERANCE = 1e-6 # Use a slightly tighter tolerance for exact match
 
 class PartNodesActions:
     def __init__(self):
@@ -160,10 +166,37 @@ def add_jbeam_setup(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 def add_jbeam_nodes(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_section_end_node_idx: int, nodes_to_add: dict):
     i, node_after_entry, node_2_after_entry = add_jbeam_setup(ast_nodes, jbeam_section_start_node_idx, jbeam_section_end_node_idx)
 
+    # <<< START ADDED COMMENT LOGIC >>>
+    # Check if "//ADDED NODES BY EDITOR" comment exists within the current node section
+    comment_text = '//ADDED NODES BY EDITOR'
+    comment_already_exists_in_section = False
+    # Iterate only within the bounds of the current node section
+    for k in range(jbeam_section_start_node_idx, jbeam_section_end_node_idx):
+        node = ast_nodes[k]
+        if node.data_type == 'wsc' and comment_text in node.value:
+            comment_already_exists_in_section = True
+            break # Found it within the section, no need to check further
+
+    # Add "//ADDED NODES BY EDITOR" comment only if nodes are being added and comment doesn't already exist in this section
+    if nodes_to_add and not comment_already_exists_in_section:
+        # Add an extra newline before the standard indent and comment text
+        comment_wsc_value = '\n' + NL_TWO_INDENT + comment_text
+        if node_after_entry:
+            # Append comment to the existing whitespace node before the first new node's indent
+            node_after_entry.value += comment_wsc_value
+            # Don't set node_after_entry to None here, the loop needs it for the first node's indent
+        else:
+            # Insert comment as a new whitespace node. The loop will handle the first node's indent.
+            ast_nodes.insert(i, ASTNode('wsc', comment_wsc_value))
+            i += 1 # Adjust insertion index because we added a node
+    # <<< END ADDED COMMENT LOGIC >>>
+
     # Insert new nodes at bottom of nodes section
     nodes = nodes_to_add.items()
 
     for node_id, node_pos in nodes:
+        # This logic correctly adds the NL_TWO_INDENT *after* the comment (if added),
+        # or as a new node for subsequent nodes.
         if node_after_entry:
             node_after_entry.value += NL_TWO_INDENT
             node_after_entry = None
@@ -185,7 +218,12 @@ def add_jbeam_nodes(ast_nodes: list, jbeam_section_start_node_idx: int, jbeam_se
 
     # Add modified original last WSCS back to end of section
     if node_2_after_entry:
-        ast_nodes[i - 1].value += node_2_after_entry.value
+        # Append the original trailing whitespace after the last added comma's whitespace node
+        if i > 0 and ast_nodes[i - 1].data_type == 'wsc':
+             ast_nodes[i - 1].value += node_2_after_entry.value
+        # Handle case where no nodes were added but whitespace was modified
+        elif node_after_entry:
+             node_after_entry.value += node_2_after_entry.value
 
     #print_ast_nodes(ast_nodes, i, 10, True)
     return i
@@ -452,23 +490,53 @@ def set_node_renames_positions(jbeam_file_data_modified: dict, jbeam_part: str, 
             rec_node_ref_rename(section_data, node_renames)
 
 
-def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jbeam_part: str, init_nodes_data: dict, affect_node_references: bool):
-    parts_actions = {jbeam_part: PartNodesActions()}
+# <<< MODIFIED HELPER FUNCTION >>>
+def get_base_node_name(node_id: str, ui_props: 'UIProperties'): # Pass ui_props
+    """Removes L_, R_, or M_ prefix/suffix if present, based on settings."""
+    # <<< ADDED: Check if prefixing is enabled >>>
+    if not ui_props.use_node_naming_prefixes:
+        return node_id # Return original ID if feature is disabled
+    # <<< END ADDED >>>
 
-    # parts_nodes_to_add, parts_nodes_to_delete, parts_nodes_to_rename, parts_nodes_to_move = {}, {}, {}, {}
+    prefix_pos = ui_props.new_node_prefix_position
+    prefixes = (ui_props.new_node_prefix_left,
+                ui_props.new_node_prefix_middle,
+                ui_props.new_node_prefix_right)
+
+    if prefix_pos == 'FRONT':
+        for prefix in prefixes:
+            if prefix and node_id.startswith(prefix): # Check if prefix is not empty
+                return node_id[len(prefix):] # Return everything after the prefix
+    elif prefix_pos == 'BACK':
+        for suffix in prefixes:
+             if suffix and node_id.endswith(suffix): # Check if suffix is not empty
+                return node_id[:-len(suffix)] # Return everything before the suffix
+
+    return node_id # Return original if no prefix/suffix found or applicable
+# <<< END MODIFIED HELPER FUNCTION >>>
+
+
+def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jbeam_part: str, init_nodes_data: dict, affect_node_references: bool):
+    context = bpy.context
+    ui_props = context.scene.ui_properties # Already getting ui_props
+
+    parts_actions = {jbeam_part: PartNodesActions()}
 
     init_node_id_layer = bm.verts.layers.string[constants.VL_INIT_NODE_ID]
     node_id_layer = bm.verts.layers.string[constants.VL_NODE_ID]
     part_origin_layer = bm.verts.layers.string[constants.VL_NODE_PART_ORIGIN]
     node_is_fake_layer = bm.verts.layers.int[constants.VL_NODE_IS_FAKE]
 
-    # Update node ids and positions from Blender into the SJSON data
-
-    #init_node_id_to_part_origin = {}
-
     blender_nodes = {}
+    processed_new_node_positions = set() # Store tuples (x, y, z)
+    nodes_requiring_confirmation = [] # Store tuples: (node_id, display_name_for_dialog, position_tuple)
+
+    # Ensure lookup table before iterating
+    bm.verts.ensure_lookup_table()
+
     # Create dictionary where key is init node id and value is current blender node id and position
     for v in bm.verts:
+        # Skip vertices already marked as fake (e.g., from previous collision checks)
         if v[node_is_fake_layer] == 1:
             continue
 
@@ -477,48 +545,139 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
         node_part_origin = v[part_origin_layer].decode('utf-8')
         pos: Vector = obj.matrix_world @ v.co
 
-        # --- MODIFICATION START: Handle TEMP nodes ---
+        # --- Handle TEMP nodes ---
         if node_id.startswith('TEMP_'):
-            # Determine prefix based on local X coordinate
-            if v.co.x < -1e-6: prefix = "R"
-            elif v.co.x > 1e-6: prefix = "L"
-            else: prefix = "M"
+            # <<< ADDED: Check if prefixing is enabled >>>
+            use_prefixes = ui_props.use_node_naming_prefixes
+            # <<< END ADDED >>>
 
-            # Generate final ID and update layers
-            final_node_id = f"{prefix}_{uuid.uuid4()}"
-            final_node_id_bytes = bytes(final_node_id, 'utf-8')
-            v[node_id_layer] = final_node_id_bytes
-            v[init_node_id_layer] = final_node_id_bytes # Update init ID as well
+            # Determine the correct identifier (prefix/suffix) based on X position
+            identifier = ""
+            # <<< MODIFIED: Only determine identifier if prefixes are enabled >>>
+            if use_prefixes:
+                if v.co.x < -MIRROR_CHECK_TOLERANCE: identifier = ui_props.new_node_prefix_right
+                elif v.co.x > MIRROR_CHECK_TOLERANCE: identifier = ui_props.new_node_prefix_left
+                else: identifier = ui_props.new_node_prefix_middle
+            # <<< END MODIFIED >>>
 
-            # Update local variables for further processing
-            init_node_id = final_node_id
-            node_id = final_node_id
+            # --- MIRROR CHECK ---
+            mirrored_node_found = False
+            base_name_from_mirror = None
+            # <<< MODIFIED: Only perform mirror check if prefixes are enabled >>>
+            if use_prefixes:
+                for other_node_id, other_node_data in init_nodes_data.items():
+                    # Skip if the other node is marked for deletion in this cycle
+                    is_marked_for_delete = False
+                    for actions in parts_actions.values():
+                        if other_node_id in actions.nodes_to_delete:
+                            is_marked_for_delete = True; break
+                    if is_marked_for_delete: continue
 
-            # Add this node to the 'add' list for the correct part
-            part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
-            part_actions.nodes_to_add[node_id] = pos # Use final ID and world position
-            # Skip rename/move checks for this newly finalized node
-            blender_nodes[init_node_id] = {'curr_node_id': node_id, 'pos': pos.to_tuple(), 'partOrigin': node_part_origin} # Store final pos
-            continue # Go to next vertex
-        # --- MODIFICATION END ---
+                    other_init_pos = other_node_data.get('pos')
+                    if other_init_pos and len(other_init_pos) == 3:
+                        if (abs(pos.y - other_init_pos[1]) < MIRROR_CHECK_TOLERANCE and
+                            abs(pos.z - other_init_pos[2]) < MIRROR_CHECK_TOLERANCE and
+                            abs(pos.x + other_init_pos[0]) < MIRROR_CHECK_TOLERANCE):
+                            mirrored_node_found = True
+                            # <<< MODIFIED: Pass ui_props to helper >>>
+                            base_name_from_mirror = get_base_node_name(other_node_id, ui_props)
+                            break
+            # <<< END MODIFIED >>>
 
+            # --- Determine Potential Final IDs ---
+            uuid_base = str(uuid.uuid4())
+            # <<< MODIFIED: Construct names based on prefix_position AND use_prefixes >>>
+            if use_prefixes:
+                if ui_props.new_node_prefix_position == 'FRONT':
+                    mirrored_name = f"{identifier}{base_name_from_mirror}" if mirrored_node_found and base_name_from_mirror else None
+                    uuid_name = f"{identifier}{uuid_base}"
+                else: # BACK
+                    mirrored_name = f"{base_name_from_mirror}{identifier}" if mirrored_node_found and base_name_from_mirror else None
+                    uuid_name = f"{uuid_base}{identifier}"
+            else: # Prefixes disabled, just use UUID
+                mirrored_name = None # No mirrored name if prefixes are off
+                uuid_name = uuid_base
+            # <<< END MODIFICATION >>>
+
+            # --- Collision Check ---
+            collision_found = False
+            collided_with_id = None
+            # Check against initial nodes
+            for other_node_id, other_node_data in init_nodes_data.items():
+                # Skip if marked for deletion
+                is_marked_for_delete = False
+                for actions in parts_actions.values():
+                    if other_node_id in actions.nodes_to_delete:
+                        is_marked_for_delete = True; break
+                if is_marked_for_delete: continue
+
+                other_init_pos = other_node_data.get('pos')
+                if other_init_pos and len(other_init_pos) == 3:
+                    if (abs(pos.x - other_init_pos[0]) < POSITION_COLLISION_TOLERANCE and
+                        abs(pos.y - other_init_pos[1]) < POSITION_COLLISION_TOLERANCE and
+                        abs(pos.z - other_init_pos[2]) < POSITION_COLLISION_TOLERANCE):
+                        collision_found = True; collided_with_id = other_node_id; break
+            # Check against newly processed nodes
+            if not collision_found:
+                rounded_pos = tuple(round(coord, 6) for coord in pos)
+                if rounded_pos in processed_new_node_positions:
+                    collision_found = True; collided_with_id = "another new node"
+
+            # --- Handle Collision or No Collision ---
+            if collision_found:
+                # <<< MODIFIED: Use potentially modified mirrored_name/uuid_name >>>
+                display_name_for_dialog = mirrored_name if mirrored_name else uuid_name
+                print(f"Overlap detected: New node '{display_name_for_dialog}' at {pos.to_tuple()} overlaps with '{collided_with_id}'. Queued for deletion confirmation.", file=sys.stderr)
+                uuid_name_bytes = bytes(uuid_name, 'utf-8')
+                # <<< END MODIFICATION >>>
+                v[node_id_layer] = uuid_name_bytes
+                v[init_node_id_layer] = uuid_name_bytes # Update init ID as well
+                nodes_requiring_confirmation.append((uuid_name, display_name_for_dialog, pos.to_tuple()))
+                continue
+            else:
+                # <<< MODIFIED: Use potentially modified mirrored_name/uuid_name >>>
+                final_node_id_no_collision = mirrored_name if mirrored_name else uuid_name
+                final_node_id_bytes = bytes(final_node_id_no_collision, 'utf-8')
+                # <<< END MODIFICATION >>>
+                v[node_id_layer] = final_node_id_bytes
+                v[init_node_id_layer] = final_node_id_bytes # Update init ID as well
+                init_node_id = final_node_id_no_collision
+                node_id = final_node_id_no_collision
+                part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
+                part_actions.nodes_to_add[node_id] = pos.to_tuple() # Store tuple
+                rounded_pos = tuple(round(coord, 6) for coord in pos)
+                processed_new_node_positions.add(rounded_pos)
+                init_node_data_placeholder = {
+                    'posNoOffset': pos.to_tuple(), 'pos': pos.to_tuple(), Metadata: Metadata()
+                }
+                new_pos_tup_for_sjson = undo_node_move_offset_and_apply_translation_to_expr(init_node_data_placeholder, pos)
+                blender_nodes[init_node_id] = {'curr_node_id': node_id, 'pos': new_pos_tup_for_sjson, 'partOrigin': node_part_origin}
+                continue # Go to next vertex
+        # --- End TEMP node handling ---
+
+        # --- Handle existing nodes ---
         init_node_data = init_nodes_data.get(init_node_id)
         if init_node_data is None:
             # This case should ideally not happen for non-TEMP nodes if logic is correct,
             # but handle it as an addition just in case.
             part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
-            part_actions.nodes_to_add[node_id] = pos
-            blender_nodes[init_node_id] = {'curr_node_id': node_id, 'pos': pos.to_tuple(), 'partOrigin': node_part_origin}
+            part_actions.nodes_to_add[node_id] = pos.to_tuple() # Store tuple
+            # Calculate position considering expressions for SJSON update
+            init_node_data_placeholder = {
+                'posNoOffset': pos.to_tuple(), 'pos': pos.to_tuple(), Metadata: Metadata()
+            }
+            new_pos_tup_for_sjson = undo_node_move_offset_and_apply_translation_to_expr(init_node_data_placeholder, pos)
+            blender_nodes[init_node_id] = {'curr_node_id': node_id, 'pos': new_pos_tup_for_sjson, 'partOrigin': node_part_origin}
             continue
 
         # Check for movement
         init_pos = init_node_data['pos']
         if abs(pos.x - init_pos[0]) > 0.000001 or abs(pos.y - init_pos[1]) > 0.000001 or abs(pos.z - init_pos[2]) > 0.000001:
             part_actions: PartNodesActions = parts_actions.setdefault(node_part_origin, PartNodesActions())
-            part_actions.nodes_to_move[node_id] = pos
+            part_actions.nodes_to_move[node_id] = pos.to_tuple() # Store tuple
 
         # Calculate position considering expressions (for SJSON data update)
-        new_pos_tup = undo_node_move_offset_and_apply_translation_to_expr(init_node_data, pos)
+        new_pos_tup_for_sjson = undo_node_move_offset_and_apply_translation_to_expr(init_node_data, pos)
 
         # Check for rename
         if init_node_id != node_id:
@@ -526,13 +685,24 @@ def get_nodes_add_delete_rename(obj: bpy.types.Object, bm: bmesh.types.BMesh, jb
             part_actions: PartNodesActions = parts_actions.setdefault(affected_part, PartNodesActions())
             part_actions.nodes_to_rename[init_node_id] = node_id
 
-        blender_nodes[init_node_id] = {'curr_node_id': node_id, 'pos': new_pos_tup, 'partOrigin': node_part_origin}
-        #v[init_node_id_layer] = bytes(node_id, 'utf-8') # Don't change init_node_id here anymore
+        blender_nodes[init_node_id] = {'curr_node_id': node_id, 'pos': new_pos_tup_for_sjson, 'partOrigin': node_part_origin}
+        # --- End existing node handling ---
 
-    # Get nodes to delete
+    # --- Invoke confirmation operator if needed ---
+    if nodes_requiring_confirmation and not jb_globals.confirm_delete_pending:
+        try:
+            jb_globals.confirm_delete_pending = True
+            # Pass node ID list to operator
+            # The list now contains (node_id, display_name, position)
+            nodes_json = json.dumps(nodes_requiring_confirmation)
+            bpy.ops.jbeam_editor.confirm_node_deletion('INVOKE_DEFAULT', nodes_data=nodes_json)
+        except Exception as e:
+            print(f"Error invoking node deletion confirmation: {e}", file=sys.stderr)
+            traceback.print_exc()
+            jb_globals.confirm_delete_pending = False
+
+    # --- Get nodes to delete (based on initial data vs remaining blender nodes) ---
     for init_node_id, init_node_data in init_nodes_data.items():
-        # if 'partOrigin' in init_node_data and init_node_data['partOrigin'] != jbeam_part:
-        #     continue
         if init_node_id not in blender_nodes:
             node_part_origin = init_node_data.get('partOrigin', jbeam_part)
             affected_part = True if affect_node_references else node_part_origin
@@ -1231,7 +1401,6 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
     if jbeam_file_data is None or jbeam_file_data_modified is None:
         return reimport_needed
 
-    # The imported jbeam data is used to build an AST from
     ast_data = sjsonast_parse(jbeam_file_str)
     if ast_data is None:
         print("SJSON AST parsing failed!", file=sys.stderr)
@@ -1240,10 +1409,17 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
 
     update_all_parts = True in parts_to_update
 
+    # <<< Keep track if confirmation was triggered >>>
+    confirmation_triggered_in_loop = False
+    # <<< Store actions per part from the first pass >>>
+    all_parts_actions_in_file = {}
+
+    # === First Loop: Gather Actions & Check Confirmation ===
     for obj in parts:
         obj_data = obj.data
         jbeam_part = obj_data[constants.MESH_JBEAM_PART]
 
+        # Skip if part doesn't need update (unless updating all)
         if not update_all_parts and jbeam_part not in parts_to_update:
             continue
 
@@ -1254,101 +1430,122 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
             bm = bmesh.new()
             bm.from_mesh(obj_data)
 
-        # <<< Call get_nodes_add_delete_rename FIRST to finalize TEMP nodes >>>
-        # This function now handles TEMP node renaming internally
+        # --- Call get_nodes_add_delete_rename ---
+        # This detects overlaps, assigns UUIDs, merges actions into parts_nodes_actions,
+        # updates blender_nodes, and potentially invokes the confirmation dialog.
         part_blender_nodes, current_part_actions_map = get_nodes_add_delete_rename(obj, bm, jbeam_part, data.get('nodes', {}), affect_node_references)
-        # Merge the actions determined here with the global parts_nodes_actions
         for part_key, actions in current_part_actions_map.items():
-            global_actions = parts_nodes_actions.setdefault(part_key, PartNodesActions())
-            global_actions.nodes_to_add.update(actions.nodes_to_add)
-            global_actions.nodes_to_delete.update(actions.nodes_to_delete)
-            global_actions.nodes_to_rename.update(actions.nodes_to_rename)
-            global_actions.nodes_to_move.update(actions.nodes_to_move)
-        # Update the main blender_nodes dictionary as well
+             global_actions = parts_nodes_actions.setdefault(part_key, PartNodesActions())
+             global_actions.nodes_to_add.update(actions.nodes_to_add)
+             global_actions.nodes_to_delete.update(actions.nodes_to_delete)
+             global_actions.nodes_to_rename.update(actions.nodes_to_rename)
+             global_actions.nodes_to_move.update(actions.nodes_to_move)
         blender_nodes.update(part_blender_nodes)
-        # <<< END TEMP node handling >>>
 
-        part_nodes_actions: PartNodesActions | None = parts_nodes_actions.get(jbeam_part)
-        if part_nodes_actions is not None:
-            nodes_to_add, nodes_to_delete, node_renames, node_moves = part_nodes_actions.nodes_to_add, part_nodes_actions.nodes_to_delete, part_nodes_actions.nodes_to_rename, part_nodes_actions.nodes_to_move
-        else:
-            nodes_to_add, nodes_to_delete, node_renames, node_moves = {}, set(), {}, {}
+        # --- Check if confirmation was triggered ---
+        if jb_globals.confirm_delete_pending:
+            confirmation_triggered_in_loop = True
 
-        # Add "all parts" actions also
+        # --- Get actions specific to this part for storage ---
+        part_actions: PartNodesActions | None = parts_nodes_actions.get(jbeam_part)
+        nodes_to_add, nodes_to_delete, node_renames = {}, set(), {}
+        if part_actions is not None:
+            nodes_to_add, nodes_to_delete, node_renames = part_actions.nodes_to_add, part_actions.nodes_to_delete, part_actions.nodes_to_rename
+
+        # Add "all parts" actions also (if applicable)
         part_nodes_actions_all: PartNodesActions | None = parts_nodes_actions.get(True)
         if part_nodes_actions_all is not None:
-            for node, pos in part_nodes_actions_all.nodes_to_add.items():
-                nodes_to_add[node] = pos
-            for node in part_nodes_actions_all.nodes_to_delete:
-                nodes_to_delete.add(node)
-            for old_id, new_id in part_nodes_actions_all.nodes_to_rename.items():
-                node_renames[old_id] = new_id
+             nodes_to_add.update(part_nodes_actions_all.nodes_to_add)
+             nodes_to_delete.update(part_nodes_actions_all.nodes_to_delete)
+             node_renames.update(part_nodes_actions_all.nodes_to_rename)
 
-        #init_nodes_data = data.get('nodes') # Already got this earlier
+        # --- Get beam/face actions ---
         init_beams_data = data.get('beams')
         init_tris_data = data.get('triangles', [])
         init_quads_data = data.get('quads', [])
 
-        set_node_renames_positions(jbeam_file_data_modified, jbeam_part, blender_nodes, node_renames, affect_node_references)
-
         if init_beams_data is not None:
             beams_to_add, beams_to_delete = get_beams_add_remove(obj, bm, init_beams_data, jbeam_file_data_modified, jbeam_part, nodes_to_delete, affect_node_references)
-        else:
-            beams_to_add, beams_to_delete = set(), set()
-
+        else: beams_to_add, beams_to_delete = set(), set()
         tris_to_add, tris_to_delete, tris_flipped, quads_to_add, quads_to_delete, quads_flipped = get_faces_add_remove(obj, bm, init_tris_data, init_quads_data, jbeam_file_data_modified, jbeam_part, nodes_to_delete, affect_node_references)
 
-        # Remove beams that were added due to adding triangle
+        # Remove beams added due to triangles
         for beam in beams_to_add.copy():
             for tri in tris_to_add:
-                if set(beam).issubset(tri):
-                    beams_to_add.remove(beam)
+                if set(beam).issubset(tri): beams_to_add.remove(beam)
 
-        if constants.DEBUG:
-            print('nodes to add:', nodes_to_add)
-            print('nodes to delete:', nodes_to_delete)
-            print('node renames:', node_renames)
-            print('node moves:', node_moves)
-            print('beams to add:', beams_to_add)
-            print('beams to delete:', beams_to_delete)
-            print('tris to add:', tris_to_add)
-            print('tris to delete:', tris_to_delete)
-            print('tris flipped:', tris_flipped)
-            print('quads to add:', quads_to_add)
-            print('quads to delete:', quads_to_delete)
-            print('quads flipped:', quads_flipped)
+        # --- Store actions for this part ---
+        all_parts_actions_in_file[jbeam_part] = {
+            'nodes_to_add': nodes_to_add.copy(), 'nodes_to_delete': nodes_to_delete.copy(),
+            'beams_to_add': beams_to_add.copy(), 'beams_to_delete': beams_to_delete.copy(),
+            'tris_to_add': tris_to_add.copy(), 'tris_to_delete': tris_to_delete.copy(),
+            'quads_to_add': quads_to_add.copy(), 'quads_to_delete': quads_to_delete.copy(),
+        }
 
-        update_ast_nodes(ast_nodes, jbeam_file_data, jbeam_file_data_modified, jbeam_part, affect_node_references,
-                         nodes_to_add, nodes_to_delete,
-                         beams_to_add, beams_to_delete,
-                         tris_to_add, tris_to_delete,
-                         quads_to_add, quads_to_delete)
-        out_str_jbeam_data = sjsonast_stringify_nodes(ast_nodes)
-
-        text_editor.write_int_file(jbeam_filepath, out_str_jbeam_data)
-
-        if constants.DEBUG:
-            print(f'Exported: {jbeam_filepath}')
-
+        # --- Calculate reimport_needed ---
         if not reimport_needed:
             reimport_needed = (
-                len(nodes_to_add) > 0 or
-                len(nodes_to_delete) > 0 or
-                len(node_renames) > 0 or
-                len(beams_to_add) > 0 or
-                len(beams_to_delete) > 0 or
-                len(tris_to_add) > 0 or
-                len(tris_to_delete) > 0 or
-                len(tris_flipped) > 0 or
-                len(quads_to_add) > 0 or
-                len(quads_to_delete) > 0 or
-                len(quads_flipped) > 0
+                len(nodes_to_add) > 0 or len(nodes_to_delete) > 0 or len(node_renames) > 0 or
+                len(beams_to_add) > 0 or len(beams_to_delete) > 0 or
+                len(tris_to_add) > 0 or len(tris_to_delete) > 0 or len(tris_flipped) > 0 or
+                len(quads_to_add) > 0 or len(quads_to_delete) > 0 or len(quads_flipped) > 0
             )
 
-        # Free bmesh if it was created temporarily
+        # Free bmesh if temporary
         if obj.mode != 'EDIT':
             bm.free()
+    # === End First Loop ===
 
+    # === Confirmation Check ===
+    # If the confirmation dialog was invoked, abort this export cycle.
+    if confirmation_triggered_in_loop:
+        print("Node deletion confirmation pending. Aborting current export cycle.")
+        # Return reimport_needed calculated so far, as some changes might still require it later
+        return reimport_needed
+
+    # === If no confirmation pending, proceed with AST update ===
+    # Apply node renames/positions to the Python dictionary first
+    # Need to iterate through all parts involved in the file for this step
+    all_node_renames = {}
+    for part_key, actions_map in parts_nodes_actions.items():
+        all_node_renames.update(actions_map.nodes_to_rename)
+    # Apply renames/positions using the complete blender_nodes map
+    # Iterate through unique parts associated with the objects passed to this function
+    unique_parts_in_file = {obj.data[constants.MESH_JBEAM_PART] for obj in parts if obj.data}
+    for part_name in unique_parts_in_file:
+         set_node_renames_positions(jbeam_file_data_modified, part_name, blender_nodes, all_node_renames, affect_node_references)
+
+    # --- Apply actions to AST ---
+    processed_parts_in_ast = set()
+    for obj in parts: # Iterate through objects again to get part names in order
+        jbeam_part = obj.data[constants.MESH_JBEAM_PART]
+
+        # Skip if part doesn't need update or already processed in AST
+        if (not update_all_parts and jbeam_part not in parts_to_update) or jbeam_part in processed_parts_in_ast:
+            continue
+
+        # Retrieve stored actions for this part
+        part_actions = all_parts_actions_in_file.get(jbeam_part)
+        if not part_actions:
+            continue # Should not happen if logic is correct
+
+        # Call update_ast_nodes with the stored actions
+        update_ast_nodes(ast_nodes, jbeam_file_data, jbeam_file_data_modified, jbeam_part, affect_node_references,
+                         part_actions['nodes_to_add'], part_actions['nodes_to_delete'],
+                         part_actions['beams_to_add'], part_actions['beams_to_delete'],
+                         part_actions['tris_to_add'], part_actions['tris_to_delete'],
+                         part_actions['quads_to_add'], part_actions['quads_to_delete'])
+
+        processed_parts_in_ast.add(jbeam_part)
+
+    # --- Write the final AST string ---
+    out_str_jbeam_data = sjsonast_stringify_nodes(ast_nodes)
+    text_editor.write_int_file(jbeam_filepath, out_str_jbeam_data)
+
+    if constants.DEBUG:
+        print(f'Exported: {jbeam_filepath}')
+
+    # Return the reimport_needed flag calculated in the first loop
     return reimport_needed
 
 

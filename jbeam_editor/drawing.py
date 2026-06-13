@@ -1282,22 +1282,35 @@ def draw_callback_px(context: bpy.types.Context):
     highlighted_cross_part_color = (1.0, 0.5, 1.0, 1.0)
     # <<< ADDED: Slidenode color >>>
     slidenode_color = (1.0, 0.7, 0.7, 1.0) # Light pink
+    # <<< ADDED: Get text offset >>>
+    text_offset = ui_props.node_id_text_offset
 
-    def draw_text_with_outline(font_id, text, x, y, text_color):
-        # ... (outline drawing logic remains the same) ...
+    # <<< START MODIFICATION: Add apply_offset parameter >>>
+    def draw_text_with_outline(font_id, text, x, y, text_color, apply_offset=True):
+        base_x = x
+        base_y = y
+        # Conditionally apply offset
+        if apply_offset:
+            base_x += text_offset
+            base_y += text_offset
+    # <<< END MODIFICATION >>>
+
+        # ... (outline drawing logic remains the same, but uses base_x, base_y) ...
         if outline_size > 0:
             blfcolor(font_id, *black_color)
-            lblfPosition(font_id, x - outline_size, y, 0); lblfDraw(font_id, text)
-            lblfPosition(font_id, x + outline_size, y, 0); lblfDraw(font_id, text)
-            lblfPosition(font_id, x, y - outline_size, 0); lblfDraw(font_id, text)
-            lblfPosition(font_id, x, y + outline_size, 0); lblfDraw(font_id, text)
+            # Use base_x, base_y for all positioning
+            lblfPosition(font_id, base_x - outline_size, base_y, 0); lblfDraw(font_id, text)
+            lblfPosition(font_id, base_x + outline_size, base_y, 0); lblfDraw(font_id, text)
+            lblfPosition(font_id, base_x, base_y - outline_size, 0); lblfDraw(font_id, text)
+            lblfPosition(font_id, base_x, base_y + outline_size, 0); lblfDraw(font_id, text)
             if outline_size > 1:
-                 lblfPosition(font_id, x - outline_size, y - outline_size, 0); lblfDraw(font_id, text)
-                 lblfPosition(font_id, x + outline_size, y - outline_size, 0); lblfDraw(font_id, text)
-                 lblfPosition(font_id, x - outline_size, y + outline_size, 0); lblfDraw(font_id, text)
-                 lblfPosition(font_id, x + outline_size, y + outline_size, 0); lblfDraw(font_id, text)
+                 lblfPosition(font_id, base_x - outline_size, base_y - outline_size, 0); lblfDraw(font_id, text)
+                 lblfPosition(font_id, base_x + outline_size, base_y - outline_size, 0); lblfDraw(font_id, text)
+                 lblfPosition(font_id, base_x - outline_size, base_y + outline_size, 0); lblfDraw(font_id, text)
+                 lblfPosition(font_id, base_x + outline_size, base_y + outline_size, 0); lblfDraw(font_id, text)
         blfcolor(font_id, *text_color)
-        lblfPosition(font_id, x, y, 0)
+        # Use base_x, base_y for the final text draw
+        lblfPosition(font_id, base_x, base_y, 0)
         lblfDraw(font_id, text)
 
     # <<< START NEW LOGIC >>>
@@ -1368,7 +1381,9 @@ def draw_callback_px(context: bpy.types.Context):
                                  text_color = yellow_color
                             # <<< END MODIFIED >>>
 
-                            draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color)
+                            # <<< MODIFICATION: Pass apply_offset=True (default) >>>
+                            draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color) # Default apply_offset is True
+                            # <<< END MODIFICATION >>>
                 except Exception as e: print(f"Error processing part {obj.name} for drawing: {e}", file=sys.stderr)
                 finally:
                      # Only free the temporary bmesh
@@ -1409,7 +1424,9 @@ def draw_callback_px(context: bpy.types.Context):
                              text_color = yellow_color
                         # <<< END MODIFIED >>>
 
-                        draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color)
+                        # <<< MODIFICATION: Pass apply_offset=True (default) >>>
+                        draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color) # Default apply_offset is True
+                        # <<< END MODIFICATION >>>
 
     # --- Cross-Part Node ID Drawing ---
     if ui_props.toggle_node_ids_text and all_nodes_cache:
@@ -1479,7 +1496,9 @@ def draw_callback_px(context: bpy.types.Context):
                     text_color = cross_part_color
                     if node_id in highlighted_nodes: # Check if it's also highlighted by text editor click (use set)
                         text_color = highlighted_cross_part_color # Use the brighter highlight color
-                    draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color)
+                    # <<< MODIFICATION: Pass apply_offset=True (default) >>>
+                    draw_text_with_outline(font_id, node_id, pos_text[0], pos_text[1], text_color) # Default apply_offset is True
+                    # <<< END MODIFICATION >>>
 
 
     # --- Tooltip Positioning & Drawing --- <<< MODIFIED >>>
@@ -1505,7 +1524,9 @@ def draw_callback_px(context: bpy.types.Context):
             if line_num is not None:
                 beam_line_y = padding_y + beam_params_height
                 beam_line_height_offset = line_height + line_padding
-                draw_text_with_outline(font_id, f"Line: {line_num}", bottom_left_x, beam_line_y, ui_props.line_tooltip_color) # Use shared color
+                # <<< MODIFICATION: Pass apply_offset=False >>>
+                draw_text_with_outline(font_id, f"Line: {line_num}", bottom_left_x, beam_line_y, ui_props.line_tooltip_color, apply_offset=False)
+                # <<< END MODIFICATION >>>
 
         if ui_props.toggle_params_tooltip and jb_globals._selected_beam_params_info is not None: # Use shared toggle
             params_list = jb_globals._selected_beam_params_info.get('params_list')
@@ -1514,9 +1535,11 @@ def draw_callback_px(context: bpy.types.Context):
                 start_y = padding_y + (len(params_list) - 1) * (line_height + line_padding)
                 for i, (key, value_repr) in enumerate(params_list):
                     current_y = start_y - (i * (line_height + line_padding)); key_text = f"{key}: "
-                    draw_text_with_outline(font_id, key_text, bottom_left_x, current_y, name_color)
+                    # <<< MODIFICATION: Pass apply_offset=False >>>
+                    draw_text_with_outline(font_id, key_text, bottom_left_x, current_y, name_color, apply_offset=False)
                     key_width = lblfDims(font_id, key_text)[0]; value_x = bottom_left_x + key_width
-                    draw_text_with_outline(font_id, value_repr, value_x, current_y, value_color)
+                    draw_text_with_outline(font_id, value_repr, value_x, current_y, value_color, apply_offset=False)
+                    # <<< END MODIFICATION >>>
 
         # --- Node Tooltips ---
         node_params_height = 0; node_line_height_offset = 0
@@ -1530,7 +1553,9 @@ def draw_callback_px(context: bpy.types.Context):
             if line_num is not None:
                 node_line_y = padding_y + total_beam_tooltip_height + node_params_height
                 node_line_height_offset = line_height + line_padding
-                draw_text_with_outline(font_id, f"Line: {line_num}", bottom_left_x, node_line_y, ui_props.line_tooltip_color) # Use shared color
+                # <<< MODIFICATION: Pass apply_offset=False >>>
+                draw_text_with_outline(font_id, f"Line: {line_num}", bottom_left_x, node_line_y, ui_props.line_tooltip_color, apply_offset=False)
+                # <<< END MODIFICATION >>>
 
         if ui_props.toggle_params_tooltip and jb_globals._selected_node_params_info is not None: # Use shared toggle
             params_list = jb_globals._selected_node_params_info.get('params_list')
@@ -1539,9 +1564,11 @@ def draw_callback_px(context: bpy.types.Context):
                 start_y = padding_y + total_beam_tooltip_height + (len(params_list) - 1) * (line_height + line_padding)
                 for i, (key, value_repr) in enumerate(params_list):
                     current_y = start_y - (i * (line_height + line_padding)); key_text = f"{key}: "
-                    draw_text_with_outline(font_id, key_text, bottom_left_x, current_y, name_color)
+                    # <<< MODIFICATION: Pass apply_offset=False >>>
+                    draw_text_with_outline(font_id, key_text, bottom_left_x, current_y, name_color, apply_offset=False)
                     key_width = lblfDims(font_id, key_text)[0]; value_x = bottom_left_x + key_width
-                    draw_text_with_outline(font_id, value_repr, value_x, current_y, value_color)
+                    draw_text_with_outline(font_id, value_repr, value_x, current_y, value_color, apply_offset=False)
+                    # <<< END MODIFICATION >>>
     # --- End Tooltip Positioning & Drawing ---
 
     # Final cleanup

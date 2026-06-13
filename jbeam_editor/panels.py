@@ -406,15 +406,67 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
         layout = self.layout
 
         if obj_data.get(constants.MESH_JBEAM_PART) is not None:
-            box = layout.box()
+            # --- Node Creation (Collapsible Box - Moved Up) --- <<< MODIFIED SECTION >>>
+            node_naming_box = layout.box() # Create a box specifically for this section
+            row = node_naming_box.row(align=True)
+            row.prop(ui_props, "show_new_node_naming_panel",
+                     icon="TRIA_DOWN" if ui_props.show_new_node_naming_panel else "TRIA_RIGHT",
+                     icon_only=True, emboss=False)
+            row.label(text="New Node Naming") # Use the property name as the label
+
+            if ui_props.show_new_node_naming_panel:
+                node_naming_col = node_naming_box.column(align=True) # Use the box's column
+
+                # <<< ADDED: Toggle for the feature >>>
+                node_naming_col.prop(ui_props, 'use_node_naming_prefixes')
+                node_naming_col.separator()
+                # <<< END ADDED >>>
+
+                # <<< ADDED LABEL HERE >>>
+                # Disable prefix/suffix settings if the feature is toggled off
+                prefix_row = node_naming_col.row(align=True)
+                prefix_row.enabled = ui_props.use_node_naming_prefixes
+                prefix_row.label(text="Prefix/Suffix:")
+                # <<< END ADDED LABEL >>>
+
+                row = node_naming_col.row(align=True)
+                row.enabled = ui_props.use_node_naming_prefixes # Disable if toggle off
+                split = row.split(factor=0.5) # Adjust factor (0.0 to 1.0) for label width
+                split.label(text="Left Side:") # Put label in the left split # <<< MODIFIED LABEL >>>
+                split.prop(ui_props, 'new_node_prefix_left', text="") # Input box in the right split, no text needed here
+
+                row = node_naming_col.row(align=True)
+                row.enabled = ui_props.use_node_naming_prefixes # Disable if toggle off
+                split = row.split(factor=0.5)
+                split.label(text="Center:") # <<< MODIFIED LABEL >>>
+                split.prop(ui_props, 'new_node_prefix_middle', text="")
+
+                row = node_naming_col.row(align=True)
+                row.enabled = ui_props.use_node_naming_prefixes # Disable if toggle off
+                split = row.split(factor=0.5)
+                split.label(text="Right Side:") # <<< MODIFIED LABEL >>>
+                split.prop(ui_props, 'new_node_prefix_right', text="")
+
+                row = node_naming_col.row() # New row for position label
+                row.enabled = ui_props.use_node_naming_prefixes # Disable if toggle off
+                row.alignment = 'CENTER'
+                row.label(text="Position:") # <<< MODIFIED LABEL >>>
+                row = node_naming_col.row(align=True) # New row for position buttons
+                row.enabled = ui_props.use_node_naming_prefixes # Disable if toggle off
+                row.prop(ui_props, 'new_node_prefix_position', expand=True)
+            # --- End Node Creation ---
+
+            box = layout.box() # box for the Affect Node References
             col = box.column(align=True)
-            # Keep settings panel enabled even if editing is disabled,
-            # but specific features might depend on editing state internally.
-            # col.enabled = editing_enabled # Removed this line
 
-            col.label(text="General:")
+            # col.label(text="General:") # <<< REMOVED General Label >>>
+            col.prop(ui_props, 'affect_node_references', text="Affect Node References")
 
-            # --- Tooltips Section --- <<< MODIFIED >>>
+            # --- Main Settings Box (Remaining Settings) ---
+            box = layout.box() # Original box for the rest
+            col = box.column(align=True)
+
+            # --- Tooltips Section ---
             tooltips_box = col.box()
             row = tooltips_box.row(align=True)
             row.prop(ui_props, "show_tooltips_panel",
@@ -443,72 +495,17 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
                 split.prop(ui_props, 'params_value_tooltip_color', text="Value")
             # --- End Tooltips Section ---
 
-            # --- Master Visualization Toggle --- <<< ADDED >>>
-            col.separator() # Separator before the master toggle
-            col.prop(ui_props, 'toggle_master_vis') # Add the master toggle here
-            col.separator() # Separator after the master toggle
-
-            # --- Beam Visualization (Collapsible) ---
-            beam_vis_box = col.box()
-            row = beam_vis_box.row(align=True)
-            row.prop(ui_props, "show_beam_visualization_panel",
-                     icon="TRIA_DOWN" if ui_props.show_beam_visualization_panel else "TRIA_RIGHT",
-                     icon_only=True, emboss=False)
-            row.label(text="Beam Visualization")
-
-            if ui_props.show_beam_visualization_panel:
-                # The update function handles enabling/disabling based on master toggle
-                # No changes needed inside this 'if' block for the master toggle itself
-                beam_vis_col = beam_vis_box.column(align=True)
-
-                beam_vis_col.prop(ui_props, 'toggle_beams_vis')
-                row = beam_vis_col.row(); row.enabled = ui_props.toggle_beams_vis
-                row.prop(ui_props, 'beam_color')
-                beam_vis_col.prop(ui_props, 'beam_width')
-
-                beam_vis_col.prop(ui_props, 'toggle_anisotropic_beams_vis')
-                row = beam_vis_col.row(); row.enabled = ui_props.toggle_anisotropic_beams_vis
-                row.prop(ui_props, 'anisotropic_beam_color')
-                beam_vis_col.prop(ui_props, 'anisotropic_beam_width')
-
-                beam_vis_col.prop(ui_props, 'toggle_support_beams_vis')
-                row = beam_vis_col.row(); row.enabled = ui_props.toggle_support_beams_vis
-                row.prop(ui_props, 'support_beam_color')
-                beam_vis_col.prop(ui_props, 'support_beam_width')
-
-                beam_vis_col.prop(ui_props, 'toggle_hydro_beams_vis')
-                row = beam_vis_col.row(); row.enabled = ui_props.toggle_hydro_beams_vis
-                row.prop(ui_props, 'hydro_beam_color')
-                beam_vis_col.prop(ui_props, 'hydro_beam_width')
-
-                beam_vis_col.prop(ui_props, 'toggle_bounded_beams_vis')
-                row = beam_vis_col.row(); row.enabled = ui_props.toggle_bounded_beams_vis
-                row.prop(ui_props, 'bounded_beam_color')
-                beam_vis_col.prop(ui_props, 'bounded_beam_width')
-
-                beam_vis_col.prop(ui_props, 'toggle_lbeam_beams_vis')
-                row = beam_vis_col.row(); row.enabled = ui_props.toggle_lbeam_beams_vis
-                row.prop(ui_props, 'lbeam_beam_color')
-                beam_vis_col.prop(ui_props, 'lbeam_beam_width')
-
-                beam_vis_col.prop(ui_props, 'toggle_pressured_beams_vis')
-                row = beam_vis_col.row(); row.enabled = ui_props.toggle_pressured_beams_vis
-                row.prop(ui_props, 'pressured_beam_color')
-                beam_vis_col.prop(ui_props, 'pressured_beam_width')
-
-            col.separator() # Separator after Beam Visualization
+            col.separator()
 
             # --- Other General Settings ---
-            col.prop(ui_props, 'affect_node_references', text="Affect Node References")
             col.prop(ui_props, 'highlight_element_on_click', text="3D Highlight from Text")
-            # Add the highlight thickness property
             row = col.row()
             row.enabled = ui_props.highlight_element_on_click # Enable only if highlighting is on
             row.prop(ui_props, 'highlight_thickness_multiplier', text="Highlight Thickness")
 
             # --- Node Visualization ---
             col.separator()
-            col.label(text="Node Visualization:")
+        #    col.label(text="Node ID Texts:")
             col.prop(ui_props, 'toggle_node_ids_text', text="Show Node IDs Text")
             row = col.row()
             row.enabled = ui_props.toggle_node_ids_text
@@ -516,29 +513,118 @@ class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):
             row = col.row()
             row.enabled = ui_props.toggle_node_ids_text
             row.prop(ui_props, 'node_id_outline_size', text="Outline Size")
+            # <<< ADDED UI ELEMENT >>>
+            row = col.row()
+            row.enabled = ui_props.toggle_node_ids_text
+            row.prop(ui_props, 'node_id_text_offset', text="Text Offset")
+            # <<< END ADDED UI ELEMENT >>>
 
-            # --- Cross-Part Beam Visualization ---
-            col.separator()
-            col.label(text="Cross-Part Beam Visualization:")
-            col.prop(ui_props, 'toggle_cross_part_beams_vis')
-            row = col.row(); row.enabled = ui_props.toggle_cross_part_beams_vis
-            row.prop(ui_props, 'cross_part_beam_color')
-            col.prop(ui_props, 'cross_part_beam_width')
+            # <<< START: New 3D Lines Panel >>>
+            col.separator() # Separator before the new panel
+            line_vis_box = col.box()
+            row = line_vis_box.row(align=True)
+            row.prop(ui_props, "show_line_visualizations_panel",
+                     icon="TRIA_DOWN" if ui_props.show_line_visualizations_panel else "TRIA_RIGHT",
+                     icon_only=True, emboss=False)
+            row.label(text="3D Lines") # Use the property name
 
-            # --- Torsionbar Visualization ---
-            col.separator()
-            col.label(text="Torsionbar Visualization:")
-            col.prop(ui_props, 'toggle_torsionbars_vis')
-            row = col.row(); row.enabled = ui_props.toggle_torsionbars_vis
-            row.prop(ui_props, 'torsionbar_color')
-            row = col.row(); row.enabled = ui_props.toggle_torsionbars_vis
-            row.prop(ui_props, 'torsionbar_mid_color')
-            col.prop(ui_props, 'torsionbar_width')
+            if ui_props.show_line_visualizations_panel:
+                line_vis_col = line_vis_box.column(align=True) # Use the box's column
 
-            # --- Rail Visualization ---
-            col.separator()
-            col.label(text="Rail Visualization:")
-            col.prop(ui_props, 'toggle_rails_vis')
-            row = col.row(); row.enabled = ui_props.toggle_rails_vis
-            row.prop(ui_props, 'rail_color')
-            col.prop(ui_props, 'rail_width')
+                # --- Master Visualization Toggle --- <<< MOVED HERE >>>
+                line_vis_col.prop(ui_props, 'toggle_master_vis')
+                line_vis_col.separator()
+
+                # --- Beam Visualization (Collapsible) --- <<< MOVED HERE >>>
+                beam_vis_box = line_vis_col.box() # Make it a sub-box
+                row = beam_vis_box.row(align=True)
+                row.prop(ui_props, "show_beam_visualization_panel",
+                         icon="TRIA_DOWN" if ui_props.show_beam_visualization_panel else "TRIA_RIGHT",
+                         icon_only=True, emboss=False)
+                row.label(text="Beam Visualization")
+
+                if ui_props.show_beam_visualization_panel:
+                    beam_vis_col = beam_vis_box.column(align=True)
+
+                    beam_vis_col.prop(ui_props, 'toggle_beams_vis')
+                    row = beam_vis_col.row(); row.enabled = ui_props.toggle_beams_vis
+                    row.prop(ui_props, 'beam_color')
+                    beam_vis_col.prop(ui_props, 'beam_width')
+
+                    beam_vis_col.prop(ui_props, 'toggle_anisotropic_beams_vis')
+                    row = beam_vis_col.row(); row.enabled = ui_props.toggle_anisotropic_beams_vis
+                    row.prop(ui_props, 'anisotropic_beam_color')
+                    beam_vis_col.prop(ui_props, 'anisotropic_beam_width')
+
+                    beam_vis_col.prop(ui_props, 'toggle_support_beams_vis')
+                    row = beam_vis_col.row(); row.enabled = ui_props.toggle_support_beams_vis
+                    row.prop(ui_props, 'support_beam_color')
+                    beam_vis_col.prop(ui_props, 'support_beam_width')
+
+                    beam_vis_col.prop(ui_props, 'toggle_hydro_beams_vis')
+                    row = beam_vis_col.row(); row.enabled = ui_props.toggle_hydro_beams_vis
+                    row.prop(ui_props, 'hydro_beam_color')
+                    beam_vis_col.prop(ui_props, 'hydro_beam_width')
+
+                    beam_vis_col.prop(ui_props, 'toggle_bounded_beams_vis')
+                    row = beam_vis_col.row(); row.enabled = ui_props.toggle_bounded_beams_vis
+                    row.prop(ui_props, 'bounded_beam_color')
+                    beam_vis_col.prop(ui_props, 'bounded_beam_width')
+
+                    beam_vis_col.prop(ui_props, 'toggle_lbeam_beams_vis')
+                    row = beam_vis_col.row(); row.enabled = ui_props.toggle_lbeam_beams_vis
+                    row.prop(ui_props, 'lbeam_beam_color')
+                    beam_vis_col.prop(ui_props, 'lbeam_beam_width')
+
+                    beam_vis_col.prop(ui_props, 'toggle_pressured_beams_vis')
+                    row = beam_vis_col.row(); row.enabled = ui_props.toggle_pressured_beams_vis
+                    row.prop(ui_props, 'pressured_beam_color')
+                    beam_vis_col.prop(ui_props, 'pressured_beam_width')
+                # --- End Beam Visualization ---
+
+                # --- Cross-Part Beam Visualization --- <<< MOVED HERE >>>
+                line_vis_col.separator()
+            #    line_vis_col.label(text="Cross-Part Beam Visualization:")
+                line_vis_col.prop(ui_props, 'toggle_cross_part_beams_vis')
+                row = line_vis_col.row(); row.enabled = ui_props.toggle_cross_part_beams_vis
+                row.prop(ui_props, 'cross_part_beam_color')
+                line_vis_col.prop(ui_props, 'cross_part_beam_width')
+
+                # --- Torsionbar Visualization --- <<< MOVED HERE >>>
+                line_vis_col.separator()
+            #    line_vis_col.label(text="Torsionbar Visualization:")
+                line_vis_col.prop(ui_props, 'toggle_torsionbars_vis')
+                row = line_vis_col.row(); row.enabled = ui_props.toggle_torsionbars_vis
+                row.prop(ui_props, 'torsionbar_color')
+                row = line_vis_col.row(); row.enabled = ui_props.toggle_torsionbars_vis
+                row.prop(ui_props, 'torsionbar_mid_color')
+                line_vis_col.prop(ui_props, 'torsionbar_width')
+
+                # --- Rail Visualization --- <<< MOVED HERE >>>
+                line_vis_col.separator()
+            #    line_vis_col.label(text="Rail Visualization:")
+                line_vis_col.prop(ui_props, 'toggle_rails_vis')
+                row = line_vis_col.row(); row.enabled = ui_props.toggle_rails_vis
+                row.prop(ui_props, 'rail_color')
+                line_vis_col.prop(ui_props, 'rail_width')
+            # <<< END: New Line Visualizations Panel >>>
+
+            # --- Beam Visualization (Collapsible) --- <<< REMOVED FROM HERE >>>
+            # col.separator() # Separator before Beam Visualization
+            # beam_vis_box = col.box()
+            # ... (rest of beam vis box) ...
+
+            # --- Cross-Part Beam Visualization --- <<< REMOVED FROM HERE >>>
+            # col.separator()
+            # col.label(text="Cross-Part Beam Visualization:")
+            # ... (rest of cross-part vis) ...
+
+            # --- Torsionbar Visualization --- <<< REMOVED FROM HERE >>>
+            # col.separator()
+            # col.label(text="Torsionbar Visualization:")
+            # ... (rest of torsionbar vis) ...
+
+            # --- Rail Visualization --- <<< REMOVED FROM HERE >>>
+            # col.separator()
+            # col.label(text="Rail Visualization:")
+            # ... (rest of rail vis) ...
