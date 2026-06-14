@@ -7,7 +7,7 @@ import sys
 try:
     from typing.io import TextIO # Blender 4.5 (Python 3.11): TextIO is in typing.io
 except ImportError:
-    from typing import TextIO # Blender 5.3+ (Python 3.13+): TextIO is in typing
+    from typing import TextIO # Blender 5.0+ (Python 3.13+): typing.io removed, TextIO is in typing
 from antlr4.BufferedTokenStream import TokenStream
 from antlr4.CommonTokenFactory import TokenFactory
 from antlr4.error.ErrorStrategy import DefaultErrorStrategy
