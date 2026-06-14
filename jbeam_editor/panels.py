@@ -117,8 +117,11 @@ class JBEAM_EDITOR_PT_jbeam_panel(bpy.types.Panel):
 
             # --- ADDED: Button to open Text Editor ---
             row = layout.row()
+            row.prop(ui_props, 'text_editor_split_side', text="")
+            row = layout.row()
             row.scale_y = 1.2 # Make button slightly bigger
-            row.operator(JBEAM_EDITOR_OT_open_text_editor_split.bl_idname, text=" Open JBeam File (Split View)", icon='TEXT')
+            op = row.operator(JBEAM_EDITOR_OT_open_text_editor_split.bl_idname, text=" Open JBeam File (Split View)", icon='TEXT')
+            op.split_side = ui_props.text_editor_split_side
             layout.separator() # Add separator after the button
             # --- END ADDED ---
 

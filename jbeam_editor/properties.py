@@ -844,6 +844,18 @@ class UIProperties(bpy.types.PropertyGroup):
         default='BOTTOM_LEFT',
     )
 
+    text_editor_split_side: bpy.props.EnumProperty(
+        name="Text Editor Position",
+        description="Where to place the Text Editor when splitting the viewport",
+        items=[
+            ('LEFT', "Left", "Open the Text Editor on the left side"),
+            ('RIGHT', "Right", "Open the Text Editor on the right side"),
+            ('TOP', "Top", "Open the Text Editor on the top"),
+            ('BOTTOM', "Bottom", "Open the Text Editor on the bottom"),
+        ],
+        default='LEFT',
+    )
+
     # <<< NEW PROPERTY >>>
     tooltip_padding_x: bpy.props.IntProperty(
         name="Horizontal Padding",

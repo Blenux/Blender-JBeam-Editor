@@ -647,7 +647,19 @@ class JBEAM_EDITOR_OT_open_text_editor_split(bpy.types.Operator):
     """Splits the 3D Viewport and opens a Text Editor with the current JBeam file, or focuses an existing one."""
     bl_idname = "jbeam_editor.open_text_editor_split"
     bl_label = "Open Text Editor Split"
-    bl_description = "Splits the 3D Viewport vertically and opens a Text Editor with the object's JBeam file, or focuses an existing editor if open" # <<< Updated description
+    bl_description = "Splits the 3D Viewport and opens a Text Editor with the object's JBeam file, or focuses an existing editor if open"
+
+    split_side: bpy.props.EnumProperty(
+        name="Split Position",
+        description="Where to place the Text Editor",
+        items=[
+            ('LEFT', "Left", "Place Text Editor on the left"),
+            ('RIGHT', "Right", "Place Text Editor on the right"),
+            ('TOP', "Top", "Place Text Editor on the top"),
+            ('BOTTOM', "Bottom", "Place Text Editor on the bottom"),
+        ],
+        default='RIGHT',
+    )
 
     @classmethod
     def poll(cls, context):
@@ -696,11 +708,12 @@ class JBEAM_EDITOR_OT_open_text_editor_split(bpy.types.Operator):
 
         # --- Proceed with splitting if no existing editor found ---
         try:
-            # Split the current 3D View area vertically
+            # Split the current 3D View area based on preference
+            split_direction = 'VERTICAL' if self.split_side in ('LEFT', 'RIGHT') else 'HORIZONTAL'
             with context.temp_override(area=current_area):
-                bpy.ops.screen.area_split(direction='VERTICAL', factor=0.5)
+                bpy.ops.screen.area_split(direction=split_direction, factor=0.5)
 
-            # Find the newly created area (heuristic remains the same)
+            # Find the newly created area
             new_area = None
             for area in context.screen.areas:
                 is_adjacent = (abs(area.x - current_area.x) < 2 or
@@ -721,12 +734,45 @@ class JBEAM_EDITOR_OT_open_text_editor_split(bpy.types.Operator):
                  self.report({'ERROR'}, "Could not identify the newly split area.")
                  return {'CANCELLED'}
 
-            # Change the new area's type to Text Editor
-            new_area.type = 'TEXT_EDITOR'
+            # Place editors according to split_side preference
+            if self.split_side in ('LEFT', 'RIGHT'):
+                # Vertical split: determine left vs right by x position
+                if current_area.x < new_area.x:
+                    left_area = current_area
+                    right_area = new_area
+                else:
+                    left_area = new_area
+                    right_area = current_area
 
-            # Load the JBeam file into the new Text Editor
-            if new_area.spaces.active:
-                new_area.spaces.active.text = target_text_obj
+                if self.split_side == 'LEFT':
+                    left_area.type = 'TEXT_EDITOR'
+                    right_area.type = 'VIEW_3D'
+                    text_editor_area = left_area
+                else:
+                    left_area.type = 'VIEW_3D'
+                    right_area.type = 'TEXT_EDITOR'
+                    text_editor_area = right_area
+            else:
+                # Horizontal split: determine top vs bottom by top edge (y + height)
+                if current_area.y + current_area.height > new_area.y + new_area.height:
+                    top_area = current_area
+                    bottom_area = new_area
+                else:
+                    top_area = new_area
+                    bottom_area = current_area
+
+                if self.split_side == 'TOP':
+                    top_area.type = 'TEXT_EDITOR'
+                    bottom_area.type = 'VIEW_3D'
+                    text_editor_area = top_area
+                else:
+                    top_area.type = 'VIEW_3D'
+                    bottom_area.type = 'TEXT_EDITOR'
+                    text_editor_area = bottom_area
+
+            # Load the JBeam file into the Text Editor
+            if text_editor_area.spaces.active:
+                text_editor_area.spaces.active.text = target_text_obj
             else:
                  self.report({'WARNING'}, "Newly created Text Editor space is invalid.")
 
