@@ -3,7 +3,11 @@
 # Use of this file is governed by the BSD 3-clause license that
 # can be found in the LICENSE.txt file in the project root.
 import sys
-from typing.io import TextIO
+
+try:
+    from typing.io import TextIO # Blender 4.5 (Python 3.11): TextIO is in typing.io
+except ImportError:
+    from typing import TextIO # Blender 5.3+ (Python 3.13+): TextIO is in typing
 from antlr4.BufferedTokenStream import TokenStream
 from antlr4.CommonTokenFactory import TokenFactory
 from antlr4.error.ErrorStrategy import DefaultErrorStrategy

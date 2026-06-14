@@ -1,7 +1,11 @@
 # Generated from Lua.g4 by ANTLR 4.7.1
 from antlr4 import *
 from io import StringIO
-from typing.io import TextIO
+
+try:
+    from typing.io import TextIO # Blender 4.5 (Python 3.11): TextIO is in typing.io
+except ImportError:
+    from typing import TextIO # Blender 5.3+ (Python 3.13+): TextIO is in typing
 import sys
 
 
