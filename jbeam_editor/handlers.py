@@ -410,7 +410,6 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
             new_vert_count = len(bm.verts); new_edge_count = len(bm.edges); new_face_count = len(bm.faces)
 
             current_selected_indices = set()
-            newly_selected_vert_index = -1
             num_currently_selected = 0
             newly_selected_vert_indices = []
 
@@ -419,26 +418,9 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
                 if v.select:
                     current_selected_indices.add(v.index)
                     num_currently_selected += 1
-                    if v.index not in jb_globals.previous_selected_indices:
-                        if newly_selected_vert_index == -1: newly_selected_vert_index = v.index
-                        else: newly_selected_vert_index = -2
+                    if not reimporting_jbeam and v.index not in jb_globals.previous_selected_indices:
                         newly_selected_vert_indices.append(v.index)
 
-            if jb_globals.batch_node_renaming_enabled and newly_selected_vert_index >= 0:
-                try:
-                    vert_to_rename = bm.verts[newly_selected_vert_index]
-                    new_node_id: str = ui_props.batch_node_renaming_naming_scheme
-                    if '#' in new_node_id:
-                        new_node_id = new_node_id.replace('#', f'{ui_props.batch_node_renaming_node_idx}')
-                        vert_to_rename[node_id_layer] = bytes(new_node_id, 'utf-8')
-                        ui_props.batch_node_renaming_node_idx += 1
-                        jb_globals._force_do_export = True
-                        # Ensure batch renaming respects the local "Rename All References" toggle
-                        jb_globals._use_local_rename_toggle_for_next_export = True
-                    else:
-                         print(f"Warning: Batch rename scheme '{ui_props.batch_node_renaming_naming_scheme}' does not contain '#'. No rename performed.")
-                except IndexError: print(f"Error: Could not find vertex with index {newly_selected_vert_index} for renaming.")
-                except Exception as rename_err: print(f"Error during batch renaming: {rename_err}")
             if jb_globals.batch_node_renaming_enabled and newly_selected_vert_indices:
                 jb_globals._force_do_export = True
                 jb_globals._use_local_rename_toggle_for_next_export = True

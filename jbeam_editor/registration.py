@@ -44,11 +44,13 @@ from .operators import (
     JBEAM_EDITOR_OT_reload_jbeam_from_disk, # <<< ADDED: Import new operator
     JBEAM_EDITOR_OT_confirm_text_deletion, # <<< ADDED: Import new operator
     JBEAM_EDITOR_OT_delete_all_unused_texts, # <<< ADDED: Import new operator
+    JBEAM_EDITOR_OT_batch_edit_properties, # <<< ADDED: Import batch edit operator
     JBEAM_EDITOR_OT_toggle_pc_filter, # <<< ADDED: Import filter operators
     JBEAM_EDITOR_OT_clear_pc_filters, # <<< ADDED: Import filter operators
     JBEAM_EDITOR_OT_import_folder, # <<< ADDED: Import new folder import operator
     JBEAM_EDITOR_OT_reload_pc_file, # <<< ADDED: Import new PC reload operator
     JBEAM_EDITOR_OT_external_file_changed_dialog, # <<< ADDED
+    JBEAM_EDITOR_OT_recalculate_normals_outside, # <<< ADDED
 )
 from .panels import (
     JBEAM_EDITOR_PT_transform_panel_ext,
@@ -56,6 +58,7 @@ from .panels import (
     JBEAM_EDITOR_PT_find_node,
     JBEAM_EDITOR_PT_jbeam_properties_panel,
     JBEAM_EDITOR_PT_batch_node_renaming,
+    JBEAM_EDITOR_PT_batch_edit, # <<< ADDED: Import new panel
     JBEAM_EDITOR_PT_jbeam_settings,
     # <<< REMOVE PANEL IMPORTS >>>
     # JBEAM_EDITOR_PT_node_visualization,
@@ -94,6 +97,7 @@ classes = (
     JBEAM_EDITOR_OT_batch_node_renaming,
     JBEAM_EDITOR_OT_find_node,
     JBEAM_EDITOR_OT_scroll_to_definition,
+    JBEAM_EDITOR_OT_batch_edit_properties, # <<< ADDED
     JBEAM_EDITOR_OT_open_text_editor_split,
     JBEAM_EDITOR_OT_confirm_node_deletion,
     JBEAM_EDITOR_OT_connect_selected_nodes, # <<< ADDED: Add new operator to registration list
@@ -109,11 +113,13 @@ classes = (
     JBEAM_EDITOR_OT_import_folder, # <<< ADDED: Add new folder import operator
     JBEAM_EDITOR_OT_reload_pc_file, # <<< ADDED: Add new PC reload operator
     JBEAM_EDITOR_OT_external_file_changed_dialog, # <<< ADDED
+    JBEAM_EDITOR_OT_recalculate_normals_outside, # <<< ADDED
     JBEAM_EDITOR_PT_transform_panel_ext,
     JBEAM_EDITOR_PT_jbeam_panel,
     JBEAM_EDITOR_PT_find_node,
     JBEAM_EDITOR_PT_jbeam_properties_panel,
     JBEAM_EDITOR_PT_batch_node_renaming,
+    JBEAM_EDITOR_PT_batch_edit, # <<< ADDED
     JBEAM_EDITOR_PT_jbeam_settings,
     # <<< REMOVE PANELS FROM LIST >>>
     # JBEAM_EDITOR_PT_node_visualization,

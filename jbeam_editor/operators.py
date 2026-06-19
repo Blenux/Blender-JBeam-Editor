@@ -1653,3 +1653,411 @@ class JBEAM_EDITOR_OT_external_file_changed_dialog(bpy.types.Operator):
             return {'CANCELLED'}
         return {'FINISHED'}
 # <<< END ADDED >>>
+
+# <<< ADDED: Recalculate JBeam normals outside >>>
+class JBEAM_EDITOR_OT_recalculate_normals_outside(bpy.types.Operator):
+    """Recalculates the normal orientation of selected JBeam faces to point outwards, updating flip flags for export."""
+    bl_idname = "jbeam_editor.recalculate_normals_outside"
+    bl_label = "Recalculate Outside"
+    bl_description = "Recalculate normal orientation for selected triangles/quads to face outside and sync with JBeam"
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        if not obj or obj.mode != 'EDIT' or not obj.data:
+            return False
+        # Only allow if editing an active, enabled JBeam object
+        return (obj.data.get(constants.MESH_JBEAM_PART) is not None and
+                obj.data.get(constants.MESH_EDITING_ENABLED, False))
+
+    def execute(self, context):
+        obj = context.active_object
+        obj_data = obj.data
+        bm = bmesh.from_edit_mesh(obj_data)
+        face_flip_flag_layer = bm.faces.layers.int.get(constants.FL_FACE_FLIP_FLAG)
+        
+        if face_flip_flag_layer is None:
+            self.report({'ERROR'}, "JBeam face layers not found on mesh.")
+            return {'CANCELLED'}
+
+        # Filter for selected JBeam triangles/quads (index > 0)
+        face_idx_layer = bm.faces.layers.int.get(constants.FL_FACE_IDX)
+        selected_faces = [f for f in bm.faces if f.select and face_idx_layer and f[face_idx_layer] != 0]
+        
+        if not selected_faces:
+            self.report({'WARNING'}, "No JBeam faces selected.")
+            return {'CANCELLED'}
+
+        # Store initial winding orders to detect flips
+        bm.verts.ensure_lookup_table()
+        initial_windings = {f.index: [v.index for v in f.verts] for f in selected_faces}
+
+        # Execute Blender's BMesh normals recalculation
+        try:
+            bmesh.ops.recalc_face_normals(bm, faces=selected_faces)
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to recalculate normals: {e}")
+            return {'CANCELLED'}
+
+        # Compare winding after operation to see if Blender reversed the loop
+        flipped_count = 0
+        for f in selected_faces:
+            old_winding = initial_windings.get(f.index)
+            new_winding = [v.index for v in f.verts]
+            
+            if old_winding and new_winding:
+                is_flipped = False
+                # Check if new_winding is a cyclic shift or a reversal (flip)
+                # For 3 or 4 verts, if it's not a cyclic shift, it's a flip.
+                if len(old_winding) == 3:
+                    if new_winding != old_winding and \
+                       new_winding != [old_winding[1], old_winding[2], old_winding[0]] and \
+                       new_winding != [old_winding[2], old_winding[0], old_winding[1]]:
+                        is_flipped = True
+                elif len(old_winding) == 4:
+                    if new_winding != old_winding and \
+                       new_winding != [old_winding[1], old_winding[2], old_winding[3], old_winding[0]] and \
+                       new_winding != [old_winding[2], old_winding[3], old_winding[0], old_winding[1]] and \
+                       new_winding != [old_winding[3], old_winding[0], old_winding[1], old_winding[2]]:
+                        is_flipped = True
+                
+                if is_flipped:
+                    # Toggle the flip flag to keep JBeam sync
+                    f[face_flip_flag_layer] = 1 - f[face_flip_flag_layer]
+                    flipped_count += 1
+
+        bmesh.update_edit_mesh(obj_data)
+        # Trigger auto-export
+        jb_globals._force_do_export = True
+        
+        self.report({'INFO'}, f"Recalculated normals. {flipped_count} faces were updated in JBeam.")
+        return {'FINISHED'}
+# <<< END ADDED >>>
+
+# --- START ADDED: Batch Property Edit Operator ---
+
+def _create_val_nodes(val):
+    """Helper to create appropriate AST nodes for a value."""
+    from .sjsonast import ASTNode
+    if isinstance(val, bool):
+        return [ASTNode('bool', val)]
+    if isinstance(val, (int, float)):
+        return [ASTNode('number', val, precision=utils.get_float_precision(val))]
+    # String or Expression
+    return [ASTNode('"', str(val))]
+
+def _update_entry_ast(ast_nodes, entry_start_idx, entry_end_idx, header, param, val_nodes):
+    """Updates or inserts a parameter in a JBeam entry (array) in the AST."""
+    from .sjsonast import ASTNode
+    
+    # 1. Check if parameter is in the header
+    param_idx = -1
+    if header and isinstance(header, list):
+        try:
+            param_idx = header.index(param)
+        except ValueError:
+            pass
+
+    if param_idx != -1:
+        curr_idx = 0
+        k = entry_start_idx + 1
+        while k < entry_end_idx:
+            node = ast_nodes[k]
+            if node.data_type not in ('wsc', '[', ']', '{', '}'):
+                if curr_idx == param_idx:
+                    # --- SPECIAL LOGIC FOR 'group' IN HEADER ---
+                    if param == 'group':
+                        new_group_val = val_nodes[0].value if val_nodes and val_nodes[0].data_type == '"' else None
+                        if new_group_val:
+                            if node.data_type == '[':
+                                # It's already a list at this position. Find its end.
+                                val_end_idx = k
+                                val_depth = 1
+                                while val_end_idx + 1 < entry_end_idx and val_depth > 0:
+                                    val_end_idx += 1
+                                    if ast_nodes[val_end_idx].data_type == '[': val_depth += 1
+                                    elif ast_nodes[val_end_idx].data_type == ']': val_depth -= 1
+                                
+                                # Check for duplicates inside the list.
+                                already_exists = False
+                                for check_k in range(k + 1, val_end_idx):
+                                    if ast_nodes[check_k].data_type == '"' and ast_nodes[check_k].value == new_group_val:
+                                        already_exists = True; break
+                                if already_exists: return True
+
+                                # Insert before closing ']'.
+                                prev_sig_idx = val_end_idx - 1
+                                while prev_sig_idx > k and ast_nodes[prev_sig_idx].data_type == 'wsc': prev_sig_idx -= 1
+                                insertion = ([ASTNode('wsc', ', ')] if ast_nodes[prev_sig_idx].data_type != '[' else []) + val_nodes
+                                ast_nodes[val_end_idx:val_end_idx] = insertion
+                                return True
+                            elif node.data_type == '"':
+                                if node.value == new_group_val: return True
+                                # Convert string to list: ["old", "new"]
+                                replacement = [ASTNode('['), node, ASTNode('wsc', ', ')] + val_nodes + [ASTNode(']')]
+                                ast_nodes[k:k+1] = replacement
+                                return True
+                    # --- END SPECIAL LOGIC ---
+                    ast_nodes[k:k+1] = val_nodes
+                    return True
+                curr_idx += 1
+            elif node.data_type in ('[', '{'):
+                depth = 1
+                while depth > 0 and k < entry_end_idx:
+                    k += 1
+                    if ast_nodes[k].data_type in ('[', '{'): depth += 1
+                    elif ast_nodes[k].data_type in (']', '}'): depth -= 1
+                curr_idx += 1
+            k += 1
+
+    # 2. Check for options dictionary at the end
+    dict_end_idx = -1
+    k = entry_end_idx - 1
+    while k > entry_start_idx:
+        if ast_nodes[k].data_type == '}':
+            dict_end_idx = k; break
+        if ast_nodes[k].data_type != 'wsc': break
+        k -= 1
+    
+    if dict_end_idx != -1:
+        dict_start_idx = -1
+        depth = 1
+        temp_k = dict_end_idx - 1
+        while temp_k > entry_start_idx and depth > 0:
+            if ast_nodes[temp_k].data_type == '}': depth += 1
+            elif ast_nodes[temp_k].data_type == '{': depth -= 1
+            if depth == 0: dict_start_idx = temp_k
+            temp_k -= 1
+            
+        if dict_start_idx != -1:
+            temp_k = dict_start_idx + 1
+            while temp_k < dict_end_idx:
+                node = ast_nodes[temp_k]
+                if node.data_type in ('[', '{'): # Skip nested structures when searching for top-level key
+                    val_depth = 1
+                    while val_depth > 0 and temp_k + 1 < dict_end_idx:
+                        temp_k += 1
+                        if ast_nodes[temp_k].data_type in ('[', '{'): val_depth += 1
+                        elif ast_nodes[temp_k].data_type in (']', '}'): val_depth -= 1
+
+                if node.data_type == '"' and node.value == param:
+                    val_search_k = temp_k + 1
+                    while val_search_k < dict_end_idx:
+                        if ast_nodes[val_search_k].data_type == ':':
+                            val_idx = val_search_k + 1
+                            while val_idx < dict_end_idx and ast_nodes[val_idx].data_type == 'wsc': val_idx += 1
+                            if val_idx < dict_end_idx:
+                                # Find the range of the current value in the AST
+                                val_end_idx = val_idx
+                                if ast_nodes[val_idx].data_type in ('[', '{'):
+                                    val_depth = 1
+                                    while val_end_idx + 1 < dict_end_idx and val_depth > 0:
+                                        val_end_idx += 1
+                                        if ast_nodes[val_end_idx].data_type in ('[', '{'): val_depth += 1
+                                        elif ast_nodes[val_end_idx].data_type in (']', '}'): val_depth -= 1
+
+                                # --- SPECIAL LOGIC FOR 'group' ---
+                                if param == 'group':
+                                    new_group_val = val_nodes[0].value if val_nodes and val_nodes[0].data_type == '"' else None
+                                    if new_group_val:
+                                        existing_val_node = ast_nodes[val_idx]
+                                        if existing_val_node.data_type == '[':
+                                            # It's already a list. Check for duplicates inside the list.
+                                            already_exists = False
+                                            for check_k in range(val_idx + 1, val_end_idx):
+                                                if ast_nodes[check_k].data_type == '"' and ast_nodes[check_k].value == new_group_val:
+                                                    already_exists = True; break
+
+                                            if already_exists: return True # Nothing to do
+
+                                            # Insert before closing ']'. Check if list was empty.
+                                            prev_sig_idx = val_end_idx - 1
+                                            while prev_sig_idx > val_idx and ast_nodes[prev_sig_idx].data_type == 'wsc':
+                                                prev_sig_idx -= 1
+
+                                            if ast_nodes[prev_sig_idx].data_type != '[':
+                                                insertion = [ASTNode('wsc', ', ')] + val_nodes
+                                            else:
+                                                insertion = val_nodes # First element
+
+                                            ast_nodes[val_end_idx:val_end_idx] = insertion
+                                            return True
+                                        elif existing_val_node.data_type == '"':
+                                            if existing_val_node.value == new_group_val: return True
+                                            # Convert string to list: ["old", "new"]
+                                            replacement = [ASTNode('['), existing_val_node, ASTNode('wsc', ', ')] + val_nodes + [ASTNode(']')]
+                                            ast_nodes[val_idx:val_idx+1] = replacement
+                                            return True
+                                # --- END SPECIAL LOGIC ---
+
+                                # Replace the entire existing value range
+                                ast_nodes[val_idx:val_end_idx+1] = val_nodes
+                                return True
+                        val_search_k += 1
+                temp_k += 1
+            
+            insertion_nodes = [ASTNode('wsc', ', '), ASTNode('"', param), ASTNode(':')] + val_nodes
+            ast_nodes[dict_end_idx:dict_end_idx] = insertion_nodes
+            return True
+
+    insertion_nodes = [ASTNode('wsc', ', '), ASTNode('{'), ASTNode('"', param), ASTNode(':')] + val_nodes + [ASTNode('}')]
+    ast_nodes[entry_end_idx:entry_end_idx] = insertion_nodes
+    return True
+
+class JBEAM_EDITOR_OT_batch_edit_properties(bpy.types.Operator):
+    """Sets a JBeam parameter for all selected elements of the chosen type."""
+    bl_idname = "jbeam_editor.batch_edit_properties"
+    bl_label = "Apply to Selected"
+    bl_description = "Updates or adds the specified parameter and value to all selected elements in the JBeam files"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None
+
+    def execute(self, context):
+        from .sjsonast import parse as sjsonast_parse, stringify_nodes as sjsonast_stringify_nodes, calculate_char_positions
+        from .export_jbeam import get_part_in_ast_nodes
+        
+        ui_props = context.scene.ui_properties
+        target_type = ui_props.batch_edit_apply_to
+        param_name = ui_props.batch_edit_param_name.strip()
+        param_value_str = ui_props.batch_edit_param_value.strip()
+        
+        if not param_name:
+            self.report({'WARNING'}, "Please enter a parameter name."); return {'CANCELLED'}
+
+        obj = context.active_object
+        jbeam_filepath = obj.data.get(constants.MESH_JBEAM_FILE_PATH)
+        part_name = obj.data.get(constants.MESH_JBEAM_PART)
+        
+        if not jbeam_filepath or not part_name:
+            self.report({'ERROR'}, "Active object is not a valid JBeam part."); return {'CANCELLED'}
+
+        target_ids = set()
+        section_name = ""
+        
+        if target_type == 'NODES':
+            if not jb_globals.selected_nodes: self.report({'WARNING'}, "No nodes selected."); return {'CANCELLED'}
+            target_ids = {node_id for _, node_id in jb_globals.selected_nodes}
+            section_name = 'nodes'
+        elif target_type == 'BEAMS':
+            if not jb_globals.selected_beams: self.report({'WARNING'}, "No beams selected."); return {'CANCELLED'}
+            bm = bmesh.from_edit_mesh(obj.data)
+            bm.edges.ensure_lookup_table()
+            init_node_id_layer = bm.verts.layers.string.get(constants.VL_INIT_NODE_ID)
+            for edge_idx, _ in jb_globals.selected_beams:
+                e = bm.edges[edge_idx]
+                id1 = e.verts[0][init_node_id_layer].decode('utf-8')
+                id2 = e.verts[1][init_node_id_layer].decode('utf-8')
+                target_ids.add(tuple(sorted((id1, id2))))
+            section_name = 'beams'
+
+        parsed_val = None
+        try:
+            if '.' in param_value_str or 'e' in param_value_str.lower(): parsed_val = float(param_value_str)
+            else: parsed_val = int(param_value_str)
+        except ValueError:
+            if param_value_str.lower() == 'true': parsed_val = True
+            elif param_value_str.lower() == 'false': parsed_val = False
+            else: parsed_val = param_value_str
+            
+        val_nodes = _create_val_nodes(parsed_val)
+        file_content = text_editor.read_int_file(jbeam_filepath)
+        if not file_content: return {'CANCELLED'}
+        
+        ast_data = sjsonast_parse(file_content)
+        if not ast_data: return {'CANCELLED'}
+        ast_nodes = ast_data['ast']['nodes']
+        calculate_char_positions(ast_nodes)
+        
+        part_start, part_end = get_part_in_ast_nodes(ast_nodes, part_name)
+        if part_start == -1: return {'CANCELLED'}
+        
+        section_start, section_end = -1, -1
+        k = part_start + 1
+        while k < part_end:
+            node = ast_nodes[k]
+            if node.data_type == '"' and node.value == section_name:
+                while k < part_end and ast_nodes[k].data_type != '[': k += 1
+                if k < part_end:
+                    section_start = k
+                    depth = 1
+                    while k < part_end and depth > 0:
+                        k += 1
+                        if ast_nodes[k].data_type == '[': depth += 1
+                        elif ast_nodes[k].data_type == ']': depth -= 1
+                    section_end = k; break
+            k += 1
+        
+        if section_start == -1: return {'CANCELLED'}
+        
+        header = []
+        k = section_start + 1
+        while k < section_end:
+            if ast_nodes[k].data_type == '[':
+                temp_k = k + 1
+                while temp_k < section_end and ast_nodes[temp_k].data_type != ']':
+                    if ast_nodes[temp_k].data_type == '"': header.append(ast_nodes[temp_k].value)
+                    temp_k += 1
+                break
+            k += 1
+        
+        id_col = header.index('id') if 'id' in header else 0
+        id1_col = header.index('id1:') if 'id1:' in header else 0
+        id2_col = header.index('id2:') if 'id2:' in header else 1
+
+        updated_count = 0
+        k = section_start + 1
+        while k < section_end:
+            if ast_nodes[k].data_type == '[':
+                row_start = k
+                # Find the true end of the row, accounting for nested brackets (e.g. group lists)
+                row_end = k
+                row_depth = 1
+                while row_end + 1 < section_end and row_depth > 0:
+                    row_end += 1
+                    if ast_nodes[row_end].data_type == '[': row_depth += 1
+                    elif ast_nodes[row_end].data_type == ']': row_depth -= 1
+
+                row_ids = []
+                temp_k = row_start + 1
+                while temp_k < row_end:
+                    node = ast_nodes[temp_k]
+                    if node.data_type == '"':
+                        row_ids.append(node.value)
+                    elif node.data_type in ('[', '{'): 
+                        # Skip nested structures (like group lists or options dicts) when parsing IDs
+                        inner_depth = 1
+                        while inner_depth > 0 and temp_k + 1 < row_end:
+                            temp_k += 1
+                            if ast_nodes[temp_k].data_type in ('[', '{'): inner_depth += 1
+                            elif ast_nodes[temp_k].data_type in (']', '}'): inner_depth -= 1
+                    temp_k += 1
+                
+                match = False
+                if target_type == 'NODES' and len(row_ids) > id_col:
+                    if row_ids[id_col] in target_ids: match = True
+                elif target_type == 'BEAMS' and len(row_ids) > max(id1_col, id2_col):
+                    if tuple(sorted((row_ids[id1_col], row_ids[id2_col]))) in target_ids: match = True
+                
+                if match:
+                    if _update_entry_ast(ast_nodes, row_start, row_end, header, param_name, val_nodes):
+                        updated_count += 1
+                k = row_end
+            k += 1
+            
+        if updated_count > 0:
+            new_content = sjsonast_stringify_nodes(ast_nodes)
+            text_editor.write_int_file(jbeam_filepath, new_content)
+            # Trigger reimport of the modified file and refresh visualization data
+            text_editor.check_int_files_for_changes(context, [jbeam_filepath], reimport=True, regenerate_mesh=False)
+            refresh_curr_vdata(True)
+
+            self.report({'INFO'}, f"Batch Edit: Updated {updated_count} {target_type.lower()} in '{part_name}'.")
+        else:
+            self.report({'INFO'}, "Batch Edit: No matching entries found.")
+
+        return {'FINISHED'}
+# <<< END ADDED: Batch Property Edit Operator ---

@@ -529,6 +529,52 @@ def get_available_node_groups(self, context):
     return items
 # <<< END ADDED >>>
 
+# <<< ADDED: Update function for batch edit parameter list >>>
+def _update_batch_edit_param_list(self, context):
+    """Updates the manual parameter name field when a selection is made from the dropdown."""
+    if self.batch_edit_param_list != 'CUSTOM':
+        self.batch_edit_param_name = self.batch_edit_param_list
+
+# <<< ADDED: Callback and update for filtered batch edit params >>>
+def get_batch_edit_params(self, context):
+    """Dynamically generates the parameter list based on the target element type."""
+    items = [('CUSTOM', "Custom...", "Enter a custom parameter name in the box below")]
+    
+    if self.batch_edit_apply_to == 'NODES':
+        items.extend([
+            ('nodeWeight', "nodeWeight", "Node weight (kg)"),
+            ('group', "group", "Group assignment"),
+            ('collision', "collision", "Collision toggle (true/false)"),
+            ('selfCollision', "selfCollision", "Self-collision toggle (true/false)"),
+            ('frictionCoef', "frictionCoef", "Friction coefficient"),
+            ('nodeMaterial', "nodeMaterial", "Node material type"),
+            ('staticCollision', "staticCollision", "Static collision toggle"),
+        ])
+    elif self.batch_edit_apply_to == 'BEAMS':
+        items.extend([
+            ('beamSpring', "beamSpring", "Beam stiffness"),
+            ('beamDamp', "beamDamp", "Beam damping"),
+            ('beamDeform', "beamDeform", "Deformation threshold"),
+            ('beamStrength', "beamStrength", "Break strength"),
+            ('beamType', "beamType", "Beam behavior type"),
+            ('beamLimitSpring', "beamLimitSpring", "Limit stiffness"),
+            ('beamLimitDamp', "beamLimitDamp", "Limit damping"),
+            ('beamPrecompression', "beamPrecompression", "Initial compression/tension"),
+            ('dampCutoffHz', "dampCutoffHz", "Damping cutoff frequency"),
+            ('deformationTriggerRatio', "deformationTriggerRatio", "Ratio to trigger deformation events"),
+            ('breakGroup', "breakGroup", "Group of beams that break together"),
+            ('deformGroup', "deformGroup", "Group of beams that deform together"),
+        ])
+        
+    return items
+
+def _update_batch_edit_apply_to(self, context):
+    """Resets the parameter selection when the 'Apply To' category changes."""
+    if self.batch_edit_apply_to == 'NODES':
+        self.batch_edit_param_list = 'nodeWeight'
+    elif self.batch_edit_apply_to == 'BEAMS':
+        self.batch_edit_param_list = 'beamSpring'
+
 # <<< ADDED: PropertyGroup for Node Weight Variable Selection >>>
 class NodeWeightVariableItem(bpy.types.PropertyGroup):
     # The actual JBeam variable name, e.g., "$varX"
@@ -1369,3 +1415,32 @@ class UIProperties(bpy.types.PropertyGroup):
         default='BACK',
     )
     # --- End Node Creation Prefixes ---
+
+    # --- Batch Property Edit ---
+    batch_edit_apply_to: bpy.props.EnumProperty(
+        name="Apply To",
+        description="Target elements for batch editing",
+        items=[
+            ('NODES', "Nodes", "Apply to selected nodes"),
+            ('BEAMS', "Beams", "Apply to selected beams"),
+        ],
+        default='NODES',
+        update=_update_batch_edit_apply_to
+    )
+    batch_edit_param_list: bpy.props.EnumProperty(
+        name="Common Parameters",
+        description="Select a commonly used JBeam parameter to edit",
+        items=get_batch_edit_params,
+        default=1,
+        update=_update_batch_edit_param_list
+    )
+    batch_edit_param_name: bpy.props.StringProperty(
+        name="Parameter",
+        description="JBeam parameter name (e.g., nodeWeight, beamSpring, beamDamp)",
+        default="nodeWeight"
+    )
+    batch_edit_param_value: bpy.props.StringProperty(
+        name="Value",
+        description="Value to set (can be a number, string, or expression)",
+        default="1.0"
+    )

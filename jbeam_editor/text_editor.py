@@ -128,7 +128,7 @@ def write_int_file(filepath: str, text: str):
     if SCENE_PREV_TEXTS not in scene:
         scene[SCENE_PREV_TEXTS] = {}
     if internal_name not in scene[SCENE_PREV_TEXTS]:
-        scene[SCENE_PREV_TEXTS][internal_name] = None
+        scene[SCENE_PREV_TEXTS][internal_name] = text
 
     #check_files_for_changes(context)
 
