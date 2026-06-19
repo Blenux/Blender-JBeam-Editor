@@ -23,10 +23,10 @@ import bpy
 import hashlib
 import re
 
-from . import constants
+from .core import constants
 from . import import_vehicle
 from . import import_jbeam
-from . import utils
+from .core import utils
 
 SCENE_PREV_TEXTS = 'jbeam_editor_text_editor_files_text'
 #SCENE_FULL_TO_SHORT_FILENAME = 'jbeam_editor_text_editor_full_to_short_filename'

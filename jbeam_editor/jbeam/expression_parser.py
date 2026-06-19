@@ -26,11 +26,11 @@ import sys
 
 from functools import partial
 
-from ..utils import lua_truthiness, to_float_str, is_number
+from ..core.utils import lua_truthiness, to_float_str, is_number
 
-from ..antlr4 import InputStream
-from ..antlr4.Token import CommonToken
-from ..luaparser.parser.LuaLexer import LuaLexer
+from ..vendor.antlr4 import InputStream
+from ..vendor.antlr4.Token import CommonToken
+from ..parsers.luaparser.parser.LuaLexer import LuaLexer
 
 _var_wrapper_re = re.compile(r'\$([a-zA-Z_0-9]*)')
 _standalone_equal_re = re.compile(r'[^<>!=]=[^=]')

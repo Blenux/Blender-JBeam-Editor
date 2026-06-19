@@ -26,9 +26,9 @@ import bpy
 
 import bmesh
 
-from . import constants
-from .sjsonast import ASTNode, parse as sjsonast_parse, stringify_nodes as sjsonast_stringify_nodes
-from .utils import Metadata, is_number, to_c_float, to_float_str, get_float_precision
+from .core import constants
+from .parsers.sjsonast import ASTNode, parse as sjsonast_parse, stringify_nodes as sjsonast_stringify_nodes
+from .core.utils import Metadata, is_number, to_c_float, to_float_str, get_float_precision
 from . import text_editor
 
 from .jbeam import io as jbeam_io
@@ -1145,6 +1145,12 @@ def update_ast_nodes(ast_nodes: list, current_jbeam_file_data: dict, current_jbe
         i += 1
 
 
+def _read_jbeam_file(filepath: str, reimporting: bool):
+    if reimporting:
+        return text_editor.read_int_file(filepath)
+    return text_editor.write_from_ext_to_int_file(filepath)
+
+
 def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, blender_nodes: dict, parts_nodes_actions: dict, affect_node_references: bool, parts_to_update: set):
     reimport_needed = False
 
@@ -1152,8 +1158,8 @@ def export_file(jbeam_filepath: str, parts: list[bpy.types.Object], data: dict, 
     if jbeam_file_str is None:
         print(f"File doesn't exist! {jbeam_filepath}", file=sys.stderr)
         return reimport_needed
-    jbeam_file_data, cached_changed = jbeam_io.get_jbeam(jbeam_filepath, True, False)
-    jbeam_file_data_modified, cached_changed = jbeam_io.get_jbeam(jbeam_filepath, True, False)
+    jbeam_file_data, cached_changed = jbeam_io.get_jbeam(jbeam_filepath, True, False, _read_jbeam_file)
+    jbeam_file_data_modified, cached_changed = jbeam_io.get_jbeam(jbeam_filepath, True, False, _read_jbeam_file)
     if jbeam_file_data is None or jbeam_file_data_modified is None:
         return reimport_needed
 

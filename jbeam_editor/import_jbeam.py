@@ -31,8 +31,8 @@ from bpy_extras.io_utils import ImportHelper
 from bpy.props import StringProperty, BoolProperty
 from bpy.types import Operator
 
-from . import constants
-from . import utils
+from .core import constants
+from .core import utils
 from . import text_editor
 
 from .jbeam import io as jbeam_io
@@ -42,6 +42,12 @@ from .jbeam import node_beam as jbeam_node_beam
 _jbeam_file_path = None
 _jbeam_file_data = None
 _jbeam_part_choices = None
+
+
+def _read_jbeam_file(filepath: str, reimporting: bool):
+    if reimporting:
+        return text_editor.read_int_file(filepath)
+    return text_editor.write_from_ext_to_int_file(filepath)
 
 
 def get_vertices_edges_faces(vdata: dict):
@@ -241,7 +247,7 @@ def reimport_jbeam(context: bpy.types.Context, jbeam_objects: bpy.types.Collecti
     obj_data: bpy.types.Mesh = obj.data
     try:
         # Reimport object
-        jbeam_file_data, cached_changed = jbeam_io.get_jbeam(jbeam_file_path, True, True)
+        jbeam_file_data, cached_changed = jbeam_io.get_jbeam(jbeam_file_path, True, True, _read_jbeam_file)
         if jbeam_file_data is None:
             raise Exception('Failed to load/parse JBeam file.')
 
@@ -411,7 +417,7 @@ class JBEAM_EDITOR_OT_import_jbeam(Operator, ImportHelper):
         global _jbeam_part_choices
 
         _jbeam_file_path = Path(self.filepath).as_posix()
-        _jbeam_file_data, cached_changed = jbeam_io.get_jbeam(_jbeam_file_path, False, True)
+        _jbeam_file_data, cached_changed = jbeam_io.get_jbeam(_jbeam_file_path, False, True, _read_jbeam_file)
 
         if _jbeam_file_data is None:
             utils.show_message_box('ERROR', 'Import JBeam', 'ERROR importing JBeam. Check the "System Console" for details.')

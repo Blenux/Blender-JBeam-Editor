@@ -18,32 +18,28 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-bl_info = {
-    "name": "Blender JBeam Editor",
-    "description": "Modify BeamNG JBeam files in a 3D editor!",
-    "author": "BeamNG, Blenux, Tomsteel",
-    "version": (0, 2, 5),
-    "blender": (4, 2, 0),
-    "location": "File > Import > JBeam File / File > Export > JBeam File",
-    "warning": "",
-    "doc_url": "https://github.com/BeamNG/Blender-JBeam-Editor/blob/vehicle_importer/docs/user/user_docs.md",
-    "tracker_url": "https://github.com/BeamNG/Blender-JBeam-Editor/issues",
-    "support": "COMMUNITY",
-    "category": "Development",
-}
+import bpy
 
-from . import registration
+from .. import state
+from ..operators.nodes import JBEAM_EDITOR_OT_batch_node_renaming
 
 
-def register():
-    registration.register()
+class JBEAM_EDITOR_PT_batch_node_renaming(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'JBeam'
+    bl_label = 'Batch Node Renaming'
 
+    def draw(self, context):
+        scene = context.scene
+        ui_props = scene.ui_properties
+        layout = self.layout
 
-def unregister():
-    registration.unregister()
+        box = layout.box()
+        col = box.column()
+        col.row().label(text='Naming Scheme')
+        col.prop(ui_props, 'batch_node_renaming_naming_scheme', text = "")
+        col.prop(ui_props, 'batch_node_renaming_node_idx', text = "Node Index")
 
-
-# This allows you to run the script directly from Blender's Text editor
-# to test the add-on without having to install it.
-if __name__ == "__main__":
-    register()
+        operator_text = 'Stop' if state.batch_node_renaming_enabled else 'Start'
+        col.operator(JBEAM_EDITOR_OT_batch_node_renaming.bl_idname, text=operator_text)

@@ -26,7 +26,7 @@ import bpy
 import numpy as np
 
 from . import constants
-from . import bng_sjson
+from ..parsers import bng_sjson
 
 ignore_sections = {'maxIDs': True, 'options': True}
 

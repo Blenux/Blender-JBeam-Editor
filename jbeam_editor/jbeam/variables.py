@@ -24,7 +24,7 @@ import sys
 
 from .expression_parser import parse_safe as expr_parse_safe
 from .table_schema import process_table_with_schema_destructive
-from ..utils import fast_deepcopy, row_dict_deepcopy, ipairs, clamp, Metadata
+from ..core.utils import fast_deepcopy, row_dict_deepcopy, ipairs, clamp, Metadata
 
 var_re = re_compile(r'(.*)\.(.*)')
 

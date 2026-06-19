@@ -33,8 +33,8 @@ from bpy_extras.io_utils import ImportHelper
 from bpy.props import StringProperty
 from bpy.types import Operator
 
-from . import constants
-from . import utils
+from .core import constants
+from .core import utils
 from . import text_editor
 
 from .jbeam import io as jbeam_io
@@ -46,11 +46,17 @@ from .jbeam import node_beam as jbeam_node_beam
 import timeit
 
 
+def _read_jbeam_file(filepath: str, reimporting: bool):
+    if reimporting:
+        return text_editor.read_int_file(filepath)
+    return text_editor.write_from_ext_to_int_file(filepath)
+
+
 def load_vehicle(vehicle_directories: list[str], vehicle_config: dict, model_name: str, reimporting_files_changed: dict | None):
     """load all the jbeam and construct the thing in memory"""
     print('Reading JBeam files...')
     t0 = timeit.default_timer()
-    jbeam_parsing_errors, io_ctx = jbeam_io.start_loading(vehicle_directories, vehicle_config, reimporting_files_changed)
+    jbeam_parsing_errors, io_ctx = jbeam_io.start_loading(vehicle_directories, vehicle_config, reimporting_files_changed, _read_jbeam_file)
     t1 = timeit.default_timer()
     print('Done reading JBeam files. Time =', round(t1 - t0, 2), 's')
     print('Model name:', model_name)

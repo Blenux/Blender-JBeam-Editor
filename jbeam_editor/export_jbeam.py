@@ -29,11 +29,11 @@ from bpy.types import Operator
 
 import bmesh
 
-from . import constants
-from . import utils
+from .core import constants
+from .core import utils
 from . import export_utils
 from . import text_editor
-from . import sjsonast
+from .parsers import sjsonast
 
 import timeit
 

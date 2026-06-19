@@ -21,7 +21,7 @@
 import sys
 
 from .io import get_part
-from ..utils import row_dict_deepcopy, ipairs, dict_array_size
+from ..core.utils import row_dict_deepcopy, ipairs, dict_array_size
 
 
 def unify_parts(target: dict[str, dict|list], source: dict[str, dict|list], level: int, slot_options: dict, part_path: str, slot: dict):

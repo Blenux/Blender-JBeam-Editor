@@ -24,8 +24,7 @@ import sys
 
 from . import table_schema as jbeam_table_schema
 
-from ..utils import fast_deepcopy, sjson_decode, ipairs
-from .. import text_editor
+from ..core.utils import fast_deepcopy, sjson_decode, ipairs
 
 jbeam_cache = {}
 dir_to_files_map: dict[str, list] = {}
@@ -100,11 +99,11 @@ def process_slots_destructive(part: dict, source_filename: str):
 
 
 # Returns res, cache_changed
-def load_jbeam(filepath: str, reimporting: bool, invalidate_cache: bool):
+def load_jbeam(filepath: str, reimporting: bool, invalidate_cache: bool, read_file_fn=None):
     if not reimporting or filepath not in jbeam_cache or invalidate_cache:
         # if parts is not None:
         #     # As optimization, only read file and check if file text contains part name before parsing it with SJSON parser
-        #     file_text = text_editor.write_from_ext_to_int_file(filepath)
+        #     file_text = read_file_fn(filepath, False)
         #     if file_text is None:
         #         print(f'Cannot read file: {filepath}', file=sys.stderr)
         #         return None
@@ -115,10 +114,15 @@ def load_jbeam(filepath: str, reimporting: bool, invalidate_cache: bool):
         #     file_content = utils.sjson_decode(file_text, filepath)
         # else:
         file_text = None
-        if reimporting:
-            file_text = text_editor.read_int_file(filepath)
+        if read_file_fn is not None:
+            file_text = read_file_fn(filepath, reimporting)
         else:
-            file_text = text_editor.write_from_ext_to_int_file(filepath)
+            # Fallback to direct file read when no Blender text editor is available
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    file_text = f.read()
+            except Exception:
+                file_text = None
 
         if file_text is None:
             print(f'Cannot read file: {filepath}', file=sys.stderr)
@@ -140,8 +144,8 @@ def load_jbeam(filepath: str, reimporting: bool, invalidate_cache: bool):
     return True, False
 
 
-def get_jbeam(filepath: str, reimporting: bool, invalidate_cache: bool):
-    res, cache_changed = load_jbeam(filepath, reimporting, invalidate_cache)
+def get_jbeam(filepath: str, reimporting: bool, invalidate_cache: bool, read_file_fn=None):
+    res, cache_changed = load_jbeam(filepath, reimporting, invalidate_cache, read_file_fn)
     if res:
         return fast_deepcopy(jbeam_cache[filepath]), cache_changed
     return None, cache_changed
@@ -182,7 +186,7 @@ def add_jbeam_metadata_to_cache(directory: str, filepath: str):
             dir_slot_to_part_map[directory][part['slotType']].append(part_name)
 
 
-def start_loading(directories: list[str], vehicle_config: dict, reimporting_files_changed: dict | None):
+def start_loading(directories: list[str], vehicle_config: dict, reimporting_files_changed: dict | None, read_file_fn=None):
     # slots_to_part: dict = vehicle_config['parts']
     # parts = list(filter(lambda part: part != '', slots_to_part.values()))
     # parts = ['"' + part + '"' for part in slots_to_part.values() if part != '']
@@ -196,7 +200,7 @@ def start_loading(directories: list[str], vehicle_config: dict, reimporting_file
         invalidate_cache = False
         for filepath in filepaths:
             file_changed = filepath in reimporting_files_changed if is_reimporting else False
-            res, cache_changed = load_jbeam(filepath, is_reimporting, file_changed)
+            res, cache_changed = load_jbeam(filepath, is_reimporting, file_changed, read_file_fn)
             if cache_changed:
                 invalidate_cache_for_file(filepath)
                 invalidate_cache = True
@@ -208,19 +212,20 @@ def start_loading(directories: list[str], vehicle_config: dict, reimporting_file
             for filepath in filepaths:
                 add_jbeam_metadata_to_cache(directory, filepath)
 
-    return jbeam_parsing_errors, {'dirs': directories}
+    return jbeam_parsing_errors, {'dirs': directories, 'read_file_fn': read_file_fn}
 
 
 def get_part(io_ctx: dict, part_name: str | None):
     if part_name is None:
         return None, None
 
+    read_file_fn = io_ctx.get('read_file_fn')
     for directory in io_ctx['dirs']:
         part_to_file_map = dir_part_to_file_map.get(directory)
         if part_to_file_map is not None:
             jbeam_filename = part_to_file_map.get(part_name)
             if jbeam_filename is not None:
-                content, cache_changed = get_jbeam(jbeam_filename, True, False)
+                content, cache_changed = get_jbeam(jbeam_filename, True, False, read_file_fn)
                 if content is not None:
                     return content[part_name], jbeam_filename
 

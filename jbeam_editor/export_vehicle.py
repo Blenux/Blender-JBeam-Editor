@@ -26,7 +26,7 @@ import bpy
 
 import bmesh
 
-from . import constants
+from .core import constants
 from . import text_editor
 from . import export_utils
 
