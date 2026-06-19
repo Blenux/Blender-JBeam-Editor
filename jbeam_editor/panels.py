@@ -37,12 +37,14 @@ from .operators import ( # Import operators used in panels
     JBEAM_EDITOR_OT_open_text_editor_split,
     JBEAM_EDITOR_OT_reload_jbeam_from_disk, # <<< ADDED: Import new operator
     JBEAM_EDITOR_OT_delete_all_unused_texts, # <<< ADDED: Import new operator
+    JBEAM_EDITOR_OT_batch_edit_properties, # <<< ADDED: Import batch edit operator
     JBEAM_EDITOR_OT_toggle_pc_filter, # <<< ADDED: Import filter operators
     JBEAM_EDITOR_OT_connect_selected_nodes, # <<< ADDED: Import new operator
     JBEAM_EDITOR_OT_open_file_in_editor, # <<< ADDED: Import new operator
     JBEAM_EDITOR_OT_reload_pc_file, # <<< ADDED: Import PC reload operator
     JBEAM_EDITOR_OT_save_pc_file_to_disk, # <<< ADDED: Import PC save operator
     JBEAM_EDITOR_OT_clear_pc_filters, # <<< ADDED: Import filter operators
+    JBEAM_EDITOR_OT_recalculate_normals_outside, # <<< ADDED: Import new operator
 )
 from .drawing import resolve_jbeam_variable_value, utils # <<< MODIFIED: Import utils
 
@@ -172,7 +174,10 @@ class JBEAM_EDITOR_PT_jbeam_panel(bpy.types.Panel):
                 col.row().operator(JBEAM_EDITOR_OT_connect_selected_nodes.bl_idname, text="Connect All Selected Nodes")
 
             if len_selected_faces > 0:
-                col.row().operator(JBEAM_EDITOR_OT_flip_jbeam_faces.bl_idname)
+                row = col.row(align=True)
+                row.operator(JBEAM_EDITOR_OT_flip_jbeam_faces.bl_idname)
+                # Add the new recalculate button next to manual flip
+                row.operator(JBEAM_EDITOR_OT_recalculate_normals_outside.bl_idname, text="Recalc Outside")
 
             # --- ADDED: Documentation Button ---
             layout.separator() # Add separator before the button
@@ -386,6 +391,48 @@ class JBEAM_EDITOR_PT_batch_node_renaming(bpy.types.Panel):
 
         operator_text = 'Stop' if jb_globals.batch_node_renaming_enabled else 'Start'
         col.operator(JBEAM_EDITOR_OT_batch_node_renaming.bl_idname, text=operator_text)
+
+
+class JBEAM_EDITOR_PT_batch_edit(bpy.types.Panel):
+    """Panel for batch editing parameters of selected JBeam elements."""
+    bl_parent_id = "JBEAM_EDITOR_PT_jbeam_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'JBeam'
+    bl_label = 'Batch Property Edit'
+    bl_icon = 'OUTLINER_DATA_FONT'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and obj.data and obj.data.get(constants.MESH_JBEAM_PART) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        ui_props = scene.ui_properties
+        obj = context.active_object
+        
+        editing_enabled = obj and obj.data and obj.data.get(constants.MESH_EDITING_ENABLED, False)
+
+        box = layout.box()
+        col = box.column(align=True)
+        # Only enable in Edit Mode with JBeam editing enabled
+        col.enabled = obj and obj.mode == 'EDIT' and editing_enabled
+
+        col.label(text="Apply to Selection:")
+        col.prop(ui_props, 'batch_edit_apply_to', expand=True)
+        
+        col.separator()
+        
+        col.prop(ui_props, 'batch_edit_param_list', text="Presets")
+        col.prop(ui_props, 'batch_edit_param_name', text="Param")
+        col.prop(ui_props, 'batch_edit_param_value', text="Value")
+        
+        col.separator()
+        
+        col.operator(JBEAM_EDITOR_OT_batch_edit_properties.bl_idname, icon='CHECKMARK')
 
 
 class JBEAM_EDITOR_PT_jbeam_settings(bpy.types.Panel):

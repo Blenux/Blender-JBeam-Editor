@@ -312,10 +312,30 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
 
     if not reimporting_jbeam:
         for update in depsgraph.updates:
-            if update.id.original == active_obj:
-                if update.is_updated_geometry or update.is_updated_transform:
-                    jb_globals._do_export = True
-                    drawing.veh_render_dirty = True # Use drawing module's global
+            # Detect if any JBeam object was updated
+            if isinstance(update.id, bpy.types.Object):
+                updated_obj = update.id
+                if updated_obj.data and updated_obj.data.get(constants.MESH_JBEAM_PART) is not None:
+                    if update.is_updated_geometry or update.is_updated_transform:
+                        jb_globals._do_export = True
+                        drawing.veh_render_dirty = True # Use drawing module's global
+                        break
+            # Detect if any JBeam object (or its mesh) was updated
+            updated_id = update.id
+            is_jbeam_update = False
+            if isinstance(updated_id, bpy.types.Object):
+                if updated_id.data and updated_id.data.get(constants.MESH_JBEAM_PART) is not None:
+                    is_jbeam_update = True
+            elif isinstance(updated_id, bpy.types.Mesh):
+                if updated_id.get(constants.MESH_JBEAM_PART) is not None:
+                    is_jbeam_update = True
+
+            if is_jbeam_update and (update.is_updated_geometry or update.is_updated_transform):
+                jb_globals._do_export = True
+                scene.jbeam_editor_veh_render_dirty = True # Triggers rebuild in drawing.py
+                drawing.veh_render_dirty = True
+                _tag_redraw_3d_views(context) # Force immediate redraw
+                break
 
     veh_model = active_obj_data.get(constants.MESH_VEHICLE_MODEL)
     if veh_model is not None:
@@ -390,7 +410,6 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
             new_vert_count = len(bm.verts); new_edge_count = len(bm.edges); new_face_count = len(bm.faces)
 
             current_selected_indices = set()
-            newly_selected_vert_index = -1
             num_currently_selected = 0
             newly_selected_vert_indices = []
 
@@ -399,26 +418,9 @@ def _depsgraph_callback(context: bpy.types.Context, scene: bpy.types.Scene, deps
                 if v.select:
                     current_selected_indices.add(v.index)
                     num_currently_selected += 1
-                    if v.index not in jb_globals.previous_selected_indices:
-                        if newly_selected_vert_index == -1: newly_selected_vert_index = v.index
-                        else: newly_selected_vert_index = -2
+                    if not reimporting_jbeam and v.index not in jb_globals.previous_selected_indices:
                         newly_selected_vert_indices.append(v.index)
 
-            if jb_globals.batch_node_renaming_enabled and newly_selected_vert_index >= 0:
-                try:
-                    vert_to_rename = bm.verts[newly_selected_vert_index]
-                    new_node_id: str = ui_props.batch_node_renaming_naming_scheme
-                    if '#' in new_node_id:
-                        new_node_id = new_node_id.replace('#', f'{ui_props.batch_node_renaming_node_idx}')
-                        vert_to_rename[node_id_layer] = bytes(new_node_id, 'utf-8')
-                        ui_props.batch_node_renaming_node_idx += 1
-                        jb_globals._force_do_export = True
-                        # Ensure batch renaming respects the local "Rename All References" toggle
-                        jb_globals._use_local_rename_toggle_for_next_export = True
-                    else:
-                         print(f"Warning: Batch rename scheme '{ui_props.batch_node_renaming_naming_scheme}' does not contain '#'. No rename performed.")
-                except IndexError: print(f"Error: Could not find vertex with index {newly_selected_vert_index} for renaming.")
-                except Exception as rename_err: print(f"Error during batch renaming: {rename_err}")
             if jb_globals.batch_node_renaming_enabled and newly_selected_vert_indices:
                 jb_globals._force_do_export = True
                 jb_globals._use_local_rename_toggle_for_next_export = True
@@ -762,7 +764,15 @@ def poll_active_operators_timer():
                     else:
                         veh_model = active_obj_data.get(constants.MESH_VEHICLE_MODEL)
                         if veh_model is not None: export_vehicle.auto_export(active_obj, veh_model)
-                        else: export_jbeam.auto_export(active_obj)
+                        else:
+                            # For single parts in Object Mode, export all selected JBeam objects that were transformed
+                            if active_obj.mode != 'EDIT':
+                                for sel_obj in context.selected_objects:
+                                    if sel_obj.data and sel_obj.data.get(constants.MESH_JBEAM_PART) is not None:
+                                        export_jbeam.auto_export(sel_obj)
+                            else:
+                                export_jbeam.auto_export(active_obj)
+
                         refresh_curr_vdata(True)
                         jb_globals._do_export = False; jb_globals._force_do_export = False
             else:

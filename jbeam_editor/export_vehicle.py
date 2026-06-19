@@ -22,6 +22,7 @@ import base64
 import traceback
 import pickle
 
+from mathutils import Vector
 import bpy
 
 import bmesh
@@ -55,14 +56,41 @@ def export(veh_collection: bpy.types.Collection, active_obj: bpy.types.Object):
         active_obj_data = active_obj.data
         active_jbeam_part = active_obj_data[constants.MESH_JBEAM_PART]
 
-        bm = None
+        blender_nodes = {}
+        parts_nodes_actions = {}
+
+        # If in Edit Mode, we only care about the active object's changes (standard behavior)
         if active_obj.mode == 'EDIT':
             bm = bmesh.from_edit_mesh(active_obj_data)
+            blender_nodes, parts_nodes_actions = export_utils.get_nodes_add_delete_rename(active_obj, bm, active_jbeam_part, init_nodes_data, affect_node_references)
+            # Note: bmesh from edit mesh should not be freed
         else:
-            bm = bmesh.new()
-            bm.from_mesh(active_obj_data)
+            # In Object Mode, multiple objects might have been transformed.
+            # Process all JBeam objects in the collection to ensure their positions are synced to the JBeam files.
+            for obj_iter in veh_collection.all_objects:
+                obj_iter_data = obj_iter.data
+                if obj_iter_data and obj_iter_data.get(constants.MESH_JBEAM_PART) is not None:
+                    part_name = obj_iter_data[constants.MESH_JBEAM_PART]
+                    bm = bmesh.new()
+                    bm.from_mesh(obj_iter_data)
 
-        blender_nodes, parts_nodes_actions = export_utils.get_nodes_add_delete_rename(active_obj, bm, active_jbeam_part, init_nodes_data, affect_node_references)
+                    part_blender_nodes, part_actions_map = export_utils.get_nodes_add_delete_rename(obj_iter, bm, part_name, init_nodes_data, affect_node_references)
+                    blender_nodes.update(part_blender_nodes)
+
+                    # Merge part_actions_map into parts_nodes_actions
+                    for p_key, p_actions in part_actions_map.items():
+                        if p_key not in parts_nodes_actions:
+                            parts_nodes_actions[p_key] = p_actions
+                        else:
+                            dest = parts_nodes_actions[p_key]
+                            dest.nodes_to_add.update(p_actions.nodes_to_add)
+                            dest.nodes_to_delete.update(p_actions.nodes_to_delete)
+                            dest.nodes_to_rename.update(p_actions.nodes_to_rename)
+                            dest.nodes_to_move.update(p_actions.nodes_to_move)
+                            dest.nodes_to_add_symmetrically.update(p_actions.nodes_to_add_symmetrically)
+
+                    bm.free()
+
         parts_to_update = set(parts_nodes_actions.keys())
 
         jbeam_files_to_jbeam_part_objs = {}
@@ -78,8 +106,6 @@ def export(veh_collection: bpy.types.Collection, active_obj: bpy.types.Object):
                 jbeam_files_to_jbeam_parts[jbeam_filepath] = set()
             jbeam_files_to_jbeam_part_objs[jbeam_filepath].append(obj)
             jbeam_files_to_jbeam_parts[jbeam_filepath].add(jbeam_part)
-
-        bm.free()
 
         filepaths = []
         reimport_needed = False
@@ -111,19 +137,23 @@ def export(veh_collection: bpy.types.Collection, active_obj: bpy.types.Object):
                     bm = bmesh.new()
                     bm.from_mesh(obj_data)
 
+                inv_matrix_world = obj.matrix_world.inverted()
+
                 node_id_layer = bm.verts.layers.string[constants.VL_NODE_ID]
                 v: bmesh.types.BMVert
                 for v in bm.verts:
                     node_id = v[node_id_layer].decode('utf-8')
                     if node_id in nodes_to_move:
                         v.co = nodes_to_move[node_id]
+                        v.co = inv_matrix_world @ Vector(nodes_to_move[node_id])
 
                 if obj.mode == 'EDIT':
                     bmesh.update_edit_mesh(obj_data)
                 else:
                     bm.to_mesh(obj_data)
-
-                bm.free()
+                
+                if obj.mode != 'EDIT':
+                    bm.free()
 
         bpy.ops.object.location_clear()
 

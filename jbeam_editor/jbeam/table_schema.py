@@ -88,6 +88,17 @@ typeIds = {
 def replace_special_values(val):
     return val
 
+def _expand_dictionary_lists(d: dict):
+    for k, v in list(d.items()):
+        if isinstance(v, list):
+            new_list = []
+            for item in v:
+                if isinstance(item, dict):
+                    d.update(item)
+                else:
+                    new_list.append(item)
+            d[k] = new_list
+
 memo = {}
 
 def process_table_with_schema_destructive(jbeam_table: list, new_dict: dict, input_options=None):
@@ -132,6 +143,8 @@ def process_table_with_schema_destructive(jbeam_table: list, new_dict: dict, inp
             options_metadata = local_options[Metadata]
             options_metadata.merge(row_metadata)
 
+            _expand_dictionary_lists(row_value)
+
             #local_options.pop(Metadata, None)
             local_options_update(row_value)
 
@@ -173,6 +186,8 @@ def process_table_with_schema_destructive(jbeam_table: list, new_dict: dict, inp
                     for var in [*new_row_metadata._data.keys()]:
                         if isinstance(var, int):
                             new_row_metadata._data[header[var]] = new_row_metadata._data.pop(var)
+
+                    _expand_dictionary_lists(rv)
 
                     new_row_update(rv)
                     new_row[Metadata] = new_row_metadata

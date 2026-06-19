@@ -23,6 +23,7 @@ import pickle
 import traceback
 import sys
 
+from mathutils import Vector
 import bpy
 
 from bpy.types import Operator
@@ -118,7 +119,8 @@ def export_existing_jbeam(obj: bpy.types.Object):
 
         blender_nodes, parts_nodes_actions = export_utils.get_nodes_add_delete_rename(obj, bm, part_name, init_nodes_data, affect_node_references)
         parts_to_update = set(parts_nodes_actions.keys())
-        bm.free()
+        if obj.mode != 'EDIT':
+            bm.free()
 
         reimport_needed = export_utils.export_file(jbeam_filepath, [obj], part_data, blender_nodes, parts_nodes_actions, affect_node_references, parts_to_update)
         text_editor.check_int_files_for_changes(context, [jbeam_filepath], regenerate_mesh=reimport_needed)
@@ -133,21 +135,23 @@ def export_existing_jbeam(obj: bpy.types.Object):
 
             nodes_to_move = parts_nodes_actions[part_name].nodes_to_move
 
+            inv_matrix_world = obj.matrix_world.inverted()
+
             node_id_layer = bm.verts.layers.string[constants.VL_NODE_ID]
             v: bmesh.types.BMVert
             for v in bm.verts:
                 node_id = v[node_id_layer].decode('utf-8')
                 if node_id in nodes_to_move:
                     v.co = nodes_to_move[node_id]
+                    v.co = inv_matrix_world @ Vector(nodes_to_move[node_id])
 
             if obj.mode == 'EDIT':
                 bmesh.update_edit_mesh(obj_data)
             else:
                 bm.to_mesh(obj_data)
 
-            bm.free()
-
-        bpy.ops.object.location_clear()
+            if obj.mode != 'EDIT':
+                bm.free()
 
         t1 = timeit.default_timer()
         print('Exporting/reimporting Time', round(t1 - t0, 2), 's')
