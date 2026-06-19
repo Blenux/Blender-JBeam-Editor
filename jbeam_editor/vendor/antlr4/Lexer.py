@@ -9,7 +9,7 @@
 #  of speed.
 #/
 from io import StringIO
-from typing.io import TextIO
+from typing import TextIO # Blender 4.5 (Python 3.11): TextIO is in typing.io
 import sys
 from antlr4.CommonTokenFactory import CommonTokenFactory
 from antlr4.atn.LexerATNSimulator import LexerATNSimulator
